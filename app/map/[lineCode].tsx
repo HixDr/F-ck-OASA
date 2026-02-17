@@ -15,6 +15,8 @@ import {
   TouchableOpacity,
   ScrollView,
   Alert,
+  Keyboard,
+  Platform,
 } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
@@ -25,7 +27,7 @@ import { useBusLocations, useStops, useRoutes, useMLInfo, useSchedule, useLines 
 import { getStopArrivals, getWalkingRoute, getRoutesForStop, getRouteDetails } from '../../src/api';
 import { isFavorite, addFavorite, removeFavorite, getStamps, addStamp, removeStamp, getToggle, setToggle, getCachedBusPositions, setCachedBusPositions } from '../../src/storage';
 import { useNetworkStatus } from '../../src/network';
-import { fireArrivalAlert } from '../../src/notifications';
+import { startAlertWatch, stopAlertWatch, subscribeAlertConfig, type AlertConfig } from '../../src/notifications';
 import { useSettings } from '../../src/settings';
 import { USER_MARKER_BASE64 } from '../../src/userMarker';
 import { GOOGLE_DARK_STYLE } from '../../src/googleMapStyle';
@@ -147,13 +149,19 @@ export default function LiveMapScreen() {
   const [stampName, setStampName] = useState('');
   const [stampEmoji, setStampEmoji] = useState('📍');
 
-  // Arrival alert state
-  const [arrivalAlert, setArrivalAlert] = useState<{
-    stopCode: string; stopName: string; thresholdMin: number;
-  } | null>(null);
+  // Arrival alert state — synced with global service
+  const [arrivalAlert, setArrivalAlert] = useState<AlertConfig | null>(null);
+  useEffect(() => subscribeAlertConfig(setArrivalAlert), []);
   const [showAlertPicker, setShowAlertPicker] = useState(false);
   const [alertThreshold, setAlertThreshold] = useState('5');
-  const alertFiredRef = useRef(false);
+
+  // Keyboard height tracking — push card above keyboard
+  const [kbHeight, setKbHeight] = useState(0);
+  useEffect(() => {
+    const show = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', (e) => setKbHeight(e.endCoordinates.height));
+    const hide = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () => setKbHeight(0));
+    return () => { show.remove(); hide.remove(); };
+  }, []);
 
   // Schedule
   const { data: mlInfoData } = useMLInfo();
@@ -377,26 +385,6 @@ export default function LiveMapScreen() {
     return () => clearInterval(id);
   }, [selectedStop?.stopCode, lineRouteCodes]);
 
-  // Arrival alert polling — independent of selected stop
-  useEffect(() => {
-    if (!arrivalAlert) return;
-    const { stopCode, stopName, thresholdMin } = arrivalAlert;
-    const check = async () => {
-      try {
-        const arrivals = await getStopArrivals(stopCode);
-        const filtered = (arrivals ?? []).filter((a) => lineRouteCodes.has(a.route_code));
-        const match = filtered.find((a) => Number(a.btime2) <= thresholdMin);
-        if (match) {
-          await fireArrivalAlert(lineId ?? '', stopName, Number(match.btime2));
-          setArrivalAlert(null);
-        }
-      } catch {}
-    };
-    check();
-    const id = setInterval(check, 15_000);
-    return () => clearInterval(id);
-  }, [arrivalAlert, lineRouteCodes, lineId]);
-
   // Long press
   const onMapLongPress = useCallback((e: { nativeEvent: { coordinate: { latitude: number; longitude: number } } }) => {
     setStampName(''); setStampEmoji('📍');
@@ -571,14 +559,13 @@ export default function LiveMapScreen() {
         )}
       </MapView>
 
-      {/* Stop arrivals card */}
       {/* Stop arrivals card + alert pill */}
-      <View style={s.leftStack}>
+      <View style={[s.leftStack, kbHeight > 0 && { bottom: kbHeight + spacing.sm }]}>
         {arrivalAlert && (
           <View style={s.alertPill}>
             <Ionicons name="notifications" size={12} color={colors.warning} />
             <Text style={s.alertPillText}>≤{arrivalAlert.thresholdMin}min</Text>
-            <TouchableOpacity onPress={() => setArrivalAlert(null)} hitSlop={8}>
+            <TouchableOpacity onPress={() => stopAlertWatch()} hitSlop={8}>
               <Ionicons name="close-circle" size={14} color={colors.textMuted} />
             </TouchableOpacity>
           </View>
@@ -590,7 +577,7 @@ export default function LiveMapScreen() {
             <View style={s.arrivalHeaderBtns}>
               <TouchableOpacity onPress={() => {
                 if (arrivalAlert?.stopCode === selectedStop.stopCode) {
-                  setArrivalAlert(null); setShowAlertPicker(false);
+                  stopAlertWatch(); setShowAlertPicker(false);
                 } else {
                   setShowAlertPicker((v) => !v);
                 }
@@ -623,8 +610,13 @@ export default function LiveMapScreen() {
                 onPress={() => {
                   const min = parseInt(alertThreshold, 10);
                   if (!isNaN(min) && min > 0) {
-                    setArrivalAlert({ stopCode: selectedStop.stopCode, stopName: selectedStop.name, thresholdMin: min });
-                    alertFiredRef.current = false;
+                    startAlertWatch({
+                      stopCode: selectedStop.stopCode,
+                      stopName: selectedStop.name,
+                      thresholdMin: min,
+                      lineId: lineId ?? '',
+                      routeCodes: [...lineRouteCodes],
+                    });
                     setShowAlertPicker(false);
                   }
                 }}>

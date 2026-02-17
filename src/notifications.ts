@@ -1,94 +1,215 @@
 /**
- * Local notification service for arrival alerts.
+ * Arrival alert service using an Android foreground service.
  *
- * expo-notifications is not available in Expo Go (SDK 53+).
- * The module is loaded lazily via require() so the app gracefully
- * degrades to an in-app Alert fallback when running in Expo Go.
- *
- * Custom sound: place arrival.mp3 at android/app/src/main/res/raw/arrival.mp3
- * and configure the expo-notifications plugin in app.json with
- * `"sounds": ["./assets/arrival.mp3"]`.
+ * Uses react-native-background-actions to start a persistent foreground
+ * service with a notification. A silent audio loop (expo-av) keeps the
+ * media session alive (foregroundServiceType=mediaPlayback). A polling
+ * loop checks the OASA API every 15s and fires the arrival sound +
+ * vibration + system notification when the threshold is met.
  */
 
-import { Alert as RNAlert } from 'react-native';
+import { Alert as RNAlert, Platform, Vibration } from 'react-native';
+import { Audio } from 'expo-av';
+import * as Notifications from 'expo-notifications';
+import BackgroundService from 'react-native-background-actions';
 
-let _Notifications: typeof import('expo-notifications') | null = null;
+const OASA_BASE = 'http://telematics.oasa.gr/api/';
 
-/** Try to load expo-notifications; returns null in Expo Go. */
-function getNotifications() {
-  if (_Notifications !== null) return _Notifications;
+/* ── Notification setup (expo-notifications for alert popup) ──── */
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: false,
+    shouldSetBadge: false,
+  }),
+});
+
+async function ensureNotificationPermission(): Promise<boolean> {
+  const { status: existing } = await Notifications.getPermissionsAsync();
+  if (existing === 'granted') return true;
+  const { status } = await Notifications.requestPermissionsAsync();
+  return status === 'granted';
+}
+
+async function ensureNotificationChannel(): Promise<void> {
+  if (Platform.OS !== 'android') return;
+  await Notifications.setNotificationChannelAsync('arrival', {
+    name: 'Arrival alerts',
+    importance: Notifications.AndroidImportance.HIGH,
+    vibrationPattern: [0, 80, 60, 120, 60, 160],
+    enableVibrate: true,
+  });
+}
+
+/* ── Types ────────────────────────────────────────────────────── */
+
+export interface AlertConfig {
+  stopCode: string;
+  stopName: string;
+  thresholdMin: number;
+  lineId: string;
+  routeCodes: string[];
+}
+
+/* ── State ────────────────────────────────────────────────────── */
+
+let _alertConfig: AlertConfig | null = null;
+let _onAlertFired: (() => void) | null = null;
+let _hasNotifPermission = false;
+let _silentSound: Audio.Sound | null = null;
+let _alertSound: Audio.Sound | null = null;
+const _subscribers = new Set<(config: AlertConfig | null) => void>();
+
+/** Subscribe to alert config changes. Returns unsubscribe function. */
+export function subscribeAlertConfig(cb: (config: AlertConfig | null) => void): () => void {
+  _subscribers.add(cb);
+  cb(_alertConfig);
+  return () => { _subscribers.delete(cb); };
+}
+
+function notifyConfigChange(): void {
+  _subscribers.forEach(cb => cb(_alertConfig));
+}
+
+/* ── Audio ────────────────────────────────────────────────────── */
+
+async function startSilentLoop(): Promise<void> {
+  await Audio.setAudioModeAsync({
+    staysActiveInBackground: true,
+    playsInSilentModeIOS: true,
+    shouldDuckAndroid: true,
+  });
+  if (_silentSound) return;
+  const { sound } = await Audio.Sound.createAsync(
+    require('../assets/silence.mp3'),
+    { isLooping: true, volume: 0 },
+  );
+  _silentSound = sound;
+  await sound.playAsync();
+}
+
+async function stopSilentLoop(): Promise<void> {
+  if (!_silentSound) return;
+  try { await _silentSound.stopAsync(); await _silentSound.unloadAsync(); } catch {}
+  _silentSound = null;
+}
+
+async function playArrivalSound(): Promise<void> {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    _Notifications = require('expo-notifications') as typeof import('expo-notifications');
-  } catch {
-    _Notifications = null;
+    if (_alertSound) { await _alertSound.unloadAsync(); _alertSound = null; }
+    const { sound } = await Audio.Sound.createAsync(
+      require('../assets/arrival.mp3'),
+      { volume: 1 },
+    );
+    _alertSound = sound;
+    await sound.playAsync();
+    Vibration.vibrate([
+      0, 80, 60, 120, 60, 160,
+      200, 80, 60, 120, 60, 160,
+      200, 80, 60, 120, 60, 160,
+      200, 80, 60, 120, 60, 160,
+    ]);
+  } catch {}
+}
+
+/* ── OASA API ─────────────────────────────────────────────────── */
+
+async function fetchStopArrivals(stopCode: string): Promise<any[]> {
+  const url = `${OASA_BASE}?act=getStopArrivals&p1=${stopCode}`;
+  const res = await fetch(url, { headers: { 'User-Agent': 'FckOASA/1.0' } });
+  if (!res.ok) return [];
+  const data = await res.json();
+  return Array.isArray(data) ? data : [];
+}
+
+/* ── Background task ──────────────────────────────────────────── */
+
+const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms));
+
+/** The task that runs inside the foreground service. */
+async function pollingTask(taskData: any): Promise<void> {
+  // Start silent audio to satisfy mediaPlayback service type
+  await startSilentLoop();
+
+  while (BackgroundService.isRunning()) {
+    if (!_alertConfig) { await sleep(1000); continue; }
+    const { stopCode, stopName, thresholdMin, lineId, routeCodes } = _alertConfig;
+    try {
+      const arrivals = await fetchStopArrivals(stopCode);
+      const routeSet = new Set(routeCodes);
+      const filtered = arrivals.filter((a: any) => routeSet.has(a.route_code));
+      const match = filtered.find((a: any) => Number(a.btime2) <= thresholdMin);
+      if (match) {
+        await playArrivalSound();
+        if (_hasNotifPermission) {
+          await Notifications.scheduleNotificationAsync({
+            content: {
+              title: `🚌 ${lineId} arriving!`,
+              body: `${Number(match.btime2)} min away at ${stopName}`,
+              sound: false,
+              ...(Platform.OS === 'android' ? { channelId: 'arrival' } : {}),
+            },
+            trigger: null,
+          });
+        }
+        RNAlert.alert(
+          `🚌 ${lineId} arriving!`,
+          `${Number(match.btime2)} min away at ${stopName}`,
+        );
+        const cb = _onAlertFired;
+        await stopAlertWatch();
+        cb?.();
+        return;
+      }
+    } catch {}
+    await sleep(15_000);
   }
-  return _Notifications;
 }
 
-let _initialized = false;
+/* ── Public API ───────────────────────────────────────────────── */
 
-/** Request permissions and configure the notification channel. Call once at app start. */
-export async function initNotifications(): Promise<void> {
-  if (_initialized) return;
-  _initialized = true;
-
-  const N = getNotifications();
-  if (!N) return; // Expo Go — skip
-
-  const { status } = await N.requestPermissionsAsync();
-  if (status !== 'granted') return;
-
-  // Android notification channel — high importance for sound + vibration
-  // Channel ID is versioned; Android caches channel settings so a new ID forces fresh config.
-  await N.setNotificationChannelAsync('arrival-alerts-v2', {
-    name: 'Arrival Alerts',
-    importance: N.AndroidImportance.HIGH,
-    vibrationPattern: [
-      0, 80, 60, 120, 60, 160,   // 1-2-3
-      200, 80, 60, 120, 60, 160, // 1-2-3
-      200, 80, 60, 120, 60, 160, // 1-2-3
-      200, 80, 60, 120, 60, 160, // 1-2-3
-    ],
-    sound: 'arrival.mp3',
-  });
-
-  // Show notification banner even when app is foregrounded
-  N.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowAlert: true,
-      shouldShowBanner: true,
-      shouldShowList: true,
-      shouldPlaySound: true,
-      shouldSetBadge: false,
-    }),
-  });
-}
-
-/** Fire an immediate local notification for a bus arrival. */
-export async function fireArrivalAlert(
-  lineId: string,
-  stopName: string,
-  minutes: number,
+/** Start the foreground service and begin polling for arrivals. */
+export async function startAlertWatch(
+  config: AlertConfig,
+  onFired?: () => void,
 ): Promise<void> {
-  const N = getNotifications();
-  if (N) {
-    await N.scheduleNotificationAsync({
-      content: {
-        title: `🚌 ${lineId} arriving!`,
-        body: `${minutes} min away at ${stopName}`,
-        sound: 'arrival.mp3',
-        vibrate: [
-          0, 80, 60, 120, 60, 160,
-          200, 80, 60, 120, 60, 160,
-          200, 80, 60, 120, 60, 160,
-          200, 80, 60, 120, 60, 160,
-        ],
-      },
-      trigger: { channelId: 'arrival-alerts-v2' },
+  _alertConfig = config;
+  _onAlertFired = onFired ?? null;
+  notifyConfigChange();
+
+  _hasNotifPermission = await ensureNotificationPermission();
+  await ensureNotificationChannel();
+
+  if (BackgroundService.isRunning()) {
+    // Already running — just update config (polling loop reads _alertConfig)
+    await BackgroundService.updateNotification({
+      taskTitle: `🔔 Monitoring ${config.lineId}`,
+      taskDesc: `Alert when ≤${config.thresholdMin}min at ${config.stopName}`,
     });
-  } else {
-    // Expo Go fallback — show an in-app alert
-    RNAlert.alert(`🚌 ${lineId} arriving!`, `${minutes} min away at ${stopName}`);
+    return;
+  }
+
+  await BackgroundService.start(pollingTask, {
+    taskName: 'ArrivalAlert',
+    taskTitle: `🔔 Monitoring ${config.lineId}`,
+    taskDesc: `Alert when ≤${config.thresholdMin}min at ${config.stopName}`,
+    taskIcon: { name: 'notification_icon', type: 'drawable' },
+    color: '#F59E0B',
+    linkingURI: 'fck-oasa://',
+    parameters: {},
+  });
+}
+
+/** Stop the foreground service and release all resources. */
+export async function stopAlertWatch(): Promise<void> {
+  _alertConfig = null;
+  _onAlertFired = null;
+  notifyConfigChange();
+  await stopSilentLoop();
+  if (BackgroundService.isRunning()) {
+    await BackgroundService.stop();
   }
 }
