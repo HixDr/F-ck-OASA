@@ -35,6 +35,7 @@ import { METRO_LINES } from '../../src/metro';
 import { mapStyles as ms } from '../../src/mapStyles';
 import { buildLineGroups, getArrivalColor, type LineGroup } from '../../src/mapUtils';
 import StampModal from '../../src/components/StampModal';
+import { BusMarkerRenderer, BUS_MARKER_ANCHOR_Y } from '../../src/components/BusMarkerSvg';
 import type { MapStamp, OasaLine } from '../../src/types';
 
 /* ── Refresh countdown timer ─────────────────────────────────── */
@@ -211,6 +212,20 @@ export default function LiveMapScreen() {
   const isOnline = useNetworkStatus();
   const mapRef = useRef<MapView>(null);
   const userLocationRef = useRef<{ lat: number; lng: number } | null>(getLocation());
+
+  // Bus marker image — rendered off-screen as SVG, captured as PNG
+  const busSvgRef = useRef<any>(null);
+  const [busMarkerUri, setBusMarkerUri] = useState<string | null>(null);
+  useEffect(() => {
+    const id = setTimeout(() => {
+      if (busSvgRef.current) {
+        busSvgRef.current.toDataURL((base64: string) => {
+          setBusMarkerUri('data:image/png;base64,' + base64);
+        });
+      }
+    }, 100);
+    return () => clearTimeout(id);
+  }, [primaryColor]);
 
   // Stale bus positions
   const [staleBusTs, setStaleBusTs] = useState<number | null>(null);
@@ -399,15 +414,6 @@ export default function LiveMapScreen() {
     return () => clearTimeout(t);
   }, [stopsWithBearings, primaryColor]);
 
-  // One-shot bitmap capture for bus markers — re-track only when bus set changes
-  const busIds = useMemo(() => busMarkers.map((b) => b.id).sort().join(','), [busMarkers]);
-  const [busTracking, setBusTracking] = useState(true);
-  useEffect(() => {
-    setBusTracking(true);
-    const t = setTimeout(() => setBusTracking(false), 500);
-    return () => clearTimeout(t);
-  }, [busIds, busStale]);
-
   // One-shot bitmap capture for stamp markers
   const stampIds = useMemo(() => stamps.map((s) => s.id).join(','), [stamps]);
   const [stampTracking, setStampTracking] = useState(true);
@@ -513,17 +519,14 @@ export default function LiveMapScreen() {
         ))}
 
         {/* Buses */}
-        {busMarkers.map((bus) => (
+        {busMarkerUri && busMarkers.map((bus) => (
           <Marker key={`bus-${bus.id}-${busStale}`}
             coordinate={{ latitude: bus.lat, longitude: bus.lng }}
-            anchor={{ x: 0.5, y: 1 }} tracksViewChanges={busTracking}>
-            <View style={[s.busPin, busStale && { opacity: 0.35 }]}>
-              <View style={s.busPinOuter}>
-                <Ionicons name="bus" size={12} color="#0F0814" />
-              </View>
-              <View style={s.busPinTriangle} />
-            </View>
-          </Marker>
+            anchor={{ x: 0.5, y: BUS_MARKER_ANCHOR_Y }}
+            zIndex={1100}
+            opacity={busStale ? 0.35 : 1}
+            image={{ uri: busMarkerUri }}
+          />
         ))}
 
         {/* Stamps */}
@@ -792,6 +795,9 @@ export default function LiveMapScreen() {
           setStampModal(null);
         }}
       />
+
+      {/* Hidden SVG renderer for bus marker image capture */}
+      <BusMarkerRenderer color={primaryColor} svgRef={busSvgRef} />
     </View>
   );
 }
@@ -887,14 +893,6 @@ const s = StyleSheet.create({
     marginBottom: -3,
   },
   stopPinSpacer: { width: 1, height: 7 },
-  busPin: { alignItems: 'center' },
-  busPinOuter: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#FFF', justifyContent: 'center', alignItems: 'center' },
-  busPinTriangle: {
-    width: 0, height: 0,
-    borderLeftWidth: 5, borderRightWidth: 5, borderTopWidth: 6,
-    borderLeftColor: 'transparent', borderRightColor: 'transparent', borderTopColor: '#FFF',
-    marginTop: -1,
-  },
   /* ── Arrival alert styles ── */
   arrivalHeaderBtns: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   alertPickerRow: {
