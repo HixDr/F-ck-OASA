@@ -14,7 +14,8 @@
       "backgroundColor": "#000000"
     },
     "ios": {
-      "supportsTablet": false
+      "supportsTablet": false,
+      "bundleIdentifier": "com.itshix.fckoasa"
     },
     "android": {
       "adaptiveIcon": {
@@ -29,7 +30,12 @@
         "android.permission.ACCESS_COARSE_LOCATION",
         "android.permission.ACCESS_FINE_LOCATION"
       ],
-      "package": "com.itshix.fckoasa"
+      "package": "com.itshix.fckoasa",
+      "config": {
+        "googleMaps": {
+          "apiKey": "REDACTED_API_KEY"
+        }
+      }
     },
     "web": {
       "favicon": "./assets/favicon.png"

@@ -104,7 +104,7 @@ export const getMLInfo = () => api<OasaMLInfo[]>('webGetLinesWithMLInfo');
 export const getSchedLines = (mlCode: string, sdcCode: string, lineCode: string) =>
   api<OasaSchedLines>('getSchedLines', { p1: mlCode, p2: sdcCode, p3: lineCode });
 
-/* ── Walking Route (OSRM) ───────────────────────────────────── */
+/* ── Walking Route (Valhalla) ────────────────────────────────── */
 
 export interface WalkingRoute {
   /** Walking duration in seconds. */
