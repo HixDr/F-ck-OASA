@@ -48,6 +48,13 @@
           "locationWhenInUsePermission": "Used to find nearby bus stops."
         }
       ],
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notif-icon.png",
+          "sounds": ["./assets/arrival.mp3"]
+        }
+      ],
       "expo-font",
       "./plugins/withAndroidOptimizations"
     ],

@@ -9,6 +9,7 @@ import {
   View,
   Text,
   Image,
+  TextInput,
   StyleSheet,
   ActivityIndicator,
   TouchableOpacity,
@@ -24,6 +25,7 @@ import { useBusLocations, useStops, useRoutes, useMLInfo, useSchedule, useLines 
 import { getStopArrivals, getWalkingRoute, getRoutesForStop, getRouteDetails } from '../../src/api';
 import { isFavorite, addFavorite, removeFavorite, getStamps, addStamp, removeStamp, getToggle, setToggle, getCachedBusPositions, setCachedBusPositions } from '../../src/storage';
 import { useNetworkStatus } from '../../src/network';
+import { fireArrivalAlert } from '../../src/notifications';
 import { useSettings } from '../../src/settings';
 import { USER_MARKER_BASE64 } from '../../src/userMarker';
 import { GOOGLE_DARK_STYLE } from '../../src/googleMapStyle';
@@ -74,11 +76,6 @@ function ScheduleGrid({ times, nextDeparture, accentColor }: { times: string[]; 
       ref={scrollRef}
       style={s.scheduleScroll}
       showsVerticalScrollIndicator={false}
-      onLayout={() => {
-        if (nextY.current > 0) {
-          scrollRef.current?.scrollTo({ y: Math.max(0, nextY.current - 40), animated: false });
-        }
-      }}
     >
       <View style={s.scheduleGrid}>
         {times.map((t, i) => {
@@ -91,7 +88,10 @@ function ScheduleGrid({ times, nextDeparture, accentColor }: { times: string[]; 
             <View
               key={i}
               style={[s.scheduleTime, isNext && { backgroundColor: accentColor }]}
-              onLayout={isNext ? (e) => { nextY.current = e.nativeEvent.layout.y; } : undefined}
+              onLayout={isNext ? (e) => {
+                nextY.current = e.nativeEvent.layout.y;
+                scrollRef.current?.scrollTo({ y: Math.max(0, nextY.current - 40), animated: false });
+              } : undefined}
             >
               <Text style={[s.scheduleTimeText, isPast && s.scheduleTimePast, isNext && s.scheduleTimeNextText]}>{t}</Text>
             </View>
@@ -146,6 +146,14 @@ export default function LiveMapScreen() {
   const [stampModal, setStampModal] = useState<{ lat: number; lng: number } | null>(null);
   const [stampName, setStampName] = useState('');
   const [stampEmoji, setStampEmoji] = useState('📍');
+
+  // Arrival alert state
+  const [arrivalAlert, setArrivalAlert] = useState<{
+    stopCode: string; stopName: string; thresholdMin: number;
+  } | null>(null);
+  const [showAlertPicker, setShowAlertPicker] = useState(false);
+  const [alertThreshold, setAlertThreshold] = useState('5');
+  const alertFiredRef = useRef(false);
 
   // Schedule
   const { data: mlInfoData } = useMLInfo();
@@ -369,6 +377,26 @@ export default function LiveMapScreen() {
     return () => clearInterval(id);
   }, [selectedStop?.stopCode, lineRouteCodes]);
 
+  // Arrival alert polling — independent of selected stop
+  useEffect(() => {
+    if (!arrivalAlert) return;
+    const { stopCode, stopName, thresholdMin } = arrivalAlert;
+    const check = async () => {
+      try {
+        const arrivals = await getStopArrivals(stopCode);
+        const filtered = (arrivals ?? []).filter((a) => lineRouteCodes.has(a.route_code));
+        const match = filtered.find((a) => Number(a.btime2) <= thresholdMin);
+        if (match) {
+          await fireArrivalAlert(lineId ?? '', stopName, Number(match.btime2));
+          setArrivalAlert(null);
+        }
+      } catch {}
+    };
+    check();
+    const id = setInterval(check, 15_000);
+    return () => clearInterval(id);
+  }, [arrivalAlert, lineRouteCodes, lineId]);
+
   // Long press
   const onMapLongPress = useCallback((e: { nativeEvent: { coordinate: { latitude: number; longitude: number } } }) => {
     setStampName(''); setStampEmoji('📍');
@@ -382,6 +410,24 @@ export default function LiveMapScreen() {
     const t = setTimeout(() => setStopTracking(false), 500);
     return () => clearTimeout(t);
   }, [stopsWithBearings, primaryColor]);
+
+  // One-shot bitmap capture for bus markers — re-track only when bus set changes
+  const busIds = useMemo(() => busMarkers.map((b) => b.id).sort().join(','), [busMarkers]);
+  const [busTracking, setBusTracking] = useState(true);
+  useEffect(() => {
+    setBusTracking(true);
+    const t = setTimeout(() => setBusTracking(false), 500);
+    return () => clearTimeout(t);
+  }, [busIds, busStale]);
+
+  // One-shot bitmap capture for stamp markers
+  const stampIds = useMemo(() => stamps.map((s) => s.id).join(','), [stamps]);
+  const [stampTracking, setStampTracking] = useState(true);
+  useEffect(() => {
+    setStampTracking(true);
+    const t = setTimeout(() => setStampTracking(false), 500);
+    return () => clearTimeout(t);
+  }, [stampIds]);
 
   const initialRegion = useMemo(() => {
     const loc = getLocation();
@@ -479,10 +525,10 @@ export default function LiveMapScreen() {
         ))}
 
         {/* Buses */}
-        {busMarkers.map((bus, i) => (
-          <Marker key={`bus-${bus.id}-${i}`}
+        {busMarkers.map((bus) => (
+          <Marker key={`bus-${bus.id}-${busStale}`}
             coordinate={{ latitude: bus.lat, longitude: bus.lng }}
-            anchor={{ x: 0.5, y: 1 }} tracksViewChanges={true}>
+            anchor={{ x: 0.5, y: 1 }} tracksViewChanges={busTracking}>
             <View style={[s.busPin, busStale && { opacity: 0.35 }]}>
               <View style={s.busPinOuter}>
                 <Ionicons name="bus" size={12} color="#0F0814" />
@@ -496,7 +542,7 @@ export default function LiveMapScreen() {
         {showStamps && stamps.map((st) => (
           <Marker key={`stamp-${st.id}`}
             coordinate={{ latitude: st.lat, longitude: st.lng }}
-            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={true}
+            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={stampTracking}
             onPress={() => {
               Alert.alert('Remove stamp?', `Delete "${st.name}"?`, [
                 { text: 'Cancel', style: 'cancel' },
@@ -526,14 +572,66 @@ export default function LiveMapScreen() {
       </MapView>
 
       {/* Stop arrivals card */}
-      {selectedStop && (
-        <View style={s.arrivalCard}>
-          <View style={ms.arrivalHeader}>
-            <Text style={ms.arrivalName} numberOfLines={1}>{selectedStop.name}</Text>
-            <TouchableOpacity onPress={() => { setSelectedStop(null); selectedStopRef.current = null; setStopLines(null); setWalkCoords([]); }} hitSlop={10}>
-              <Ionicons name="close" size={18} color={colors.textMuted} />
+      {/* Stop arrivals card + alert pill */}
+      <View style={s.leftStack}>
+        {arrivalAlert && (
+          <View style={s.alertPill}>
+            <Ionicons name="notifications" size={12} color={colors.warning} />
+            <Text style={s.alertPillText}>≤{arrivalAlert.thresholdMin}min</Text>
+            <TouchableOpacity onPress={() => setArrivalAlert(null)} hitSlop={8}>
+              <Ionicons name="close-circle" size={14} color={colors.textMuted} />
             </TouchableOpacity>
           </View>
+        )}
+        {selectedStop && (
+          <View style={s.arrivalCard}>
+          <View style={ms.arrivalHeader}>
+            <Text style={ms.arrivalName} numberOfLines={1}>{selectedStop.name}</Text>
+            <View style={s.arrivalHeaderBtns}>
+              <TouchableOpacity onPress={() => {
+                if (arrivalAlert?.stopCode === selectedStop.stopCode) {
+                  setArrivalAlert(null); setShowAlertPicker(false);
+                } else {
+                  setShowAlertPicker((v) => !v);
+                }
+              }} hitSlop={10}>
+                <Ionicons
+                  name={arrivalAlert?.stopCode === selectedStop.stopCode ? 'notifications' : 'notifications-outline'}
+                  size={16}
+                  color={arrivalAlert?.stopCode === selectedStop.stopCode ? colors.warning : colors.textMuted}
+                />
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => { setSelectedStop(null); selectedStopRef.current = null; setStopLines(null); setWalkCoords([]); setShowAlertPicker(false); }} hitSlop={10}>
+                <Ionicons name="close" size={18} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+          </View>
+          {showAlertPicker && (
+            <View style={s.alertPickerRow}>
+              <Text style={s.alertPickerLabel}>Alert ≤</Text>
+              <TextInput
+                style={s.alertPickerInput}
+                value={alertThreshold}
+                onChangeText={setAlertThreshold}
+                keyboardType="number-pad"
+                maxLength={2}
+                placeholderTextColor={colors.textMuted}
+              />
+              <Text style={s.alertPickerLabel}>min</Text>
+              <TouchableOpacity
+                style={[s.alertPickerBtn, { backgroundColor: primaryColor }]}
+                onPress={() => {
+                  const min = parseInt(alertThreshold, 10);
+                  if (!isNaN(min) && min > 0) {
+                    setArrivalAlert({ stopCode: selectedStop.stopCode, stopName: selectedStop.name, thresholdMin: min });
+                    alertFiredRef.current = false;
+                    setShowAlertPicker(false);
+                  }
+                }}>
+                <Ionicons name="checkmark" size={14} color="#FFF" />
+              </TouchableOpacity>
+            </View>
+          )}
           {selectedStop.walkMin !== null && (
             <View style={ms.walkRow}>
               <Ionicons name="walk" size={14} color="#4285F4" />
@@ -607,7 +705,8 @@ export default function LiveMapScreen() {
             </ScrollView>
           )}
         </View>
-      )}
+        )}
+      </View>
 
       {/* Route direction dropdown */}
       {showRouteMenu && allRoutes && allRoutes.length > 1 && (
@@ -744,8 +843,10 @@ const s = StyleSheet.create({
   routeMenuItemActive: { backgroundColor: colors.card },
   routeMenuText: { color: colors.textMuted, fontSize: font.size.sm, fontWeight: '500', flex: 1, marginRight: spacing.sm },
   routeMenuTextActive: { color: colors.text, fontWeight: '700' },
-  arrivalCard: {
+  leftStack: {
     position: 'absolute', bottom: spacing.xl * 2, left: spacing.sm,
+  },
+  arrivalCard: {
     backgroundColor: colors.overlay, borderRadius: radius.lg, padding: spacing.md,
     borderWidth: 1, borderColor: colors.border, minWidth: 160, maxWidth: 220,
   },
@@ -802,4 +903,30 @@ const s = StyleSheet.create({
     borderLeftColor: 'transparent', borderRightColor: 'transparent', borderTopColor: '#FFF',
     marginTop: -1,
   },
+  /* ── Arrival alert styles ── */
+  arrivalHeaderBtns: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  alertPickerRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    marginTop: spacing.xs, paddingTop: spacing.xs,
+    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border,
+  },
+  alertPickerLabel: { color: colors.textMuted, fontSize: font.size.xs, fontWeight: '600' },
+  alertPickerInput: {
+    color: colors.text, fontSize: font.size.sm, fontWeight: '700',
+    backgroundColor: colors.card, borderRadius: radius.sm,
+    paddingHorizontal: spacing.xs, paddingVertical: 2,
+    minWidth: 32, textAlign: 'center',
+    borderWidth: 1, borderColor: colors.border,
+  },
+  alertPickerBtn: {
+    width: 24, height: 24, borderRadius: 12,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  alertPill: {
+    flexDirection: 'row', alignItems: 'center', alignSelf: 'flex-start', gap: 4,
+    backgroundColor: colors.overlay, borderRadius: radius.full,
+    paddingHorizontal: spacing.sm, paddingVertical: spacing.xs,
+    borderWidth: 1, borderColor: colors.warning, marginBottom: spacing.xs,
+  },
+  alertPillText: { color: colors.warning, fontSize: font.size.xs, fontWeight: '700' },
 });

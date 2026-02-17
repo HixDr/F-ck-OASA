@@ -100,7 +100,9 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const { primaryColor, setPrimaryColor, iconStyle, setIconStyle } = useSettings();
+  const hueBarRef = useRef<View>(null);
   const hueBarWidth = useRef(0);
+  const hueBarX = useRef(0);
 
   // Preload lines cache in background
   useLines();
@@ -217,12 +219,13 @@ export default function HomeScreen() {
             <Text style={[s.modalLabel, { marginTop: spacing.md }]}>Accent Color</Text>
             <View style={s.hueBarWrap}>
               <View
+                ref={hueBarRef}
                 style={s.hueBar}
                 onStartShouldSetResponder={() => true}
                 onMoveShouldSetResponder={() => true}
                 onResponderTerminationRequest={() => false}
                 onResponderGrant={(e) => {
-                  const x = e.nativeEvent.locationX;
+                  const x = e.nativeEvent.pageX - hueBarX.current;
                   const w = hueBarWidth.current;
                   if (w > 0) {
                     const hue = Math.max(0, Math.min(359, (x / w) * 360));
@@ -230,14 +233,19 @@ export default function HomeScreen() {
                   }
                 }}
                 onResponderMove={(e) => {
-                  const x = e.nativeEvent.locationX;
+                  const x = e.nativeEvent.pageX - hueBarX.current;
                   const w = hueBarWidth.current;
                   if (w > 0) {
                     const hue = Math.max(0, Math.min(359, (x / w) * 360));
                     setPrimaryColor(hslToHex(hue, 70, 45));
                   }
                 }}
-                onLayout={(e) => { hueBarWidth.current = e.nativeEvent.layout.width; }}
+                onLayout={() => {
+                  hueBarRef.current?.measureInWindow((x, _y, w) => {
+                    hueBarX.current = x;
+                    hueBarWidth.current = w;
+                  });
+                }}
               >
                 {HUE_COLORS.map((c, i) => (
                   <View key={i} style={{ flex: 1, backgroundColor: c }} />

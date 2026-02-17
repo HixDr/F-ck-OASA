@@ -146,6 +146,15 @@ export default function NearbyMapScreen() {
     return () => clearTimeout(t);
   }, [parsedStops, primaryColor]);
 
+  // One-shot bitmap capture for stamp markers
+  const stampIds = useMemo(() => stamps.map((s) => s.id).join(','), [stamps]);
+  const [stampTracking, setStampTracking] = useState(true);
+  useEffect(() => {
+    setStampTracking(true);
+    const t = setTimeout(() => setStampTracking(false), 500);
+    return () => clearTimeout(t);
+  }, [stampIds]);
+
   // Selected stop state
   const [selectedStop, setSelectedStop] = useState<{
     name: string; stopCode: string; lat: number; lng: number;
@@ -273,7 +282,7 @@ export default function NearbyMapScreen() {
         {showStamps && stamps.map((st) => (
           <Marker key={`stamp-${st.id}`}
             coordinate={{ latitude: st.lat, longitude: st.lng }}
-            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={true}
+            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={stampTracking}
             onPress={() => {
               Alert.alert('Remove stamp?', `Delete "${st.name}"?`, [
                 { text: 'Cancel', style: 'cancel' },

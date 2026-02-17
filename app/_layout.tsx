@@ -11,6 +11,7 @@ import { colors, font, spacing } from '../src/theme';
 import { initStorage, prefetchFavoriteSchedules } from '../src/storage';
 import { initLocation } from '../src/location';
 import { setupNetworkListener, useNetworkStatus } from '../src/network';
+import { initNotifications } from '../src/notifications';
 import { SettingsProvider } from '../src/settings';
 
 const queryClient = new QueryClient({
@@ -53,7 +54,7 @@ export default function RootLayout() {
 
   useEffect(() => {
     setupNetworkListener();
-    Promise.all([initStorage(), initLocation()]).then(() => {
+    Promise.all([initStorage(), initLocation(), initNotifications()]).then(() => {
       setReady(true);
       // Silently pre-cache schedules for all favorite lines
       prefetchFavoriteSchedules();
