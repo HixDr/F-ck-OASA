@@ -1,6 +1,6 @@
 /**
- * Live Map screen — real-time bus positions on a dark-themed map.
- * Uses a WebView with Leaflet + CARTO Dark Matter tiles.
+ * Live Map screen — real-time bus positions on a dark-themed Google Map.
+ * Uses react-native-maps (Google Maps provider) for native performance.
  * Polls getBusLocation every 10 seconds.
  */
 
@@ -8,6 +8,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   View,
   Text,
+  Image,
   StyleSheet,
   ActivityIndicator,
   TouchableOpacity,
@@ -15,7 +16,7 @@ import {
   Alert,
 } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import { WebView, type WebViewMessageEvent } from 'react-native-webview';
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { getLocation, subscribe as subscribeLocation } from '../../src/location';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font } from '../../src/theme';
@@ -23,166 +24,18 @@ import { useBusLocations, useStops, useRoutes, useMLInfo, useSchedule, useLines 
 import { getStopArrivals, getWalkingRoute, getRoutesForStop, getRouteDetails } from '../../src/api';
 import { isFavorite, addFavorite, removeFavorite, getStamps, addStamp, removeStamp, getToggle, setToggle, getCachedBusPositions, setCachedBusPositions } from '../../src/storage';
 import { useNetworkStatus } from '../../src/network';
-import { getUserMarkerSrc } from '../../src/userMarker';
-import { buildStampsLayerJS } from '../../src/stamps';
-import { buildBaseMapHTML } from '../../src/mapHtml';
-import { mapStyles as ms } from '../../src/mapStyles';
 import { useSettings } from '../../src/settings';
+import { USER_MARKER_BASE64 } from '../../src/userMarker';
+import { GOOGLE_DARK_STYLE } from '../../src/googleMapStyle';
+import { METRO_LINES } from '../../src/metro';
+import { mapStyles as ms } from '../../src/mapStyles';
+import { buildLineGroups, getArrivalColor, type LineGroup } from '../../src/mapUtils';
 import StampModal from '../../src/components/StampModal';
-import type { MapStamp, OasaLine, OasaRoute } from '../../src/types';
-
-/* ── Bus icon SVG (location pin with bus) ────────────────────── */
-
-const BUS_PIN_SVG = `
-<svg width="36" height="50" viewBox="0 0 51.787 51.787" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path d="M25.892,0c-7.646,0-13.845,6.198-13.845,13.845c0,1.494,0.244,2.929,0.68,4.274c0.981,3.461,12.292,33.668,12.292,33.668s12.014-27.703,13.83-33.096c0.565-1.511,0.891-3.14,0.891-4.848C39.738,6.199,33.539,0,25.892,0z M25.892,24.761c-6,0-10.865-4.867-10.865-10.865c0-6.003,4.865-10.868,10.865-10.868c6.003,0,10.866,4.865,10.866,10.868C36.758,19.894,31.895,24.761,25.892,24.761z" fill="#FFFFFF"/>
-  <circle cx="25.892" cy="13.845" r="10.865" fill="#FFFFFF"/>
-  <path d="M30.511,6.326h-9.237c-0.948,0-1.72,0.835-1.72,1.866v10.039c0,0.685,0.341,1.28,0.848,1.604v1.073c0,0.353,0.567,0.636,1.271,0.636c0.701,0,1.271-0.283,1.271-0.636v-0.812H24.5v-0.001h3.217v0.001h1.195v0.812c0,0.353,0.568,0.636,1.271,0.636s1.271-0.283,1.271-0.636v-1.116c0.471-0.334,0.78-0.907,0.78-1.562V8.191C32.232,7.162,31.461,6.326,30.511,6.326z M23.22,7.121h5.344V7.64H23.22V7.121z M24.291,17.061h-3.373v-1.248h3.373V17.061z M27.715,19.941h-3.217v-0.99h3.217V19.941z M31.037,17.061h-3.374v-1.248h3.374V17.061z M31.185,12.773c0,0.127-0.224,0.23-0.5,0.23H21.1c-0.275,0-0.499-0.104-0.499-0.23V8.339c0-0.128,0.224-0.232,0.499-0.232h9.585c0.276,0,0.5,0.104,0.5,0.232V12.773z" fill="#0F0814"/>
-</svg>`;
-
-/* ── Helpers ─────────────────────────────────────────────────── */
-
-/** Build JS to inject bus markers into _busLayer */
-function buildBusLayerJS(buses: Array<{ lat: number; lng: number; id: string }>, stale = false) {
-  const opacity = stale ? '0.35' : '1';
-  return `
-    window._busLayer.clearLayers();
-    var _bIcon = L.divIcon({html:'<div style="opacity:${opacity}">${BUS_PIN_SVG.replace(/'/g, "\\'").replace(/\n/g, '')}</div>',className:'bus-pin',iconSize:[36,50],iconAnchor:[18,50],popupAnchor:[0,-50]});
-    ${buses.map((b) => `L.marker([${b.lat},${b.lng}],{icon:_bIcon}).addTo(window._busLayer);`).join('\n')}
-    true;
-  `;
-}
-
-function bearingDeg(lat1: number, lng1: number, lat2: number, lng2: number): number {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLng = toRad(lng2 - lng1);
-  const y = Math.sin(dLng) * Math.cos(toRad(lat2));
-  const x =
-    Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
-    Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(dLng);
-  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
-}
-
-/** Generate JS to inject route stops + polyline into _routeLayer.
- *  Stop markers are created lazily — only at zoom >= 14 — to avoid
- *  DOM overhead when the whole route is in view.
- */
-function buildRouteLayerJS(
-  stops: Array<{ lat: number; lng: number; name: string; code: string }>,
-  accentColor = '#7B2CBF',
-  pathCoords?: Array<{ lat: number; lng: number }>,
-) {
-  // Use detailed road path if available, otherwise fall back to stop-to-stop
-  const polySource = pathCoords && pathCoords.length > 1 ? pathCoords : stops;
-  const polylineCoords = polySource.map((s) => `[${s.lat},${s.lng}]`).join(',');
-  const stopCoords = stops.map((s) => `[${s.lat},${s.lng}]`).join(',');
-
-  // Pre-compute bearing angles on the RN side so the WebView doesn't have to
-  const stopDataEntries = stops.map((s, i) => {
-    const safeName = s.name.replace(/'/g, "\\'");
-    let angle = 0;
-    if (i < stops.length - 1) {
-      angle = bearingDeg(s.lat, s.lng, stops[i + 1].lat, stops[i + 1].lng);
-    } else if (i > 0) {
-      angle = bearingDeg(stops[i - 1].lat, stops[i - 1].lng, s.lat, s.lng);
-    }
-    return `{lat:${s.lat},lng:${s.lng},code:'${s.code}',name:'${safeName}',angle:${angle.toFixed(1)}}`;
-  });
-
-  // Fit map to route bounds so the whole line is visible and centered
-  const fitBoundsJS = stops.length > 1
-    ? `map.fitBounds([${stopCoords}],{padding:[40,40],maxZoom:14});`
-    : '';
-
-  return `
-    window._routeLayer.clearLayers();
-    window._routeStopMarkers=[];
-    window._routeStops=[${stopDataEntries.join(',')}];
-    ${polySource.length > 1 ? `L.polyline([${polylineCoords}],{color:'${accentColor}',weight:3.5,opacity:0.7,lineCap:'round',lineJoin:'round'}).addTo(window._routeLayer);` : ''}
-    window._updateRouteStops=function(){
-      var z=map.getZoom();
-      var show=z>=14;
-      if(show&&window._routeStopMarkers.length===0){
-        window._routeStops.forEach(function(s){
-          var svg='<svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg"><g transform="rotate('+s.angle+',9,9)"><polygon points="9,0 6,6.5 12,6.5" fill="${accentColor}" stroke="#FFF" stroke-width="0.7" stroke-linejoin="round"/></g><circle cx="9" cy="9" r="5" fill="${accentColor}" stroke="#FFF" stroke-width="1.2"/><rect x="7.8" y="6" width="2.4" height="2.6" rx="0.6" fill="#FFF"/><rect x="8.3" y="8.5" width="1.4" height="3" rx="0.3" fill="#FFF"/></svg>';
-          var icon=L.divIcon({html:svg,className:'stop-pin',iconSize:[18,18],iconAnchor:[9,9]});
-          var m=L.marker([s.lat,s.lng],{icon:icon}).addTo(window._routeLayer);
-          m.on('click',function(){window.ReactNativeWebView.postMessage(JSON.stringify({type:'stopTap',stopCode:s.code,lat:s.lat,lng:s.lng,name:s.name}));});
-          window._routeStopMarkers.push(m);
-        });
-      }else if(!show&&window._routeStopMarkers.length>0){
-        window._routeStopMarkers.forEach(function(m){window._routeLayer.removeLayer(m);});
-        window._routeStopMarkers=[];
-      }
-    };
-    map.off('zoomend',window._updateRouteStops);
-    map.on('zoomend',window._updateRouteStops);
-    window._updateRouteStops();
-    ${fitBoundsJS}
-    true;
-  `;
-}
-
-/* ── Build line groups from routes + arrivals ────────────────── */
-
-function buildLineGroups(
-  routes: OasaRoute[],
-  arrivals: Array<{ route_code: string; btime2: string }>,
-  linesMap: Map<string, OasaLine>,
-) {
-  const routeToLine = new Map<string, string>();
-  routes.forEach((r) => routeToLine.set(r.RouteCode, r.LineCode));
-
-  const lineMinMap = new Map<string, number>();
-  (arrivals ?? []).forEach((a) => {
-    const lineCode = routeToLine.get(a.route_code);
-    if (lineCode) {
-      const min = Number(a.btime2);
-      const prev = lineMinMap.get(lineCode);
-      if (prev === undefined || min < prev) lineMinMap.set(lineCode, min);
-    }
-  });
-
-  const seenLines = new Set<string>();
-  const lines: Array<{
-    lineCode: string;
-    lineId: string;
-    lineDescrEng: string;
-    nextMin: number | null;
-    color: string;
-  }> = [];
-
-  routes.forEach((r) => {
-    if (seenLines.has(r.LineCode)) return;
-    seenLines.add(r.LineCode);
-    const lineInfo = linesMap.get(r.LineCode);
-    const nextMin = lineMinMap.get(r.LineCode) ?? null;
-    const color =
-      nextMin != null
-        ? nextMin <= 2 ? '#F44336' : nextMin <= 5 ? '#F59E0B' : '#22C55E'
-        : colors.textMuted;
-    lines.push({
-      lineCode: r.LineCode,
-      lineId: lineInfo?.LineID ?? r.LineCode,
-      lineDescrEng: lineInfo?.LineDescrEng ?? lineInfo?.LineDescr ?? '',
-      nextMin,
-      color,
-    });
-  });
-
-  lines.sort((a, b) => {
-    if (a.nextMin != null && b.nextMin != null) return a.nextMin - b.nextMin;
-    if (a.nextMin != null) return -1;
-    if (b.nextMin != null) return 1;
-    return 0;
-  });
-
-  return lines;
-}
+import type { MapStamp, OasaLine } from '../../src/types';
 
 /* ── Refresh countdown timer ─────────────────────────────────── */
 
-const POLL_INTERVAL = 10; // seconds — matches useBusLocations refetchInterval
+const POLL_INTERVAL = 10;
 
 function RefreshTimer({ staleLabel }: { staleLabel: string | null }) {
   const [seconds, setSeconds] = useState(POLL_INTERVAL);
@@ -249,6 +102,17 @@ function ScheduleGrid({ times, nextDeparture, accentColor }: { times: string[]; 
   );
 }
 
+/* ── Bearing helper ──────────────────────────────────────────── */
+
+function bearingBetween(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const toRad = Math.PI / 180;
+  const dLng = (lng2 - lng1) * toRad;
+  const y = Math.sin(dLng) * Math.cos(lat2 * toRad);
+  const x = Math.cos(lat1 * toRad) * Math.sin(lat2 * toRad) -
+    Math.sin(lat1 * toRad) * Math.cos(lat2 * toRad) * Math.cos(dLng);
+  return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
+}
+
 /* ── Live Map Component ──────────────────────────────────────── */
 
 export default function LiveMapScreen() {
@@ -259,7 +123,6 @@ export default function LiveMapScreen() {
     lineDescr: string;
   }>();
 
-  // Fetch all routes for this line, auto-select first
   const { data: allRoutes } = useRoutes(lineCode);
   const { data: allLines } = useLines();
   const linesMap = useMemo(() => {
@@ -273,12 +136,9 @@ export default function LiveMapScreen() {
   const [showMetro, setShowMetro] = useState(() => getToggle('metro', true));
   const [showStamps, setShowStamps] = useState(() => getToggle('stamps', true));
   const { primaryColor, iconStyle } = useSettings();
-  const userMarkerSrc = useMemo(() => getUserMarkerSrc(iconStyle, primaryColor), [iconStyle, primaryColor]);
 
   // Stop all-lines expansion state
-  const [stopLines, setStopLines] = useState<Array<{
-    lineCode: string; lineId: string; lineDescrEng: string; nextMin: number | null; color: string;
-  }> | null>(null);
+  const [stopLines, setStopLines] = useState<LineGroup[] | null>(null);
   const [loadingStopLines, setLoadingStopLines] = useState(false);
 
   // Stamp state
@@ -287,34 +147,23 @@ export default function LiveMapScreen() {
   const [stampName, setStampName] = useState('');
   const [stampEmoji, setStampEmoji] = useState('📍');
 
-  // ML info for schedule lookup
+  // Schedule
   const { data: mlInfoData } = useMLInfo();
   const mlInfo = useMemo(() => {
     if (!mlInfoData || !lineCode) return null;
     return mlInfoData.find((m) => m.line_code === lineCode) ?? null;
   }, [mlInfoData, lineCode]);
-
   const { data: scheduleData, isLoading: loadingSchedule } = useSchedule(
-    mlInfo?.ml_code,
-    mlInfo?.sdc_code,
-    lineCode,
+    mlInfo?.ml_code, mlInfo?.sdc_code, lineCode,
   );
-
-  // Parse schedule times and find next departure
   const scheduleTimes = useMemo(() => {
     if (!scheduleData) return [];
     const entries = [...(scheduleData.go ?? []), ...(scheduleData.come ?? [])];
     const times = entries
-      .map((e) => {
-        const match = e.sde_start1?.match(/(\d{2}):(\d{2})/);
-        if (!match) return null;
-        return `${match[1]}:${match[2]}`;
-      })
+      .map((e) => { const match = e.sde_start1?.match(/(\d{2}):(\d{2})/); if (!match) return null; return `${match[1]}:${match[2]}`; })
       .filter((t): t is string => t !== null);
-    // Deduplicate and sort
     return [...new Set(times)].sort();
   }, [scheduleData]);
-
   const nextDeparture = useMemo(() => {
     if (scheduleTimes.length === 0) return null;
     const now = new Date();
@@ -323,17 +172,18 @@ export default function LiveMapScreen() {
       const [h, m] = t.split(':').map(Number);
       if (h * 60 + m >= nowMin) return t;
     }
-    return scheduleTimes[0]; // wrap to first departure tomorrow
+    return scheduleTimes[0];
   }, [scheduleTimes]);
 
-  // Auto-select first route when routes load
+  // Auto-select first route
   useEffect(() => {
     if (allRoutes && allRoutes.length > 0 && !activeRouteCode) {
       setActiveRouteCode(allRoutes[0].RouteCode);
     }
   }, [allRoutes, activeRouteCode]);
 
-  // Fetch road-following path for active route
+  // Road-following path
+  const [routePath, setRoutePath] = useState<Array<{ lat: number; lng: number }>>([]);
   useEffect(() => {
     if (!activeRouteCode) { setRoutePath([]); return; }
     setRoutePath([]);
@@ -343,40 +193,31 @@ export default function LiveMapScreen() {
   const { data: buses, isLoading: loadingBuses } = useBusLocations(activeRouteCode);
   const { data: stops } = useStops(activeRouteCode);
   const isOnline = useNetworkStatus();
-  const webViewRef = useRef<WebView>(null);
-  const mapViewRef = useRef<{ lat: number; lng: number; zoom: number } | null>(null);
+  const mapRef = useRef<MapView>(null);
   const userLocationRef = useRef<{ lat: number; lng: number } | null>(getLocation());
 
-  // Road-following path for current route
-  const [routePath, setRoutePath] = useState<Array<{lat: number; lng: number}>>([]);
-
-  // Stale bus positions tracking
+  // Stale bus positions
   const [staleBusTs, setStaleBusTs] = useState<number | null>(null);
   const staleLoadedRef = useRef(false);
+  const [staleBuses, setStaleBuses] = useState<Array<{ lat: number; lng: number; id: string }>>([]);
 
-  // Subscribe to global location updates
+  // User location for marker
+  const [userLoc, setUserLoc] = useState<{ lat: number; lng: number } | null>(getLocation());
+
+  // Walking route
+  const [walkCoords, setWalkCoords] = useState<Array<{ latitude: number; longitude: number }>>([]);
+
+  // Subscribe to location updates
   useEffect(() => {
     return subscribeLocation(async (loc) => {
       userLocationRef.current = loc;
-      if (webViewReady.current && webViewRef.current) {
-        webViewRef.current.injectJavaScript(`
-          if(!window._userDot){window._userDot=L.marker([${loc.lat},${loc.lng}],{icon:window._catIcon,zIndexOffset:1000}).addTo(map);}else{window._userDot.setLatLng([${loc.lat},${loc.lng}]);}
-          true;
-        `);
-      }
-
-      // Live-update walking route if a stop is selected
+      setUserLoc(loc);
       const target = selectedStopRef.current;
-      if (target && webViewReady.current && webViewRef.current) {
+      if (target) {
         const walk = await getWalkingRoute(loc.lat, loc.lng, target.lat, target.lng);
         if (walk && walk.coords.length > 1 && selectedStopRef.current) {
           const walkMin = Math.round(walk.durationSec / 60);
-          const latLngs = walk.coords.map((c: [number, number]) => `[${c[1]},${c[0]}]`).join(',');
-          webViewRef.current?.injectJavaScript(`
-            window._walkLayer.clearLayers();
-            L.polyline([${latLngs}],{color:'#4285F4',weight:4,opacity:0.8,dashArray:'8 6',lineCap:'round',lineJoin:'round'}).addTo(window._walkLayer);
-            true;
-          `);
+          setWalkCoords(walk.coords.map((c: [number, number]) => ({ latitude: c[1], longitude: c[0] })));
           setSelectedStop((prev) => prev ? { ...prev, walkMin } : prev);
         }
       }
@@ -385,36 +226,30 @@ export default function LiveMapScreen() {
 
   const parsedBuses = useMemo(() => {
     if (!buses || buses.length === 0) return [];
-    return buses.map((b) => ({
-      lat: parseFloat(b.CS_LAT),
-      lng: parseFloat(b.CS_LNG),
-      id: b.VEH_NO,
-    }));
+    return buses.map((b) => ({ lat: parseFloat(b.CS_LAT), lng: parseFloat(b.CS_LNG), id: b.VEH_NO }));
   }, [buses]);
 
-  // Persist bus positions whenever we get fresh data
   useEffect(() => {
     if (parsedBuses.length > 0 && activeRouteCode) {
       setCachedBusPositions(activeRouteCode, parsedBuses);
-      setStaleBusTs(null); // clear stale flag — we have live data
+      setStaleBusTs(null);
+      setStaleBuses([]);
     }
   }, [parsedBuses, activeRouteCode]);
 
-  // Load cached bus positions when offline and no live data
   useEffect(() => {
     if (!activeRouteCode || staleLoadedRef.current) return;
     if (!isOnline && (!buses || buses.length === 0)) {
       staleLoadedRef.current = true;
       getCachedBusPositions(activeRouteCode).then((cached) => {
-        if (cached && cached.buses.length > 0 && webViewReady.current) {
-          webViewRef.current?.injectJavaScript(buildBusLayerJS(cached.buses, true));
+        if (cached && cached.buses.length > 0) {
+          setStaleBuses(cached.buses);
           setStaleBusTs(cached.ts);
         }
       });
     }
   }, [activeRouteCode, isOnline, buses]);
 
-  // Compute human-readable stale label
   const staleLabel = useMemo(() => {
     if (!staleBusTs) return null;
     const diffMin = Math.round((Date.now() - staleBusTs) / 60000);
@@ -426,167 +261,96 @@ export default function LiveMapScreen() {
 
   const parsedStops = useMemo(() => {
     if (!stops) return [];
-    return stops.map((s) => ({
-      lat: parseFloat(s.StopLat),
-      lng: parseFloat(s.StopLng),
-      name: s.StopDescrEng || s.StopDescr,
-      code: s.StopCode,
+    return stops.map((st) => ({
+      lat: parseFloat(st.StopLat), lng: parseFloat(st.StopLng),
+      name: st.StopDescrEng || st.StopDescr, code: st.StopCode,
     }));
   }, [stops]);
 
-  // Center on stops only (never recenter when buses refresh)
-  const center: [number, number] = useMemo(() => {
-    if (parsedStops.length > 0) return [parsedStops[0].lat, parsedStops[0].lng];
-    return [37.9838, 23.7275]; // Athens center
+  // Bearings for directional stop markers
+  const stopsWithBearings = useMemo(() => {
+    if (parsedStops.length < 2) return parsedStops.map((st) => ({ ...st, bearing: 0 }));
+    return parsedStops.map((st, i) => {
+      const next = parsedStops[Math.min(i + 1, parsedStops.length - 1)];
+      const prev = parsedStops[Math.max(i - 1, 0)];
+      const target = i < parsedStops.length - 1 ? next : prev;
+      return { ...st, bearing: bearingBetween(st.lat, st.lng, target.lat, target.lng) };
+    });
   }, [parsedStops]);
 
-  // Track WebView readiness
-  const webViewReady = useRef(false);
-  const pendingRouteUpdate = useRef<typeof parsedStops | null>(null);
-  const pendingBusUpdate = useRef<typeof parsedBuses | null>(null);
+  // Route polyline coordinates
+  const routePolyline = useMemo(() => {
+    const source = routePath.length > 1 ? routePath : parsedStops;
+    return source.map((p) => ({ latitude: p.lat, longitude: p.lng }));
+  }, [routePath, parsedStops]);
 
-  // Base map HTML — rebuilt when settings change
-  const html = useMemo(
-    () => buildBaseMapHTML(center, 13, userMarkerSrc),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [userMarkerSrc],
-  );
-
-  // Inject route layer (stops + polyline) when stops change
+  // Fit map to route bounds on stops load
+  const hasFitted = useRef(false);
   useEffect(() => {
-    if (parsedStops.length === 0) return;
-    if (!webViewReady.current) {
-      pendingRouteUpdate.current = parsedStops;
-      return;
-    }
-    webViewRef.current?.injectJavaScript(buildRouteLayerJS(parsedStops, primaryColor, routePath));
-  }, [parsedStops, primaryColor, routePath]);
+    if (parsedStops.length < 2 || !mapRef.current || hasFitted.current) return;
+    hasFitted.current = true;
+    mapRef.current.fitToCoordinates(
+      parsedStops.map((p) => ({ latitude: p.lat, longitude: p.lng })),
+      { edgePadding: { top: 60, right: 60, bottom: 60, left: 60 }, animated: true },
+    );
+  }, [parsedStops]);
 
-  // Inject updated bus positions into the WebView on each poll cycle
-  useEffect(() => {
-    if (parsedBuses.length === 0) return;
-    if (!webViewReady.current) {
-      pendingBusUpdate.current = parsedBuses;
-      return;
-    }
-    webViewRef.current?.injectJavaScript(buildBusLayerJS(parsedBuses));
-  }, [parsedBuses]);
+  // Metro polyline data
+  const metroData = useMemo(() =>
+    Object.values(METRO_LINES).map((line) => ({
+      color: line.color,
+      coords: line.stations.map((st) => ({ latitude: st.c[0], longitude: st.c[1] })),
+    })), []);
 
-  // Handle messages from WebView (stop taps — fetch arrivals filtered to current line)
+  // Bus markers — live or stale
+  const busMarkers = parsedBuses.length > 0 ? parsedBuses : staleBuses;
+  const busStale = staleBuses.length > 0 && parsedBuses.length === 0;
+
   const lineRouteCodes = useMemo(
     () => new Set((allRoutes ?? []).map((r) => r.RouteCode)),
     [allRoutes],
   );
 
-  // Selected stop arrivals overlay state
+  // Selected stop
   const [selectedStop, setSelectedStop] = useState<{
-    name: string;
-    stopCode: string;
+    name: string; stopCode: string;
     arrivals: Array<{ min: number; color: string }> | null;
-    loading: boolean;
-    walkMin: number | null;
-    lat: number;
-    lng: number;
+    loading: boolean; walkMin: number | null; lat: number; lng: number;
   } | null>(null);
-
-  // Ref mirror of selected stop for use inside location callback and polling
   const selectedStopRef = useRef<{ lat: number; lng: number; stopCode: string } | null>(null);
 
-  const onWebViewMessage = useCallback(async (event: WebViewMessageEvent) => {
-    try {
-      const msg = JSON.parse(event.nativeEvent.data);
-      if (msg.type === 'ready') {
-        webViewReady.current = true;
-        // Inject user location if it arrived before WebView was ready
-        if (userLocationRef.current && webViewRef.current) {
-          const { lat, lng } = userLocationRef.current;
-          webViewRef.current.injectJavaScript(`
-            if(!window._userDot){window._userDot=L.marker([${lat},${lng}],{icon:window._catIcon,zIndexOffset:1000}).addTo(map);}
-            true;
-          `);
-        }
-        if (pendingRouteUpdate.current) {
-          webViewRef.current?.injectJavaScript(buildRouteLayerJS(pendingRouteUpdate.current, primaryColor, routePath));
-          pendingRouteUpdate.current = null;
-        }
-        if (pendingBusUpdate.current) {
-          webViewRef.current?.injectJavaScript(buildBusLayerJS(pendingBusUpdate.current));
-          pendingBusUpdate.current = null;
-        }
-        // Inject saved stamps
-        webViewRef.current?.injectJavaScript(buildStampsLayerJS(getStamps()));
-        // Apply saved toggle states
-        if (!getToggle('metro', true)) {
-          webViewRef.current?.injectJavaScript('map.removeLayer(window._metroLayer);toggleMetroLabels();true;');
-        }
-        if (!getToggle('stamps', true)) {
-          webViewRef.current?.injectJavaScript('if(window._stampLayer)map.removeLayer(window._stampLayer);true;');
-        }
-      } else if (msg.type === 'mapMove') {
-        mapViewRef.current = { lat: msg.lat, lng: msg.lng, zoom: msg.zoom };
-      } else if (msg.type === 'mapLongPress') {
-        setStampName('');
-        setStampEmoji('📍');
-        setStampModal({ lat: msg.lat, lng: msg.lng });
-      } else if (msg.type === 'stampTap') {
-        Alert.alert('Remove stamp?', `Delete "${msg.name}"?`, [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Delete',
-            style: 'destructive',
-            onPress: () => {
-              const updated = removeStamp(msg.id);
-              setStamps(updated);
-              webViewRef.current?.injectJavaScript(buildStampsLayerJS(updated));
-            },
-          },
-        ]);
-      } else if (msg.type === 'stopTap' && msg.stopCode) {
-        // Clear previous walking route
-        webViewRef.current?.injectJavaScript('window._walkLayer.clearLayers();true;');
-        selectedStopRef.current = { lat: msg.lat, lng: msg.lng, stopCode: msg.stopCode };
-        setStopLines(null);
-        setSelectedStop({ name: msg.name, stopCode: msg.stopCode, arrivals: null, loading: true, walkMin: null, lat: msg.lat, lng: msg.lng });
+  const onStopPress = useCallback(async (stop: { lat: number; lng: number; name: string; code: string }) => {
+    setWalkCoords([]);
+    selectedStopRef.current = { lat: stop.lat, lng: stop.lng, stopCode: stop.code };
+    setStopLines(null);
+    setSelectedStop({ name: stop.name, stopCode: stop.code, arrivals: null, loading: true, walkMin: null, lat: stop.lat, lng: stop.lng });
 
-        // Fetch arrivals and walking route in parallel
-        const userLoc = userLocationRef.current;
-        const [arrivals, walkRoute] = await Promise.all([
-          getStopArrivals(msg.stopCode),
-          userLoc
-            ? getWalkingRoute(userLoc.lat, userLoc.lng, msg.lat, msg.lng)
-            : Promise.resolve(null),
-        ]);
+    const ul = userLocationRef.current;
+    const [arrivals, walkRoute] = await Promise.all([
+      getStopArrivals(stop.code),
+      ul ? getWalkingRoute(ul.lat, ul.lng, stop.lat, stop.lng) : Promise.resolve(null),
+    ]);
 
-        // Draw walking route polyline on map
-        let walkMin: number | null = null;
-        if (walkRoute && walkRoute.coords.length > 1) {
-          walkMin = Math.round(walkRoute.durationSec / 60);
-          // OSRM returns [lng, lat] — swap to [lat, lng] for Leaflet
-          const latLngs = walkRoute.coords.map((c: [number, number]) => `[${c[1]},${c[0]}]`).join(',');
-          webViewRef.current?.injectJavaScript(`
-            window._walkLayer.clearLayers();
-            L.polyline([${latLngs}],{color:'#4285F4',weight:4,opacity:0.8,dashArray:'8 6',lineCap:'round',lineJoin:'round'}).addTo(window._walkLayer);
-            true;
-          `);
-        }
+    let walkMin: number | null = null;
+    if (walkRoute && walkRoute.coords.length > 1) {
+      walkMin = Math.round(walkRoute.durationSec / 60);
+      setWalkCoords(walkRoute.coords.map((c: [number, number]) => ({ latitude: c[1], longitude: c[0] })));
+    }
 
-        const filtered = (arrivals ?? []).filter((a) => lineRouteCodes.has(a.route_code));
-        if (filtered.length === 0) {
-          setSelectedStop({ name: msg.name, stopCode: msg.stopCode, arrivals: [], loading: false, walkMin, lat: msg.lat, lng: msg.lng });
-        } else {
-          const sorted = [...filtered].sort((a, b) => Number(a.btime2) - Number(b.btime2));
-          const items = sorted.slice(0, 5).map((a) => {
-            const min = Number(a.btime2);
-            const color = min <= 2 ? '#F44336' : min <= 5 ? '#F59E0B' : '#22C55E';
-            return { min, color };
-          });
-          setSelectedStop({ name: msg.name, stopCode: msg.stopCode, arrivals: items, loading: false, walkMin, lat: msg.lat, lng: msg.lng });
-        }
-      }
-    } catch {}
+    const filtered = (arrivals ?? []).filter((a) => lineRouteCodes.has(a.route_code));
+    if (filtered.length === 0) {
+      setSelectedStop({ name: stop.name, stopCode: stop.code, arrivals: [], loading: false, walkMin, lat: stop.lat, lng: stop.lng });
+    } else {
+      const sorted = [...filtered].sort((a, b) => Number(a.btime2) - Number(b.btime2));
+      const items = sorted.slice(0, 5).map((a) => {
+        const min = Number(a.btime2);
+        return { min, color: getArrivalColor(min) };
+      });
+      setSelectedStop({ name: stop.name, stopCode: stop.code, arrivals: items, loading: false, walkMin, lat: stop.lat, lng: stop.lng });
+    }
   }, [lineRouteCodes]);
 
-  // Auto-refresh stop arrivals every 10s while the card is open
+  // Auto-refresh arrivals
   useEffect(() => {
     if (!selectedStop || !selectedStop.stopCode) return;
     const code = selectedStop.stopCode;
@@ -594,21 +358,40 @@ export default function LiveMapScreen() {
       try {
         const arrivals = await getStopArrivals(code);
         const filtered = (arrivals ?? []).filter((a) => lineRouteCodes.has(a.route_code));
-        if (filtered.length === 0) {
-          setSelectedStop((prev) => prev && prev.stopCode === code ? { ...prev, arrivals: [], loading: false } : prev);
-        } else {
-          const sorted = [...filtered].sort((a, b) => Number(a.btime2) - Number(b.btime2));
-          const items = sorted.slice(0, 5).map((a) => {
+        const items = filtered.length === 0 ? [] :
+          [...filtered].sort((a, b) => Number(a.btime2) - Number(b.btime2)).slice(0, 5).map((a) => {
             const min = Number(a.btime2);
-            const color = min <= 2 ? '#F44336' : min <= 5 ? '#F59E0B' : '#22C55E';
-            return { min, color };
+            return { min, color: getArrivalColor(min) };
           });
-          setSelectedStop((prev) => prev && prev.stopCode === code ? { ...prev, arrivals: items, loading: false } : prev);
-        }
+        setSelectedStop((prev) => prev && prev.stopCode === code ? { ...prev, arrivals: items, loading: false } : prev);
       } catch {}
     }, POLL_INTERVAL * 1000);
     return () => clearInterval(id);
   }, [selectedStop?.stopCode, lineRouteCodes]);
+
+  // Long press
+  const onMapLongPress = useCallback((e: { nativeEvent: { coordinate: { latitude: number; longitude: number } } }) => {
+    setStampName(''); setStampEmoji('📍');
+    setStampModal({ lat: e.nativeEvent.coordinate.latitude, lng: e.nativeEvent.coordinate.longitude });
+  }, []);
+
+  // One-shot bitmap capture: track for 500ms after stops/color change, then stop for perf
+  const [stopTracking, setStopTracking] = useState(true);
+  useEffect(() => {
+    setStopTracking(true);
+    const t = setTimeout(() => setStopTracking(false), 500);
+    return () => clearTimeout(t);
+  }, [stopsWithBearings, primaryColor]);
+
+  const initialRegion = useMemo(() => {
+    const loc = getLocation();
+    return {
+      latitude: loc ? loc.lat : 37.9838,
+      longitude: loc ? loc.lng : 23.7275,
+      latitudeDelta: 0.05,
+      longitudeDelta: 0.05,
+    };
+  }, []);
 
   return (
     <View style={ms.container}>
@@ -618,85 +401,136 @@ export default function LiveMapScreen() {
           headerTitle: () => {
             const hasMultiple = allRoutes && allRoutes.length > 1;
             const activeRoute = allRoutes?.find((r) => r.RouteCode === activeRouteCode);
-            const routeLabel = activeRoute
-              ? (activeRoute.RouteDescrEng || activeRoute.RouteDescr)
-              : '';
+            const routeLabel = activeRoute ? (activeRoute.RouteDescrEng || activeRoute.RouteDescr) : '';
             return (
-              <TouchableOpacity
-                style={s.headerTitleWrap}
-                disabled={!hasMultiple}
-                onPress={() => setShowRouteMenu((v) => !v)}
-                activeOpacity={0.7}
-              >
+              <TouchableOpacity style={s.headerTitleWrap} disabled={!hasMultiple}
+                onPress={() => setShowRouteMenu((v) => !v)} activeOpacity={0.7}>
                 <View style={s.headerTitleRow}>
                   <Text style={s.headerLineId}>{lineId ?? ''}</Text>
                   {hasMultiple && (
-                    <Ionicons
-                      name={showRouteMenu ? 'chevron-up' : 'chevron-down'}
-                      size={16}
-                      color={colors.textMuted}
-                      style={{ marginLeft: 4 }}
-                    />
+                    <Ionicons name={showRouteMenu ? 'chevron-up' : 'chevron-down'}
+                      size={16} color={colors.textMuted} style={{ marginLeft: 4 }} />
                   )}
                 </View>
-                {routeLabel ? (
-                  <Text style={s.headerRouteDescr} numberOfLines={1}>{routeLabel}</Text>
-                ) : null}
+                {routeLabel ? <Text style={s.headerRouteDescr} numberOfLines={1}>{routeLabel}</Text> : null}
               </TouchableOpacity>
             );
           },
           headerRight: () => (
             <TouchableOpacity
               onPress={() => {
-                if (fav) {
-                  removeFavorite(lineCode);
-                  setFav(false);
-                } else {
-                  addFavorite({
-                    lineCode,
-                    lineId: lineId ?? '',
-                    lineDescr: lineDescr ?? '',
-                    lineDescrEng: lineDescr ?? '',
-                  });
-                  setFav(true);
-                }
+                if (fav) { removeFavorite(lineCode); setFav(false); }
+                else { addFavorite({ lineCode, lineId: lineId ?? '', lineDescr: lineDescr ?? '', lineDescrEng: lineDescr ?? '' }); setFav(true); }
               }}
-              hitSlop={12}
-              style={{ marginRight: spacing.sm }}
-            >
-              <Ionicons
-                name={fav ? 'heart' : 'heart-outline'}
-                size={24}
-                color={fav ? '#B91C1C' : colors.textMuted}
-              />
+              hitSlop={12} style={{ marginRight: spacing.sm }}>
+              <Ionicons name={fav ? 'heart' : 'heart-outline'} size={24} color={fav ? '#B91C1C' : colors.textMuted} />
             </TouchableOpacity>
           ),
         }}
       />
 
-      <WebView
-        ref={webViewRef}
-        originWhitelist={['*']}
-        source={{ html }}
+      <MapView
+        ref={mapRef}
+        provider={PROVIDER_GOOGLE}
         style={ms.map}
-        javaScriptEnabled
-        domStorageEnabled
-        cacheEnabled
-        onMessage={onWebViewMessage}
-        startInLoadingState
-        renderLoading={() => (
-          <View style={ms.loader}>
-            <ActivityIndicator size="large" color={colors.primaryLight} />
-          </View>
+        initialRegion={initialRegion}
+        customMapStyle={GOOGLE_DARK_STYLE}
+        showsUserLocation={false}
+        showsMyLocationButton={false}
+        showsCompass={false}
+        toolbarEnabled={false}
+        pitchEnabled={false}
+        onLongPress={onMapLongPress}
+        moveOnMarkerPress={false}
+      >
+        {/* Route polyline */}
+        {routePolyline.length > 1 && (
+          <Polyline coordinates={routePolyline} strokeColor={primaryColor}
+            strokeWidth={3.5} lineCap="round" lineJoin="round" zIndex={0} />
         )}
-      />
 
-      {/* Stop arrivals card — bottom left */}
+        {/* Walking route */}
+        {walkCoords.length > 1 && (
+          <Polyline coordinates={walkCoords} strokeColor="#4285F4"
+            strokeWidth={4} lineDashPattern={[8, 6]} lineCap="round" lineJoin="round" />
+        )}
+
+        {/* Metro polylines */}
+        {showMetro && metroData.map((line, i) => (
+          <Polyline key={`mp-${i}`} coordinates={line.coords}
+            strokeColor={line.color + '99'} strokeWidth={2.5} lineCap="round" />
+        ))}
+
+        {/* Stop markers with direction arrows */}
+        {stopsWithBearings.map((stop, i) => (
+          <Marker key={`st-${stop.code}-${i}-${primaryColor}`}
+            coordinate={{ latitude: stop.lat, longitude: stop.lng }}
+            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={stopTracking}
+            rotation={stop.bearing}
+            flat={true}
+            zIndex={999}
+            onPress={() => onStopPress(stop)}>
+            <View style={s.stopPinCombo} collapsable={false}>
+              <View style={s.stopPinArrow} />
+              <View style={[s.stopPin, { backgroundColor: primaryColor }]} />
+              <View style={s.stopPinSpacer} />
+            </View>
+          </Marker>
+        ))}
+
+        {/* Buses */}
+        {busMarkers.map((bus, i) => (
+          <Marker key={`bus-${bus.id}-${i}`}
+            coordinate={{ latitude: bus.lat, longitude: bus.lng }}
+            anchor={{ x: 0.5, y: 1 }} tracksViewChanges={true}>
+            <View style={[s.busPin, busStale && { opacity: 0.35 }]}>
+              <View style={s.busPinOuter}>
+                <Ionicons name="bus" size={12} color="#0F0814" />
+              </View>
+              <View style={s.busPinTriangle} />
+            </View>
+          </Marker>
+        ))}
+
+        {/* Stamps */}
+        {showStamps && stamps.map((st) => (
+          <Marker key={`stamp-${st.id}`}
+            coordinate={{ latitude: st.lat, longitude: st.lng }}
+            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}
+            onPress={() => {
+              Alert.alert('Remove stamp?', `Delete "${st.name}"?`, [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Delete', style: 'destructive', onPress: () => setStamps(removeStamp(st.id)) },
+              ]);
+            }}>
+            <View style={ms.stampMarker}>
+              <Text style={ms.stampEmoji}>{st.emoji}</Text>
+              <Text style={ms.stampLabel}>{st.name}</Text>
+            </View>
+          </Marker>
+        ))}
+
+        {/* User location */}
+        {userLoc && (
+          <Marker coordinate={{ latitude: userLoc.lat, longitude: userLoc.lng }}
+            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={true}>
+            {iconStyle === 'cat' ? (
+              <Image source={{ uri: USER_MARKER_BASE64 }} style={ms.catIcon} />
+            ) : (
+              <View style={ms.userDot}>
+                <View style={ms.userDotInner} />
+              </View>
+            )}
+          </Marker>
+        )}
+      </MapView>
+
+      {/* Stop arrivals card */}
       {selectedStop && (
         <View style={s.arrivalCard}>
           <View style={ms.arrivalHeader}>
             <Text style={ms.arrivalName} numberOfLines={1}>{selectedStop.name}</Text>
-            <TouchableOpacity onPress={() => { setSelectedStop(null); selectedStopRef.current = null; setStopLines(null); webViewRef.current?.injectJavaScript('window._walkLayer.clearLayers();true;'); }} hitSlop={10}>
+            <TouchableOpacity onPress={() => { setSelectedStop(null); selectedStopRef.current = null; setStopLines(null); setWalkCoords([]); }} hitSlop={10}>
               <Ionicons name="close" size={18} color={colors.textMuted} />
             </TouchableOpacity>
           </View>
@@ -725,22 +559,17 @@ export default function LiveMapScreen() {
               <Text style={s.nextDepLabel}> Next: {nextDeparture}</Text>
             </View>
           )}
-          {/* All lines toggle */}
-          <TouchableOpacity
-            style={s.allLinesBtn}
-            activeOpacity={0.7}
+          <TouchableOpacity style={s.allLinesBtn} activeOpacity={0.7}
             onPress={async () => {
               if (stopLines) { setStopLines(null); return; }
               setLoadingStopLines(true);
               try {
                 const [routes, arrivals] = await Promise.all([
-                  getRoutesForStop(selectedStop.stopCode),
-                  getStopArrivals(selectedStop.stopCode),
+                  getRoutesForStop(selectedStop.stopCode), getStopArrivals(selectedStop.stopCode),
                 ]);
-                setStopLines(buildLineGroups(routes ?? [], arrivals ?? [], linesMap));
+                setStopLines(buildLineGroups(routes ?? [], arrivals ?? [], linesMap).lines);
               } catch {} finally { setLoadingStopLines(false); }
-            }}
-          >
+            }}>
             {loadingStopLines ? (
               <ActivityIndicator size="small" color={primaryColor} />
             ) : (
@@ -750,26 +579,17 @@ export default function LiveMapScreen() {
               </>
             )}
           </TouchableOpacity>
-          {/* Expanded lines list */}
           {stopLines && stopLines.length > 0 && (
             <ScrollView style={s.stopLinesScroll} showsVerticalScrollIndicator={false} nestedScrollEnabled>
               {stopLines.map((line) => (
-                <TouchableOpacity
-                  key={line.lineCode}
-                  style={s.stopLineRow}
-                  activeOpacity={0.7}
+                <TouchableOpacity key={line.lineCode} style={s.stopLineRow} activeOpacity={0.7}
                   onPress={() => {
                     const info = linesMap.get(line.lineCode);
-                    router.push({
-                      pathname: '/map/[lineCode]',
-                      params: {
-                        lineCode: line.lineCode,
-                        lineId: line.lineId,
-                        lineDescr: info?.LineDescrEng ?? info?.LineDescr ?? line.lineDescrEng,
-                      },
-                    });
-                  }}
-                >
+                    router.push({ pathname: '/map/[lineCode]', params: {
+                      lineCode: line.lineCode, lineId: line.lineId,
+                      lineDescr: info?.LineDescrEng ?? info?.LineDescr ?? line.lineDescrEng,
+                    }});
+                  }}>
                   <View style={[s.stopLineBadge, { backgroundColor: primaryColor }]}>
                     <Text style={s.stopLineBadgeText}>{line.lineId}</Text>
                   </View>
@@ -789,93 +609,58 @@ export default function LiveMapScreen() {
         </View>
       )}
 
-      {/* Route direction dropdown menu */}
+      {/* Route direction dropdown */}
       {showRouteMenu && allRoutes && allRoutes.length > 1 && (
         <View style={s.routeMenu}>
           {allRoutes.map((r) => (
-            <TouchableOpacity
-              key={r.RouteCode}
+            <TouchableOpacity key={r.RouteCode}
               style={[s.routeMenuItem, activeRouteCode === r.RouteCode && s.routeMenuItemActive]}
               onPress={() => {
-                setActiveRouteCode(r.RouteCode);
-                setShowRouteMenu(false);
-                // Clear stale stop data from previous direction
-                setSelectedStop(null);
-                selectedStopRef.current = null;
-                setStopLines(null);
-                webViewRef.current?.injectJavaScript('window._walkLayer.clearLayers();true;');
-              }}
-            >
-              <Text
-                style={[s.routeMenuText, activeRouteCode === r.RouteCode && s.routeMenuTextActive]}
-                numberOfLines={2}
-              >
+                setActiveRouteCode(r.RouteCode); setShowRouteMenu(false);
+                setSelectedStop(null); selectedStopRef.current = null;
+                setStopLines(null); setWalkCoords([]);
+              }}>
+              <Text style={[s.routeMenuText, activeRouteCode === r.RouteCode && s.routeMenuTextActive]} numberOfLines={2}>
                 {r.RouteDescrEng || r.RouteDescr}
               </Text>
-              {activeRouteCode === r.RouteCode && (
-                <Ionicons name="checkmark" size={16} color={colors.primaryLight} />
-              )}
+              {activeRouteCode === r.RouteCode && <Ionicons name="checkmark" size={16} color={colors.primaryLight} />}
             </TouchableOpacity>
           ))}
         </View>
       )}
 
-      {/* Top right controls — schedule, metro, stamps toggles */}
+      {/* Top right controls */}
       <View style={ms.topControls}>
         <TouchableOpacity
           style={[ms.toggleBtn, showSchedule && ms.toggleBtnActive, showSchedule && { borderColor: primaryColor }]}
-          onPress={() => { const next = !showSchedule; setShowSchedule(next); setToggle('schedule', next); }}
-        >
+          onPress={() => { const n = !showSchedule; setShowSchedule(n); setToggle('schedule', n); }}>
           <Ionicons name="time-outline" size={18} color={showSchedule ? primaryColor : colors.textMuted} />
         </TouchableOpacity>
         <TouchableOpacity
           style={[ms.toggleBtn, showMetro && ms.toggleBtnActive, showMetro && { borderColor: primaryColor }]}
-          onPress={() => {
-            const next = !showMetro;
-            setShowMetro(next);
-            setToggle('metro', next);
-            webViewRef.current?.injectJavaScript(
-              next
-                ? 'map.addLayer(window._metroLayer);toggleMetroLabels();true;'
-                : 'map.removeLayer(window._metroLayer);toggleMetroLabels();true;'
-            );
-          }}
-        >
+          onPress={() => { const n = !showMetro; setShowMetro(n); setToggle('metro', n); }}>
           <Ionicons name="train-outline" size={18} color={showMetro ? primaryColor : colors.textMuted} />
         </TouchableOpacity>
         <TouchableOpacity
           style={[ms.toggleBtn, showStamps && ms.toggleBtnActive, showStamps && { borderColor: primaryColor }]}
-          onPress={() => {
-            const next = !showStamps;
-            setShowStamps(next);
-            setToggle('stamps', next);
-            webViewRef.current?.injectJavaScript(
-              next
-                ? 'if(window._stampLayer)map.addLayer(window._stampLayer);true;'
-                : 'if(window._stampLayer)map.removeLayer(window._stampLayer);true;'
-            );
-          }}
-        >
+          onPress={() => { const n = !showStamps; setShowStamps(n); setToggle('stamps', n); }}>
           <Ionicons name="pin-outline" size={18} color={showStamps ? primaryColor : colors.textMuted} />
         </TouchableOpacity>
       </View>
 
       {/* Bottom right controls */}
       <View style={ms.bottomControls}>
-        <TouchableOpacity
-          style={ms.locationBtn}
+        <TouchableOpacity style={ms.locationBtn}
           onPress={() => {
             const loc = userLocationRef.current;
-            if (loc && webViewRef.current) {
-              webViewRef.current.injectJavaScript(
-                `map.setView([${loc.lat},${loc.lng}],15);true;`
-              );
+            if (loc && mapRef.current) {
+              mapRef.current.animateToRegion({
+                latitude: loc.lat, longitude: loc.lng,
+                latitudeDelta: 0.01, longitudeDelta: 0.01,
+              }, 500);
             }
-          }}
-        >
-          <View style={ms.locationIcon}>
-            <View style={ms.locationDot} />
-          </View>
+          }}>
+          <View style={ms.locationIcon}><View style={ms.locationDot} /></View>
         </TouchableOpacity>
         <RefreshTimer staleLabel={staleLabel} />
       </View>
@@ -905,19 +690,14 @@ export default function LiveMapScreen() {
         </View>
       )}
 
-      {/* Stamp creation modal */}
       <StampModal
         visible={!!stampModal}
-        name={stampName}
-        emoji={stampEmoji}
-        onChangeName={setStampName}
-        onChangeEmoji={setStampEmoji}
+        name={stampName} emoji={stampEmoji}
+        onChangeName={setStampName} onChangeEmoji={setStampEmoji}
         onCancel={() => setStampModal(null)}
         onSave={() => {
           if (!stampModal || !stampName.trim()) return;
-          const updated = addStamp({ name: stampName.trim(), emoji: stampEmoji, lat: stampModal.lat, lng: stampModal.lng });
-          setStamps(updated);
-          webViewRef.current?.injectJavaScript(buildStampsLayerJS(updated));
+          setStamps(addStamp({ name: stampName.trim(), emoji: stampEmoji, lat: stampModal.lat, lng: stampModal.lng }));
           setStampModal(null);
         }}
       />
@@ -925,7 +705,7 @@ export default function LiveMapScreen() {
   );
 }
 
-/* ── Styles (screen-specific only — shared styles come from mapStyles) ── */
+/* ── Styles ───────────────────────────────────────────────────── */
 
 const s = StyleSheet.create({
   timerPill: {
@@ -939,225 +719,87 @@ const s = StyleSheet.create({
     alignItems: 'center',
     gap: spacing.xs,
   },
-  timerDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: colors.success,
-  },
-  timerText: {
-    color: colors.textMuted,
-    fontSize: font.size.xs,
-    fontWeight: '600',
-    fontVariant: ['tabular-nums'],
-  },
+  timerDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: colors.success },
+  timerText: { color: colors.textMuted, fontSize: font.size.xs, fontWeight: '600', fontVariant: ['tabular-nums'] },
   stalePill: {
-    backgroundColor: colors.overlay,
-    borderRadius: radius.full,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderWidth: 1,
-    borderColor: colors.warning,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
+    backgroundColor: colors.overlay, borderRadius: radius.full,
+    paddingHorizontal: spacing.sm, paddingVertical: 2,
+    borderWidth: 1, borderColor: colors.warning,
+    flexDirection: 'row', alignItems: 'center', gap: 3,
   },
-  staleText: {
-    color: colors.warning,
-    fontSize: 9,
-    fontWeight: '700',
-  },
-  headerTitleWrap: {
-    alignItems: 'flex-start',
-  },
-  headerTitleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  headerLineId: {
-    color: colors.text,
-    fontSize: font.size.lg,
-    fontWeight: '700',
-  },
-  headerRouteDescr: {
-    color: colors.textMuted,
-    fontSize: font.size.xs,
-    fontWeight: '500',
-    marginTop: 1,
-    maxWidth: 220,
-  },
+  staleText: { color: colors.warning, fontSize: 9, fontWeight: '700' },
+  headerTitleWrap: { alignItems: 'flex-start' },
+  headerTitleRow: { flexDirection: 'row', alignItems: 'center' },
+  headerLineId: { color: colors.text, fontSize: font.size.lg, fontWeight: '700' },
+  headerRouteDescr: { color: colors.textMuted, fontSize: font.size.xs, fontWeight: '500', marginTop: 1, maxWidth: 220 },
   routeMenu: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    backgroundColor: colors.surface,
-    borderBottomWidth: 1,
-    borderBottomColor: colors.border,
-    paddingVertical: spacing.xs,
-    paddingHorizontal: spacing.sm,
-    zIndex: 10,
+    position: 'absolute', top: 0, left: 0, right: 0,
+    backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border,
+    paddingVertical: spacing.xs, paddingHorizontal: spacing.sm, zIndex: 10,
   },
   routeMenuItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
-    borderRadius: radius.sm,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingVertical: spacing.sm, paddingHorizontal: spacing.md, borderRadius: radius.sm,
   },
-  routeMenuItemActive: {
-    backgroundColor: colors.card,
-  },
-  routeMenuText: {
-    color: colors.textMuted,
-    fontSize: font.size.sm,
-    fontWeight: '500',
-    flex: 1,
-    marginRight: spacing.sm,
-  },
-  routeMenuTextActive: {
-    color: colors.text,
-    fontWeight: '700',
-  },
+  routeMenuItemActive: { backgroundColor: colors.card },
+  routeMenuText: { color: colors.textMuted, fontSize: font.size.sm, fontWeight: '500', flex: 1, marginRight: spacing.sm },
+  routeMenuTextActive: { color: colors.text, fontWeight: '700' },
   arrivalCard: {
-    position: 'absolute',
-    bottom: spacing.xl * 2,
-    left: spacing.sm,
-    backgroundColor: colors.overlay,
-    borderRadius: radius.lg,
-    padding: spacing.md,
-    borderWidth: 1,
-    borderColor: colors.border,
-    minWidth: 160,
-    maxWidth: 220,
+    position: 'absolute', bottom: spacing.xl * 2, left: spacing.sm,
+    backgroundColor: colors.overlay, borderRadius: radius.lg, padding: spacing.md,
+    borderWidth: 1, borderColor: colors.border, minWidth: 160, maxWidth: 220,
   },
-  arrivalRow: {
-    marginTop: 4,
-  },
-  arrivalBadge: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radius.sm,
-    alignSelf: 'flex-start',
-  },
-  arrivalMin: {
-    color: '#000',
-    fontSize: font.size.sm,
-    fontWeight: '700',
-  },
+  arrivalRow: { marginTop: 4 },
+  arrivalBadge: { paddingHorizontal: spacing.sm, paddingVertical: 2, borderRadius: radius.sm, alignSelf: 'flex-start' },
+  arrivalMin: { color: '#000', fontSize: font.size.sm, fontWeight: '700' },
   scheduleCard: {
-    position: 'absolute',
-    top: spacing.sm,
-    right: 36 + spacing.sm + spacing.sm,
-    backgroundColor: colors.overlay,
-    borderRadius: radius.md,
-    padding: spacing.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-    minWidth: 140,
-    maxWidth: 200,
-    maxHeight: 240,
+    position: 'absolute', top: spacing.sm, right: 36 + spacing.sm + spacing.sm,
+    backgroundColor: colors.overlay, borderRadius: radius.md, padding: spacing.sm,
+    borderWidth: 1, borderColor: colors.border, minWidth: 140, maxWidth: 200, maxHeight: 240,
   },
-  nextDepRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: spacing.sm,
-  },
-  nextDepLabel: {
-    color: colors.textMuted,
-    fontSize: font.size.xs,
-    fontWeight: '600',
-  },
-  scheduleScroll: {
-    maxHeight: 160,
-  },
-  scheduleGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 3,
-  },
-  scheduleTime: {
-    paddingHorizontal: 5,
-    paddingVertical: 2,
-    borderRadius: radius.sm,
-    backgroundColor: colors.card,
-  },
-  scheduleTimeNext: {
-    backgroundColor: colors.primary,
-  },
-  scheduleTimeText: {
-    color: colors.text,
-    fontSize: font.size.xs,
-    fontWeight: '600',
-    fontVariant: ['tabular-nums'],
-  },
-  scheduleTimePast: {
-    color: colors.textMuted,
-    opacity: 0.5,
-  },
-  scheduleTimeNextText: {
-    color: '#FFF',
-    fontWeight: '700',
-  },
+  nextDepRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: spacing.sm },
+  nextDepLabel: { color: colors.textMuted, fontSize: font.size.xs, fontWeight: '600' },
+  scheduleScroll: { maxHeight: 160 },
+  scheduleGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 3 },
+  scheduleTime: { paddingHorizontal: 5, paddingVertical: 2, borderRadius: radius.sm, backgroundColor: colors.card },
+  scheduleTimeText: { color: colors.text, fontSize: font.size.xs, fontWeight: '600', fontVariant: ['tabular-nums'] },
+  scheduleTimePast: { color: colors.textMuted, opacity: 0.5 },
+  scheduleTimeNextText: { color: '#FFF', fontWeight: '700' },
   allLinesBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-    marginTop: spacing.sm,
-    paddingVertical: 4,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 4,
+    marginTop: spacing.sm, paddingVertical: 4,
+    borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border,
   },
-  allLinesBtnText: {
-    fontSize: font.size.xs,
-    fontWeight: '600',
-  },
-  stopLinesScroll: {
-    maxHeight: 180,
-    marginTop: spacing.xs,
-  },
+  allLinesBtnText: { fontSize: font.size.xs, fontWeight: '600' },
+  stopLinesScroll: { maxHeight: 180, marginTop: spacing.xs },
   stopLineRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: 'row', alignItems: 'center',
     paddingVertical: spacing.xs + 2,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: colors.border,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border,
   },
-  stopLineBadge: {
-    borderRadius: radius.sm,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    marginRight: spacing.sm,
-    minWidth: 40,
-    alignItems: 'center',
+  stopLineBadge: { borderRadius: radius.sm, paddingHorizontal: spacing.sm, paddingVertical: 2, marginRight: spacing.sm, minWidth: 40, alignItems: 'center' },
+  stopLineBadgeText: { color: '#FFFFFF', fontSize: font.size.xs, fontWeight: '700' },
+  stopLineDescr: { flex: 1, color: colors.textMuted, fontSize: font.size.xs, marginRight: spacing.sm },
+  stopLineArrBadge: { paddingHorizontal: spacing.sm, paddingVertical: 2, borderRadius: radius.sm },
+  stopLineArrMin: { color: '#000', fontSize: font.size.xs, fontWeight: '700' },
+  stopLineNone: { color: colors.textMuted, fontSize: font.size.sm, fontWeight: '600' },
+  /* ── Native map marker styles ── */
+  stopPinCombo: { width: 28, height: 28, alignItems: 'center', justifyContent: 'center' },
+  stopPin: { width: 14, height: 14, borderRadius: 7, borderWidth: 1.5, borderColor: '#FFF' },
+  stopPinArrow: {
+    width: 0, height: 0,
+    borderLeftWidth: 6, borderRightWidth: 6, borderBottomWidth: 10,
+    borderLeftColor: 'transparent', borderRightColor: 'transparent',
+    borderBottomColor: '#FFFFFF',
+    marginBottom: -3,
   },
-  stopLineBadgeText: {
-    color: '#FFFFFF',
-    fontSize: font.size.xs,
-    fontWeight: '700',
-  },
-  stopLineDescr: {
-    flex: 1,
-    color: colors.textMuted,
-    fontSize: font.size.xs,
-    marginRight: spacing.sm,
-  },
-  stopLineArrBadge: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radius.sm,
-  },
-  stopLineArrMin: {
-    color: '#000',
-    fontSize: font.size.xs,
-    fontWeight: '700',
-  },
-  stopLineNone: {
-    color: colors.textMuted,
-    fontSize: font.size.sm,
-    fontWeight: '600',
+  stopPinSpacer: { width: 1, height: 7 },
+  busPin: { alignItems: 'center' },
+  busPinOuter: { width: 28, height: 28, borderRadius: 14, backgroundColor: '#FFF', justifyContent: 'center', alignItems: 'center' },
+  busPinTriangle: {
+    width: 0, height: 0,
+    borderLeftWidth: 5, borderRightWidth: 5, borderTopWidth: 6,
+    borderLeftColor: 'transparent', borderRightColor: 'transparent', borderTopColor: '#FFF',
+    marginTop: -1,
   },
 });
