@@ -10,6 +10,7 @@
 import type {
   OasaLine,
   OasaRoute,
+  OasaRouteDetail,
   OasaStop,
   OasaArrival,
   OasaBusLocation,
@@ -60,6 +61,19 @@ export const getRoutes = (lineCode: string) =>
 /** Ordered stops for a specific route. */
 export const getStops = (routeCode: string) =>
   api<OasaStop[]>('webGetStops', { p1: routeCode });
+
+/** Detailed route path (road-following polyline points) + stops. */
+export async function getRouteDetails(routeCode: string): Promise<{ lat: number; lng: number }[]> {
+  try {
+    const data = await api<{ details: OasaRouteDetail[] }>('webGetRoutesDetailsAndStops', { p1: routeCode });
+    if (!data || !data.details || data.details.length === 0) return [];
+    return data.details
+      .sort((a, b) => Number(a.routed_order) - Number(b.routed_order))
+      .map((d) => ({ lat: parseFloat(d.routed_y), lng: parseFloat(d.routed_x) }));
+  } catch {
+    return [];
+  }
+}
 
 /** Routes serving a specific stop. */
 export const getRoutesForStop = (stopCode: string) =>
