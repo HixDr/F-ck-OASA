@@ -20,7 +20,7 @@ import { getLocation, subscribe as subscribeLocation } from '../../src/location'
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font } from '../../src/theme';
 import { useBusLocations, useStops, useRoutes, useMLInfo, useSchedule, useLines } from '../../src/hooks';
-import { getStopArrivals, getWalkingRoute, getRoutesForStop } from '../../src/api';
+import { getStopArrivals, getWalkingRoute, getRoutesForStop, getRouteDetails } from '../../src/api';
 import { isFavorite, addFavorite, removeFavorite, getStamps, addStamp, removeStamp, getToggle, setToggle, getCachedBusPositions, setCachedBusPositions } from '../../src/storage';
 import { useNetworkStatus } from '../../src/network';
 import { getUserMarkerSrc } from '../../src/userMarker';
@@ -70,8 +70,12 @@ function bearingDeg(lat1: number, lng1: number, lat2: number, lng2: number): num
 function buildRouteLayerJS(
   stops: Array<{ lat: number; lng: number; name: string; code: string }>,
   accentColor = '#7B2CBF',
+  pathCoords?: Array<{ lat: number; lng: number }>,
 ) {
-  const polylineCoords = stops.map((s) => `[${s.lat},${s.lng}]`).join(',');
+  // Use detailed road path if available, otherwise fall back to stop-to-stop
+  const polySource = pathCoords && pathCoords.length > 1 ? pathCoords : stops;
+  const polylineCoords = polySource.map((s) => `[${s.lat},${s.lng}]`).join(',');
+  const stopCoords = stops.map((s) => `[${s.lat},${s.lng}]`).join(',');
 
   // Pre-compute bearing angles on the RN side so the WebView doesn't have to
   const stopDataEntries = stops.map((s, i) => {
@@ -87,14 +91,14 @@ function buildRouteLayerJS(
 
   // Fit map to route bounds so the whole line is visible and centered
   const fitBoundsJS = stops.length > 1
-    ? `map.fitBounds([${polylineCoords}],{padding:[40,40],maxZoom:14});`
+    ? `map.fitBounds([${stopCoords}],{padding:[40,40],maxZoom:14});`
     : '';
 
   return `
     window._routeLayer.clearLayers();
     window._routeStopMarkers=[];
     window._routeStops=[${stopDataEntries.join(',')}];
-    ${stops.length > 1 ? `L.polyline([${polylineCoords}],{color:'${accentColor}',weight:3.5,opacity:0.7,lineCap:'round',lineJoin:'round'}).addTo(window._routeLayer);` : ''}
+    ${polySource.length > 1 ? `L.polyline([${polylineCoords}],{color:'${accentColor}',weight:3.5,opacity:0.7,lineCap:'round',lineJoin:'round'}).addTo(window._routeLayer);` : ''}
     window._updateRouteStops=function(){
       var z=map.getZoom();
       var show=z>=14;
@@ -329,12 +333,22 @@ export default function LiveMapScreen() {
     }
   }, [allRoutes, activeRouteCode]);
 
+  // Fetch road-following path for active route
+  useEffect(() => {
+    if (!activeRouteCode) { setRoutePath([]); return; }
+    setRoutePath([]);
+    getRouteDetails(activeRouteCode).then(setRoutePath).catch(() => setRoutePath([]));
+  }, [activeRouteCode]);
+
   const { data: buses, isLoading: loadingBuses } = useBusLocations(activeRouteCode);
   const { data: stops } = useStops(activeRouteCode);
   const isOnline = useNetworkStatus();
   const webViewRef = useRef<WebView>(null);
   const mapViewRef = useRef<{ lat: number; lng: number; zoom: number } | null>(null);
   const userLocationRef = useRef<{ lat: number; lng: number } | null>(getLocation());
+
+  // Road-following path for current route
+  const [routePath, setRoutePath] = useState<Array<{lat: number; lng: number}>>([]);
 
   // Stale bus positions tracking
   const [staleBusTs, setStaleBusTs] = useState<number | null>(null);
@@ -445,8 +459,8 @@ export default function LiveMapScreen() {
       pendingRouteUpdate.current = parsedStops;
       return;
     }
-    webViewRef.current?.injectJavaScript(buildRouteLayerJS(parsedStops, primaryColor));
-  }, [parsedStops, primaryColor]);
+    webViewRef.current?.injectJavaScript(buildRouteLayerJS(parsedStops, primaryColor, routePath));
+  }, [parsedStops, primaryColor, routePath]);
 
   // Inject updated bus positions into the WebView on each poll cycle
   useEffect(() => {
@@ -492,7 +506,7 @@ export default function LiveMapScreen() {
           `);
         }
         if (pendingRouteUpdate.current) {
-          webViewRef.current?.injectJavaScript(buildRouteLayerJS(pendingRouteUpdate.current, primaryColor));
+          webViewRef.current?.injectJavaScript(buildRouteLayerJS(pendingRouteUpdate.current, primaryColor, routePath));
           pendingRouteUpdate.current = null;
         }
         if (pendingBusUpdate.current) {

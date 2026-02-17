@@ -20,6 +20,12 @@ export interface OasaRoute {
   RouteDistance: string;
 }
 
+export interface OasaRouteDetail {
+  routed_x: string;
+  routed_y: string;
+  routed_order: string;
+}
+
 export interface OasaStop {
   StopCode: string;
   StopID: string;
