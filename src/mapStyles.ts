@@ -107,4 +107,38 @@ export const mapStyles = StyleSheet.create({
     fontSize: font.size.xs,
     fontWeight: '600',
   },
+  userDot: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(66,133,244,0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  userDotInner: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: '#4285F4',
+    borderWidth: 2.5,
+    borderColor: '#FFF',
+  },
+  catIcon: {
+    width: 30,
+    height: 30,
+  },
+  stampMarker: {
+    alignItems: 'center' as const,
+  },
+  stampEmoji: {
+    fontSize: 22,
+  },
+  stampLabel: {
+    fontSize: 9,
+    color: '#FFF',
+    textShadowColor: 'rgba(0,0,0,0.9)',
+    textShadowOffset: { width: 0, height: 0 },
+    textShadowRadius: 4,
+    marginTop: 1,
+  },
 });
