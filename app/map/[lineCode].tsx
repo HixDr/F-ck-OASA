@@ -496,7 +496,7 @@ export default function LiveMapScreen() {
         {showStamps && stamps.map((st) => (
           <Marker key={`stamp-${st.id}`}
             coordinate={{ latitude: st.lat, longitude: st.lng }}
-            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}
+            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={true}
             onPress={() => {
               Alert.alert('Remove stamp?', `Delete "${st.name}"?`, [
                 { text: 'Cancel', style: 'cancel' },
