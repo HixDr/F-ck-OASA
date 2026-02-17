@@ -1,0 +1,459 @@
+/**
+ * Home Screen — Favorites + nearby stops.
+ * Black/dark-purple themed with favorite line cards.
+ */
+
+import React, { useCallback, useRef, useState } from 'react';
+import {
+  View,
+  Text,
+  Image,
+  Modal,
+  FlatList,
+  TouchableOpacity,
+  StyleSheet,
+  ActivityIndicator,
+  RefreshControl,
+} from 'react-native';
+import { useRouter } from 'expo-router';
+import { Stack } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { colors, spacing, radius, font } from '../src/theme';
+import { getFavorites, removeFavorite } from '../src/storage';
+import { useLines } from '../src/hooks';
+import { USER_MARKER_BASE64 } from '../src/userMarker';
+import { useSettings } from '../src/settings';
+import type { FavoriteLine } from '../src/types';
+
+/* ── HSL → Hex helper ────────────────────────────────────────── */
+
+const HUE_STEPS = 36; // one slice per 10°
+
+function hslToHex(h: number, s: number, l: number): string {
+  s /= 100; l /= 100;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h / 30) % 12;
+    const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    return Math.round(255 * color).toString(16).padStart(2, '0');
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+/** Build hue bar colors (S=70%, L=45% → vivid accent) */
+const HUE_COLORS = Array.from({ length: HUE_STEPS }, (_, i) =>
+  hslToHex((i * 360) / HUE_STEPS, 70, 45),
+);
+
+/** Extract hue (0-360) from a hex color string */
+function hexToHue(hex: string): number {
+  const r = parseInt(hex.slice(1, 3), 16) / 255;
+  const g = parseInt(hex.slice(3, 5), 16) / 255;
+  const b = parseInt(hex.slice(5, 7), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  if (max === min) return 0;
+  const d = max - min;
+  let h = 0;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60;
+  else if (max === g) h = ((b - r) / d + 2) * 60;
+  else h = ((r - g) / d + 4) * 60;
+  return h;
+}
+
+/* ── Favorite Card ───────────────────────────────────────────── */
+
+function FavoriteCard({ fav, onRemove, accentColor }: { fav: FavoriteLine; onRemove: () => void; accentColor: string }) {
+  const router = useRouter();
+
+  return (
+    <TouchableOpacity
+      style={s.card}
+      activeOpacity={0.7}
+      onPress={() =>
+        router.push({
+          pathname: '/map/[lineCode]',
+          params: { lineCode: fav.lineCode, lineId: fav.lineId, lineDescr: fav.lineDescrEng },
+        })
+      }
+    >
+      <View style={s.cardHeader}>
+        <View style={[s.lineBadge, { backgroundColor: accentColor }]}>
+          <Text style={s.lineBadgeText}>{fav.lineId}</Text>
+        </View>
+        <Text style={s.cardTitle} numberOfLines={1}>
+          {fav.lineDescrEng}
+        </Text>
+        <TouchableOpacity onPress={onRemove} hitSlop={12}>
+          <Ionicons name="heart" size={22} color="#B91C1C" />
+        </TouchableOpacity>
+      </View>
+    </TouchableOpacity>
+  );
+}
+
+/* ── Home Screen ─────────────────────────────────────────────── */
+
+export default function HomeScreen() {
+  const router = useRouter();
+  const [favorites, setFavorites] = useState<FavoriteLine[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const { primaryColor, setPrimaryColor, iconStyle, setIconStyle } = useSettings();
+  const hueBarWidth = useRef(0);
+
+  // Preload lines cache in background
+  useLines();
+
+  const loadFavorites = useCallback(() => {
+    setFavorites(getFavorites());
+  }, []);
+
+  // Reload favorites when screen gains focus (returning from other screens)
+  useFocusEffect(
+    useCallback(() => {
+      loadFavorites();
+    }, [loadFavorites]),
+  );
+
+  const handleRemove = useCallback(
+    (lineCode: string) => {
+      const updated = removeFavorite(lineCode);
+      setFavorites(updated);
+    },
+    [],
+  );
+
+  const onRefresh = useCallback(() => {
+    setRefreshing(true);
+    loadFavorites();
+    setRefreshing(false);
+  }, [loadFavorites]);
+
+  return (
+    <View style={s.container}>
+      <Stack.Screen options={{ headerShown: false }} />
+      {/* Header */}
+      <View style={s.header}>
+        <View style={s.logoRow}>
+          <TouchableOpacity onPress={() => setShowSettings(true)} activeOpacity={0.7}>
+            <Image source={{ uri: USER_MARKER_BASE64 }} style={s.logoIcon} />
+          </TouchableOpacity>
+          <Text style={s.logo}>F*ck OASA</Text>
+        </View>
+        <TouchableOpacity
+          style={s.searchBtn}
+          onPress={() => router.push('/search')}
+        >
+          <Ionicons name="search" size={20} color={colors.text} />
+          <Text style={s.searchBtnText}>Find a line…</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={s.nearbyBtn}
+          activeOpacity={0.7}
+          onPress={() => router.push('/map/nearby')}
+        >
+          <Ionicons name="location" size={20} color={primaryColor} />
+          <Text style={s.nearbyBtnText}>Nearby Stops</Text>
+          <Ionicons name="chevron-forward" size={16} color={colors.textMuted} style={{ marginLeft: 'auto' }} />
+        </TouchableOpacity>
+      </View>
+
+      {/* Favorites List */}
+      {favorites.length === 0 ? (
+        <View style={s.empty}>
+          <Ionicons name="heart-outline" size={48} color={colors.border} />
+          <Text style={s.emptyTitle}>No favorites yet</Text>
+          <Text style={s.emptySubtitle}>
+            Search for a bus line and tap the heart to add it here.
+          </Text>
+        </View>
+      ) : (
+        <FlatList
+          data={favorites}
+          keyExtractor={(item) => item.lineCode}
+          renderItem={({ item }) => (
+            <FavoriteCard fav={item} onRemove={() => handleRemove(item.lineCode)} accentColor={primaryColor} />
+          )}
+          contentContainerStyle={s.list}
+          refreshControl={
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={onRefresh}
+              tintColor={colors.primaryLight}
+              colors={[colors.primaryLight]}
+            />
+          }
+          showsVerticalScrollIndicator={false}
+        />
+      )}
+
+      {/* Settings modal */}
+      <Modal visible={showSettings} transparent animationType="fade" onRequestClose={() => setShowSettings(false)}>
+        <TouchableOpacity style={s.modalOverlay} activeOpacity={1} onPress={() => setShowSettings(false)}>
+          <TouchableOpacity style={s.modalCard} activeOpacity={1} onPress={() => {}}>
+            <Text style={s.modalTitle}>Settings</Text>
+
+            {/* Icon style */}
+            <Text style={s.modalLabel}>Location Icon</Text>
+            <View style={s.iconRow}>
+              <TouchableOpacity
+                style={[s.iconOption, iconStyle === 'cat' && { borderColor: primaryColor }]}
+                onPress={() => setIconStyle('cat')}
+              >
+                <Image source={{ uri: USER_MARKER_BASE64 }} style={{ width: 28, height: 28 }} />
+                <Text style={s.iconOptionText}>Cat</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.iconOption, iconStyle === 'pin' && { borderColor: primaryColor }]}
+                onPress={() => setIconStyle('pin')}
+              >
+                <View style={{ width: 26, height: 26, borderRadius: 13, backgroundColor: '#4285F4', borderWidth: 2, borderColor: '#FFF' }} />
+                <Text style={s.iconOptionText}>Dot</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Color picker — hue bar */}
+            <Text style={[s.modalLabel, { marginTop: spacing.md }]}>Accent Color</Text>
+            <View style={s.hueBarWrap}>
+              <View
+                style={s.hueBar}
+                onStartShouldSetResponder={() => true}
+                onMoveShouldSetResponder={() => true}
+                onResponderTerminationRequest={() => false}
+                onResponderGrant={(e) => {
+                  const x = e.nativeEvent.locationX;
+                  const w = hueBarWidth.current;
+                  if (w > 0) {
+                    const hue = Math.max(0, Math.min(359, (x / w) * 360));
+                    setPrimaryColor(hslToHex(hue, 70, 45));
+                  }
+                }}
+                onResponderMove={(e) => {
+                  const x = e.nativeEvent.locationX;
+                  const w = hueBarWidth.current;
+                  if (w > 0) {
+                    const hue = Math.max(0, Math.min(359, (x / w) * 360));
+                    setPrimaryColor(hslToHex(hue, 70, 45));
+                  }
+                }}
+                onLayout={(e) => { hueBarWidth.current = e.nativeEvent.layout.width; }}
+              >
+                {HUE_COLORS.map((c, i) => (
+                  <View key={i} style={{ flex: 1, backgroundColor: c }} />
+                ))}
+                <View style={[s.hueIndicator, { left: `${(hexToHue(primaryColor) / 360) * 100}%` }]} />
+              </View>
+              <View style={[s.huePreview, { backgroundColor: primaryColor }]} />
+            </View>
+
+            <TouchableOpacity style={[s.modalDone, { backgroundColor: primaryColor }]} onPress={() => setShowSettings(false)}>
+              <Text style={s.modalDoneText}>Done</Text>
+            </TouchableOpacity>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
+    </View>
+  );
+}
+
+/* ── Styles ──────────────────────────────────────────────────── */
+
+const s = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: colors.bg,
+    paddingTop: 56,
+  },
+  header: {
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.md,
+  },
+  logoRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: spacing.md,
+    gap: spacing.sm,
+  },
+  logoIcon: {
+    width: 32,
+    height: 32,
+  },
+  logo: {
+    fontSize: font.size.xxl,
+    fontWeight: '800',
+    color: colors.primaryLight,
+  },
+  searchBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 4,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  searchBtnText: {
+    color: colors.textMuted,
+    fontSize: font.size.md,
+    marginLeft: spacing.sm,
+  },
+  nearbyBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm + 4,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginTop: spacing.sm,
+  },
+  nearbyBtnText: {
+    color: colors.text,
+    fontSize: font.size.md,
+    fontWeight: '600',
+    marginLeft: spacing.sm,
+  },
+  list: {
+    paddingHorizontal: spacing.lg,
+    paddingBottom: 120,
+  },
+  card: {
+    backgroundColor: colors.card,
+    borderRadius: radius.lg,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  lineBadge: {
+    backgroundColor: colors.primary, // overridden inline
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: spacing.xs,
+    marginRight: spacing.sm,
+    minWidth: 44,
+    alignItems: 'center',
+  },
+  lineBadgeText: {
+    color: '#FFFFFF',
+    fontSize: font.size.sm,
+    fontWeight: '700',
+  },
+  cardTitle: {
+    flex: 1,
+    color: colors.text,
+    fontSize: font.size.md,
+    fontWeight: '500',
+  },
+  empty: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: spacing.xl,
+  },
+  emptyTitle: {
+    color: colors.textMuted,
+    fontSize: font.size.lg,
+    fontWeight: '600',
+    marginTop: spacing.md,
+  },
+  emptySubtitle: {
+    color: colors.textMuted,
+    fontSize: font.size.sm,
+    textAlign: 'center',
+    marginTop: spacing.xs,
+    opacity: 0.7,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  modalCard: {
+    backgroundColor: colors.surface,
+    borderRadius: radius.xl,
+    padding: spacing.lg,
+    width: '80%',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  modalTitle: {
+    color: colors.text,
+    fontSize: font.size.lg,
+    fontWeight: '700',
+    marginBottom: spacing.md,
+  },
+  modalLabel: {
+    color: colors.textMuted,
+    fontSize: font.size.sm,
+    fontWeight: '600',
+    marginBottom: spacing.sm,
+  },
+  iconRow: {
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  iconOption: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: spacing.sm,
+    paddingHorizontal: spacing.md,
+    borderRadius: radius.md,
+    borderWidth: 2,
+    borderColor: colors.border,
+    gap: 4,
+    minWidth: 72,
+  },
+  iconOptionText: {
+    color: colors.textMuted,
+    fontSize: font.size.xs,
+    fontWeight: '600',
+  },
+  hueBarWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  hueBar: {
+    flex: 1,
+    height: 32,
+    borderRadius: radius.sm,
+    overflow: 'hidden',
+    flexDirection: 'row',
+  },
+  hueIndicator: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 3,
+    marginLeft: -1.5,
+    backgroundColor: '#FFF',
+    borderRadius: 1.5,
+  },
+  huePreview: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    borderWidth: 2,
+    borderColor: '#FFF',
+  },
+  modalDone: {
+    marginTop: spacing.lg,
+    borderRadius: radius.md,
+    paddingVertical: spacing.sm + 2,
+    alignItems: 'center',
+  },
+  modalDoneText: {
+    color: '#FFF',
+    fontSize: font.size.md,
+    fontWeight: '700',
+  },
+});
