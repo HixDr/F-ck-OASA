@@ -17,6 +17,7 @@ import type {
   OasaNearbyStop,
   OasaMLInfo,
   OasaSchedLines,
+  OasaDailySchedule,
 } from './types';
 
 const BASE = 'http://telematics.oasa.gr/api/';
@@ -100,9 +101,13 @@ export const getClosestStops = (lat: number, lng: number) =>
 /** All lines with MasterLine info (ml_code, sdc_code mapping). */
 export const getMLInfo = () => api<OasaMLInfo[]>('webGetLinesWithMLInfo');
 
-/** Schedule departure times for a line. */
+/** Schedule departure times for a line (needs mlCode + sdcCode). */
 export const getSchedLines = (mlCode: string, sdcCode: string, lineCode: string) =>
   api<OasaSchedLines>('getSchedLines', { p1: mlCode, p2: sdcCode, p3: lineCode });
+
+/** Today's schedule for a line — auto-selects weekday/Saturday/Sunday. */
+export const getDailySchedule = (lineCode: string) =>
+  api<OasaDailySchedule>('getDailySchedule', { line_code: lineCode });
 
 /* ── Walking Route (Valhalla) ────────────────────────────────── */
 

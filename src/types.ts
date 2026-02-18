@@ -93,6 +93,24 @@ export interface OasaSchedLines {
   go: OasaSchedEntry[];
 }
 
+/* ── Daily Schedule (from getDailySchedule) ──────────────────── */
+
+export interface OasaDailySchedEntry {
+  sdd_line1: string;
+  sdd_line2: string | null;
+  sde_start1: string;  // "1900-01-01 HH:MM:SS"
+  sde_end1: string | null;
+  sde_start2: string | null;
+  sde_end2: string | null;
+  line_descr: string;
+  line_descr_eng: string;
+}
+
+export interface OasaDailySchedule {
+  come: OasaDailySchedEntry[];
+  go: OasaDailySchedEntry[];
+}
+
 /* ── App-Level Types ─────────────────────────────────────────── */
 
 export interface FavoriteLine {
