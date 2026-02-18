@@ -3,7 +3,7 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { Stack } from 'expo-router';
+import { Stack, usePathname } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { View, Text, ActivityIndicator, StyleSheet, TouchableOpacity } from 'react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -36,21 +36,37 @@ function OfflineBanner() {
   );
 }
 
-/* ── Alert Banner ────────────────────────────────────────────── */
+/* ── Alert Pill (floating) ────────────────────────────────────── */
 
-function AlertBanner() {
+function AlertPill() {
   const [alert, setAlert] = useState<AlertConfig | null>(null);
   const insets = useSafeAreaInsets();
+  const pathname = usePathname();
+  const isMap = pathname.startsWith('/map');
+  const [deferredIsMap, setDeferredIsMap] = useState(isMap);
+
   useEffect(() => subscribeAlertConfig(setAlert), []);
+
+  // Delay position change to let screen transition finish
+  useEffect(() => {
+    const t = setTimeout(() => setDeferredIsMap(isMap), 350);
+    return () => clearTimeout(t);
+  }, [isMap]);
+
   if (!alert) return null;
+
+  const posStyle = deferredIsMap
+    ? { top: insets.top + spacing.xl + spacing.lg + spacing.xs, left: spacing.sm }
+    : { top: insets.top + 19, right: spacing.xl + spacing.md };
+
   return (
-    <View style={[ls.alertBanner, { paddingTop: insets.top + spacing.xs + 2 }]}>
-      <Text style={ls.alertBannerIcon}>🔔</Text>
-      <Text style={ls.alertBannerText} numberOfLines={1}>
-        {alert.lineId} — ≤{alert.thresholdMin}min at {alert.stopName}
-      </Text>
-      <TouchableOpacity onPress={() => stopAlertWatch()} hitSlop={8}>
-        <Text style={ls.alertBannerDismiss}>✕</Text>
+    <View style={[ls.alertPill, posStyle]}>
+      <Text style={ls.alertPillIcon}>🔔</Text>
+      <View style={ls.alertPillContent}>
+        <Text style={ls.alertPillLine} numberOfLines={1}>{alert.lineId} ≤{alert.thresholdMin}′</Text>
+      </View>
+      <TouchableOpacity onPress={() => stopAlertWatch()} hitSlop={12} style={ls.alertPillClose}>
+        <Text style={ls.alertPillCloseText}>✕</Text>
       </TouchableOpacity>
     </View>
   );
@@ -68,28 +84,40 @@ const ls = StyleSheet.create({
     fontSize: font.size.xs,
     fontWeight: '700',
   },
-  alertBanner: {
-    backgroundColor: '#451A03',
+  alertPill: {
+    position: 'absolute',
     flexDirection: 'row',
     alignItems: 'center',
+    backgroundColor: colors.warning,
+    borderRadius: radius.full,
     paddingVertical: spacing.xs + 2,
-    paddingHorizontal: spacing.md,
+    paddingHorizontal: spacing.sm + 2,
     gap: spacing.xs,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: '#F59E0B',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 6,
   },
-  alertBannerIcon: { fontSize: 12 },
-  alertBannerText: {
-    flex: 1,
-    color: '#FBBF24',
+  alertPillIcon: { fontSize: 14 },
+  alertPillContent: { },
+  alertPillLine: {
+    color: '#000',
     fontSize: font.size.xs,
     fontWeight: '700',
   },
-  alertBannerDismiss: {
-    color: '#FBBF24',
-    fontSize: font.size.sm,
+  alertPillClose: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0,0,0,0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  alertPillCloseText: {
+    color: '#000',
+    fontSize: font.size.xs,
     fontWeight: '700',
-    paddingHorizontal: spacing.xs,
   },
 });
 
@@ -118,7 +146,6 @@ export default function RootLayout() {
     <QueryClientProvider client={queryClient}>
       <StatusBar style="light" backgroundColor={colors.bg} />
       <OfflineBanner />
-      <AlertBanner />
       <Stack
         screenOptions={{
           headerStyle: { backgroundColor: colors.bg },
@@ -128,6 +155,7 @@ export default function RootLayout() {
           animation: 'slide_from_right',
         }}
       />
+      <AlertPill />
     </QueryClientProvider>
     </SettingsProvider>
   );

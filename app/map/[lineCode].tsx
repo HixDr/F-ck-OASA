@@ -627,15 +627,6 @@ export default function LiveMapScreen() {
 
       {/* Stop arrivals card + alert pill */}
       <View style={[s.leftStack, kbHeight > 0 && { bottom: kbHeight + spacing.sm }]}>
-        {arrivalAlert && (
-          <View style={s.alertPill}>
-            <Ionicons name="notifications" size={12} color={colors.warning} />
-            <Text style={s.alertPillText}>≤{arrivalAlert.thresholdMin}min</Text>
-            <TouchableOpacity onPress={() => stopAlertWatch()} hitSlop={8}>
-              <Ionicons name="close-circle" size={14} color={colors.textMuted} />
-            </TouchableOpacity>
-          </View>
-        )}
         {selectedStop && (
           <View style={[s.arrivalCard, stopLines && s.arrivalCardExpanded]}>
           <View style={ms.arrivalHeader}>
@@ -713,6 +704,7 @@ export default function LiveMapScreen() {
                             thresholdMin: min,
                             lineId: lineId ?? '',
                             routeCodes: [...lineRouteCodes],
+                            color: primaryColor,
                           });
                           setShowAlertPicker(false);
                         }
