@@ -22,11 +22,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font } from '../../src/theme';
 import { useClosestStops, useLines } from '../../src/hooks';
 import { getStopArrivals, getRoutesForStop, getWalkingRoute } from '../../src/api';
-import { getStamps, addStamp, removeStamp, getToggle, setToggle } from '../../src/storage';
+import { getStamps, addStamp, removeStamp, getToggle, setToggle, isFavoriteStop, addFavoriteStop, removeFavoriteStop } from '../../src/storage';
 import { GOOGLE_DARK_STYLE } from '../../src/googleMapStyle';
 import { METRO_LINES } from '../../src/metro';
 import { mapStyles as ms } from '../../src/mapStyles';
-import { buildLineGroups, getArrivalColor } from '../../src/mapUtils';
+import { buildLineGroups, enrichWithDirectionHints, getArrivalColor } from '../../src/mapUtils';
 import { useSettings } from '../../src/settings';
 import { USER_MARKER_BASE64 } from '../../src/userMarker';
 import StampModal from '../../src/components/StampModal';
@@ -316,13 +316,35 @@ export default function NearbyMapScreen() {
         <View style={s.arrivalCard}>
           <View style={ms.arrivalHeader}>
             <Text style={ms.arrivalName} numberOfLines={1}>{selectedStop.name}</Text>
-            <TouchableOpacity
-              onPress={() => {
-                setSelectedStop(null); selectedStopRef.current = null;
-                selectedStopRoutesRef.current = new Map(); setWalkCoords([]);
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <TouchableOpacity onPress={() => {
+                if (isFavoriteStop(selectedStop.stopCode)) {
+                  Alert.alert('Remove Stop', `Remove "${selectedStop.name}" from saved stops?`, [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Remove', style: 'destructive', onPress: () => {
+                      removeFavoriteStop(selectedStop.stopCode);
+                      setSelectedStop((prev) => prev ? { ...prev } : prev);
+                    }},
+                  ]);
+                } else {
+                  addFavoriteStop({ stopCode: selectedStop.stopCode, stopName: selectedStop.name, lat: selectedStop.lat, lng: selectedStop.lng });
+                  setSelectedStop((prev) => prev ? { ...prev } : prev);
+                }
               }} hitSlop={10}>
-              <Ionicons name="close" size={18} color={colors.textMuted} />
-            </TouchableOpacity>
+                <Ionicons
+                  name={isFavoriteStop(selectedStop.stopCode) ? 'bookmark' : 'bookmark-outline'}
+                  size={16}
+                  color={isFavoriteStop(selectedStop.stopCode) ? primaryColor : colors.textMuted}
+                />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => {
+                  setSelectedStop(null); selectedStopRef.current = null;
+                  selectedStopRoutesRef.current = new Map(); setWalkCoords([]);
+                }} hitSlop={10}>
+                <Ionicons name="close" size={18} color={colors.textMuted} />
+              </TouchableOpacity>
+            </View>
           </View>
           {selectedStop.walkMin !== null && (
             <View style={ms.walkRow}>
@@ -346,7 +368,7 @@ export default function NearbyMapScreen() {
                   <View style={[s.lineBadge, { backgroundColor: primaryColor }]}>
                     <Text style={s.lineBadgeText}>{line.lineId}</Text>
                   </View>
-                  <Text style={s.lineDescr} numberOfLines={1}>{line.lineDescrEng}</Text>
+                  <Text style={s.lineDescr}>{line.lineDescrEng}</Text>
                   {line.nextMin != null ? (
                     <View style={[s.lineArrivalBadge, { backgroundColor: line.color }]}>
                       <Text style={s.lineArrivalMin}>{line.nextMin}'</Text>

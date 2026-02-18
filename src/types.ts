@@ -109,3 +109,12 @@ export interface MapStamp {
   lat: number;
   lng: number;
 }
+
+export interface FavoriteStop {
+  stopCode: string;
+  stopName: string;
+  lat: number;
+  lng: number;
+  /** Line codes to display. null/undefined = show all. */
+  visibleLines?: string[] | null;
+}
