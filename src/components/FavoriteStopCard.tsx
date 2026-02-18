@@ -259,6 +259,7 @@ export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props
         thresholdMin: min,
         lineId: line.lineId,
         routeCodes,
+        color: primaryColor,
       });
       setAlertLineCode(null);
     }
