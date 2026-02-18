@@ -194,6 +194,9 @@ export default function HomeScreen() {
           renderItem={() => null}
           ListHeaderComponent={
             <>
+              {(favoriteStops.length > 0 || favorites.length > 0) && (
+                <Text style={s.sectionHint}>Long press to remove</Text>
+              )}
               {favoriteStops.length > 0 && (
                 <View style={s.stopsSection}>
                   <Text style={s.sectionLabel}>Saved Stops</Text>
@@ -210,7 +213,6 @@ export default function HomeScreen() {
               {favorites.length > 0 && (
                 <View>
                   <Text style={s.sectionLabel}>Saved Lines</Text>
-                  <Text style={s.sectionHint}>Long press to remove</Text>
                   <View style={s.lineGrid}>
                     {favorites.map((fav) => (
                       <FavoriteCard key={fav.lineCode} fav={fav} onRemove={() => handleRemove(fav.lineCode, fav.lineId)} accentColor={primaryColor} />

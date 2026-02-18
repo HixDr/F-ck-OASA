@@ -52,6 +52,8 @@ export interface AlertConfig {
   thresholdMin: number;
   lineId: string;
   routeCodes: string[];
+  /** Accent color for the notification (defaults to primary). */
+  color?: string;
 }
 
 /* ── State ────────────────────────────────────────────────────── */
@@ -197,7 +199,7 @@ export async function startAlertWatch(
     taskTitle: `🔔 Monitoring ${config.lineId}`,
     taskDesc: `Alert when ≤${config.thresholdMin}min at ${config.stopName}`,
     taskIcon: { name: 'notification_icon', type: 'drawable' },
-    color: '#F59E0B',
+    color: config.color ?? '#6366F1',
     linkingURI: 'fck-oasa://',
     parameters: {},
   });
