@@ -44,6 +44,8 @@ export const BusMarkerRenderer = memo(function BusMarkerRenderer({
         height={64}
         viewBox="0 0 48 64"
       >
+        {/* Dark outline for contrast against same-color polyline */}
+        <Path d={PIN_PATH} fill="#000000" stroke="#000000" strokeWidth={3} />
         <Path d={PIN_PATH} fill={color} />
         <Circle cx={24} cy={22} r={14.5} fill="#FFFFFF" />
         <G transform="translate(14.5, 12.5) scale(0.79)">
