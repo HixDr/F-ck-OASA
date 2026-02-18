@@ -5,7 +5,7 @@
 import { useQuery } from '@tanstack/react-query';
 import * as api from './api';
 import { getCachedLines, setCachedLines, getCachedSchedule, setCachedSchedule, getCachedStops, setCachedStops } from './storage';
-import type { OasaLine, OasaMLInfo } from './types';
+import type { OasaLine, OasaMLInfo, OasaDailySchedule } from './types';
 
 /** All bus lines — backed by AsyncStorage cache with 24h TTL. */
 export function useLines() {
@@ -104,17 +104,14 @@ export function useMLInfo() {
   });
 }
 
-/** Schedule for a specific line — cached to AsyncStorage for offline use. */
-export function useSchedule(
-  mlCode: string | undefined,
-  sdcCode: string | undefined,
-  lineCode: string | undefined,
-) {
-  return useQuery({
-    queryKey: ['schedule', mlCode, sdcCode, lineCode],
+/** Today's schedule for a line — uses getDailySchedule (auto weekday/Saturday/Sunday).
+ *  Cached to AsyncStorage for offline use. */
+export function useSchedule(lineCode: string | undefined) {
+  return useQuery<OasaDailySchedule>({
+    queryKey: ['schedule', lineCode],
     queryFn: async () => {
       try {
-        const fresh = await api.getSchedLines(mlCode!, sdcCode!, lineCode!);
+        const fresh = await api.getDailySchedule(lineCode!);
         if (fresh) {
           setCachedSchedule(lineCode!, fresh);
         }
@@ -126,7 +123,7 @@ export function useSchedule(
         throw err;
       }
     },
-    enabled: !!mlCode && !!sdcCode && !!lineCode,
+    enabled: !!lineCode,
     staleTime: 24 * 60 * 60 * 1000,
   });
 }

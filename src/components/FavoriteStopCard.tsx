@@ -20,12 +20,12 @@ import {
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font } from '../theme';
-import { getStopArrivals, getRoutesForStop, getSchedLines } from '../api';
+import { getStopArrivals, getRoutesForStop, getRoutes, getDailySchedule } from '../api';
 import { updateFavoriteStop, getCachedSchedule, setCachedSchedule } from '../storage';
-import { useLines, useMLInfo } from '../hooks';
+import { useLines } from '../hooks';
 import { buildLineGroups, enrichWithDirectionHints, getArrivalColor, type LineGroup } from '../mapUtils';
 import { startAlertWatch, stopAlertWatch, subscribeAlertConfig, type AlertConfig } from '../notifications';
-import type { FavoriteStop, OasaLine, OasaMLInfo } from '../types';
+import type { FavoriteStop, OasaLine, OasaDailySchedule } from '../types';
 
 const POLL_INTERVAL = 15_000;
 
@@ -35,13 +35,22 @@ interface LineSchedule {
   nextDeparture: string | null;
 }
 
-/** Parse schedule data into sorted HH:MM times and find next departure. */
-function parseSchedule(data: { go?: Array<{ sde_start1?: string }>; come?: Array<{ sde_start1?: string }> }): LineSchedule {
-  const entries = [...(data.go ?? []), ...(data.come ?? [])];
-  const times = entries
-    .map((e) => { const m = e.sde_start1?.match(/(\d{2}):(\d{2})/); return m ? `${m[1]}:${m[2]}` : null; })
-    .filter((t): t is string => t !== null);
-  const sorted = [...new Set(times)].sort();
+/** Parse schedule data into sorted HH:MM times and find next departure.
+ *  direction: 'go' | 'come' — picks only the matching route direction.
+ *  GO: sde_start1 from go entries (departure from terminus A)
+ *  COME: sde_start2 from come entries (departure from terminus B)
+ */
+function parseSchedule(data: OasaDailySchedule, direction: 'go' | 'come'): LineSchedule {
+  const entries = direction === 'go' ? (data.go ?? []) : (data.come ?? []);
+  const times = new Set<string>();
+  for (const e of entries) {
+    // GO = departure from terminus A (sde_start1), COME = departure from terminus B (sde_start2)
+    const field = direction === 'go' ? e.sde_start1 : e.sde_start2;
+    if (!field) continue;
+    const m = field.match(/(\d{2}):(\d{2})/);
+    if (m) times.add(`${m[1]}:${m[2]}`);
+  }
+  const sorted = [...times].sort();
   const now = new Date();
   const nowMin = now.getHours() * 60 + now.getMinutes();
   let next: string | null = null;
@@ -123,11 +132,6 @@ export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props
   const [alertThreshold, setAlertThreshold] = useState('5');
 
   // Schedule state
-  const { data: mlInfoData } = useMLInfo();
-  const mlMap = useMemo(() => {
-    if (!mlInfoData) return new Map<string, OasaMLInfo>();
-    return new Map(mlInfoData.map((m) => [m.line_code, m]));
-  }, [mlInfoData]);
   const [scheduleMap, setScheduleMap] = useState<Map<string, LineSchedule>>(new Map());
   const [expandedScheduleLine, setExpandedScheduleLine] = useState<string | null>(null);
 
@@ -194,23 +198,31 @@ export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props
 
   // Fetch schedules for all displayed lines (one-time, cached)
   useEffect(() => {
-    if (!allLineGroups || allLineGroups.length === 0 || mlMap.size === 0) return;
+    if (!allLineGroups || allLineGroups.length === 0) return;
     let cancelled = false;
     (async () => {
       const newMap = new Map<string, LineSchedule>();
       await Promise.allSettled(
         allLineGroups.map(async (line) => {
-          const ml = mlMap.get(line.lineCode);
-          if (!ml) return;
           try {
+            // Determine direction: fetch line's routes, find index of our routeCode
+            let direction: 'go' | 'come' = 'go';
+            try {
+              const lineRoutes = await getRoutes(line.lineCode);
+              if (lineRoutes && lineRoutes.length > 0) {
+                const idx = lineRoutes.findIndex((r) => r.RouteCode === line.routeCode);
+                direction = idx <= 0 ? 'come' : 'go';
+              }
+            } catch {}
+
             // Try cache first, then network
             let data = await getCachedSchedule(line.lineCode);
             if (!data) {
-              data = await getSchedLines(ml.ml_code, ml.sdc_code, line.lineCode);
+              data = await getDailySchedule(line.lineCode);
               if (data) setCachedSchedule(line.lineCode, data);
             }
             if (data) {
-              newMap.set(line.lineCode, parseSchedule(data));
+              newMap.set(line.lineCode, parseSchedule(data, direction));
             }
           } catch {}
         }),
@@ -218,7 +230,7 @@ export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props
       if (!cancelled) setScheduleMap(newMap);
     })();
     return () => { cancelled = true; };
-  }, [allLineGroups, mlMap]);
+  }, [allLineGroups]);
 
   const handleLinePress = useCallback((line: LineGroup) => {
     const info = linesMap.get(line.lineCode);

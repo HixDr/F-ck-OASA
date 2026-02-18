@@ -24,7 +24,7 @@ import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { getLocation, subscribe as subscribeLocation } from '../../src/location';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font } from '../../src/theme';
-import { useBusLocations, useStops, useRoutes, useMLInfo, useSchedule, useLines } from '../../src/hooks';
+import { useBusLocations, useStops, useRoutes, useSchedule, useLines } from '../../src/hooks';
 import { getStopArrivals, getWalkingRoute, getRoutesForStop, getRouteDetails } from '../../src/api';
 import { isFavorite, addFavorite, removeFavorite, getStamps, addStamp, removeStamp, getToggle, setToggle, getCachedBusPositions, setCachedBusPositions, isFavoriteStop, addFavoriteStop, removeFavoriteStop } from '../../src/storage';
 import { useNetworkStatus } from '../../src/network';
@@ -167,22 +167,24 @@ export default function LiveMapScreen() {
   }, []);
 
   // Schedule
-  const { data: mlInfoData } = useMLInfo();
-  const mlInfo = useMemo(() => {
-    if (!mlInfoData || !lineCode) return null;
-    return mlInfoData.find((m) => m.line_code === lineCode) ?? null;
-  }, [mlInfoData, lineCode]);
-  const { data: scheduleData, isLoading: loadingSchedule } = useSchedule(
-    mlInfo?.ml_code, mlInfo?.sdc_code, lineCode,
-  );
+  const { data: scheduleData, isLoading: loadingSchedule } = useSchedule(lineCode);
+  // Pick schedule entries matching the active route direction (go vs come)
+  // GO: sde_start1 from go entries (departure from terminus A)
+  // COME: sde_start2 from come entries (departure from terminus B)
   const scheduleTimes = useMemo(() => {
     if (!scheduleData) return [];
-    const entries = [...(scheduleData.go ?? []), ...(scheduleData.come ?? [])];
-    const times = entries
-      .map((e) => { const match = e.sde_start1?.match(/(\d{2}):(\d{2})/); if (!match) return null; return `${match[1]}:${match[2]}`; })
-      .filter((t): t is string => t !== null);
-    return [...new Set(times)].sort();
-  }, [scheduleData]);
+    const routeIdx = allRoutes?.findIndex((r) => r.RouteCode === activeRouteCode) ?? 0;
+    // OASA convention: route[0] = come (B→A), route[1] = go (A→B)
+    const isGo = routeIdx > 0;
+    const entries = isGo ? (scheduleData.go ?? []) : (scheduleData.come ?? []);
+    const times = new Set<string>();
+    for (const e of entries) {
+      const field = isGo ? e.sde_start1 : e.sde_start2;
+      const m = field?.match(/(\d{2}):(\d{2})/);
+      if (m) times.add(`${m[1]}:${m[2]}`);
+    }
+    return [...times].sort();
+  }, [scheduleData, activeRouteCode, allRoutes]);
   const nextDeparture = useMemo(() => {
     if (scheduleTimes.length === 0) return null;
     const now = new Date();

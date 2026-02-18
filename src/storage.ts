@@ -4,8 +4,8 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { FavoriteLine, FavoriteStop, OasaLine, MapStamp, OasaSchedLines, OasaStop } from './types';
-import { getMLInfo, getSchedLines } from './api';
+import type { FavoriteLine, FavoriteStop, OasaLine, MapStamp, OasaDailySchedule, OasaStop } from './types';
+import { getDailySchedule } from './api';
 
 /* ── Keys ────────────────────────────────────────────────────── */
 
@@ -201,17 +201,17 @@ export function setSetting(key: string, value: string): void {
 
 /* ── Schedule Cache (offline) ────────────────────────────────── */
 
-export async function getCachedSchedule(lineCode: string): Promise<OasaSchedLines | null> {
+export async function getCachedSchedule(lineCode: string): Promise<OasaDailySchedule | null> {
   try {
     const raw = await AsyncStorage.getItem(SCHEDULE_CACHE_PREFIX + lineCode);
     if (!raw) return null;
-    return JSON.parse(raw) as OasaSchedLines;
+    return JSON.parse(raw) as OasaDailySchedule;
   } catch {
     return null;
   }
 }
 
-export async function setCachedSchedule(lineCode: string, data: OasaSchedLines): Promise<void> {
+export async function setCachedSchedule(lineCode: string, data: OasaDailySchedule): Promise<void> {
   AsyncStorage.setItem(SCHEDULE_CACHE_PREFIX + lineCode, JSON.stringify(data)).catch(() => {});
 }
 
@@ -256,7 +256,7 @@ export function setCachedBusPositions(routeCode: string, buses: CachedBusPositio
 /* ── Prefetch Favorite Schedules ─────────────────────────────── */
 
 /**
- * Fetch and cache schedules for all favorited lines.
+ * Fetch and cache today's schedules for all favorited lines.
  * Runs silently — errors are swallowed so it never blocks the app.
  */
 export async function prefetchFavoriteSchedules(): Promise<void> {
@@ -264,17 +264,10 @@ export async function prefetchFavoriteSchedules(): Promise<void> {
     const favs = getFavorites();
     if (favs.length === 0) return;
 
-    const mlInfo = await getMLInfo();
-    if (!mlInfo || mlInfo.length === 0) return;
-
-    const mlMap = new Map(mlInfo.map((m) => [m.line_code, m]));
-
     await Promise.allSettled(
       favs.map(async (fav) => {
-        const ml = mlMap.get(fav.lineCode);
-        if (!ml) return;
         try {
-          const schedule = await getSchedLines(ml.ml_code, ml.sdc_code, fav.lineCode);
+          const schedule = await getDailySchedule(fav.lineCode);
           if (schedule) {
             await setCachedSchedule(fav.lineCode, schedule);
           }
