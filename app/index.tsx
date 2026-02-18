@@ -14,17 +14,19 @@ import {
   StyleSheet,
   ActivityIndicator,
   RefreshControl,
+  Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Stack } from 'expo-router';
 import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font } from '../src/theme';
-import { getFavorites, removeFavorite } from '../src/storage';
+import { getFavorites, removeFavorite, getFavoriteStops, removeFavoriteStop } from '../src/storage';
 import { useLines } from '../src/hooks';
 import { USER_MARKER_BASE64 } from '../src/userMarker';
 import { useSettings } from '../src/settings';
-import type { FavoriteLine } from '../src/types';
+import FavoriteStopCard from '../src/components/FavoriteStopCard';
+import type { FavoriteLine, FavoriteStop } from '../src/types';
 
 /* ── HSL → Hex helper ────────────────────────────────────────── */
 
@@ -68,7 +70,7 @@ function FavoriteCard({ fav, onRemove, accentColor }: { fav: FavoriteLine; onRem
 
   return (
     <TouchableOpacity
-      style={s.card}
+      style={s.lineCard}
       activeOpacity={0.7}
       onPress={() =>
         router.push({
@@ -76,17 +78,10 @@ function FavoriteCard({ fav, onRemove, accentColor }: { fav: FavoriteLine; onRem
           params: { lineCode: fav.lineCode, lineId: fav.lineId, lineDescr: fav.lineDescrEng },
         })
       }
+      onLongPress={onRemove}
     >
-      <View style={s.cardHeader}>
-        <View style={[s.lineBadge, { backgroundColor: accentColor }]}>
-          <Text style={s.lineBadgeText}>{fav.lineId}</Text>
-        </View>
-        <Text style={s.cardTitle} numberOfLines={1}>
-          {fav.lineDescrEng}
-        </Text>
-        <TouchableOpacity onPress={onRemove} hitSlop={12}>
-          <Ionicons name="heart" size={22} color="#B91C1C" />
-        </TouchableOpacity>
+      <View style={[s.lineBadge, { backgroundColor: accentColor }]}>
+        <Text style={s.lineBadgeText}>{fav.lineId}</Text>
       </View>
     </TouchableOpacity>
   );
@@ -97,6 +92,7 @@ function FavoriteCard({ fav, onRemove, accentColor }: { fav: FavoriteLine; onRem
 export default function HomeScreen() {
   const router = useRouter();
   const [favorites, setFavorites] = useState<FavoriteLine[]>([]);
+  const [favoriteStops, setFavoriteStops] = useState<FavoriteStop[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const { primaryColor, setPrimaryColor, iconStyle, setIconStyle } = useSettings();
@@ -109,6 +105,7 @@ export default function HomeScreen() {
 
   const loadFavorites = useCallback(() => {
     setFavorites(getFavorites());
+    setFavoriteStops(getFavoriteStops());
   }, []);
 
   // Reload favorites when screen gains focus (returning from other screens)
@@ -119,9 +116,27 @@ export default function HomeScreen() {
   );
 
   const handleRemove = useCallback(
-    (lineCode: string) => {
-      const updated = removeFavorite(lineCode);
-      setFavorites(updated);
+    (lineCode: string, lineId: string) => {
+      Alert.alert('Remove Favorite', `Remove line ${lineId} from favorites?`, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Remove', style: 'destructive', onPress: () => {
+          const updated = removeFavorite(lineCode);
+          setFavorites(updated);
+        }},
+      ]);
+    },
+    [],
+  );
+
+  const handleRemoveStop = useCallback(
+    (stopCode: string, stopName: string) => {
+      Alert.alert('Remove Stop', `Remove "${stopName}" from saved stops?`, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Remove', style: 'destructive', onPress: () => {
+          const updated = removeFavoriteStop(stopCode);
+          setFavoriteStops(updated);
+        }},
+      ]);
     },
     [],
   );
@@ -143,40 +158,68 @@ export default function HomeScreen() {
           </TouchableOpacity>
           <Text style={s.logo}>F*ck OASA</Text>
         </View>
-        <TouchableOpacity
-          style={s.searchBtn}
-          onPress={() => router.push('/search')}
-        >
-          <Ionicons name="search" size={20} color={colors.text} />
-          <Text style={s.searchBtnText}>Find a line…</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={s.nearbyBtn}
-          activeOpacity={0.7}
-          onPress={() => router.push('/map/nearby')}
-        >
-          <Ionicons name="location" size={20} color={primaryColor} />
-          <Text style={s.nearbyBtnText}>Nearby Stops</Text>
-          <Ionicons name="chevron-forward" size={16} color={colors.textMuted} style={{ marginLeft: 'auto' }} />
-        </TouchableOpacity>
+        <View style={s.actionRow}>
+          <TouchableOpacity
+            style={s.searchBtn}
+            onPress={() => router.push('/search')}
+          >
+            <Ionicons name="search" size={20} color={colors.text} />
+            <Text style={s.searchBtnText}>Find a line…</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={s.nearbyBtn}
+            activeOpacity={0.7}
+            onPress={() => router.push('/map/nearby')}
+          >
+            <Ionicons name="location" size={20} color={primaryColor} />
+            <Text style={s.nearbyBtnText}>Nearby</Text>
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Favorites List */}
-      {favorites.length === 0 ? (
+      {favorites.length === 0 && favoriteStops.length === 0 ? (
         <View style={s.empty}>
           <Ionicons name="heart-outline" size={48} color={colors.border} />
           <Text style={s.emptyTitle}>No favorites yet</Text>
           <Text style={s.emptySubtitle}>
-            Search for a bus line and tap the heart to add it here.
+            Search for a bus line and tap the heart to add it here.{'\n'}
+            Tap a stop on the map and bookmark it for quick arrivals.
           </Text>
         </View>
       ) : (
         <FlatList
-          data={favorites}
-          keyExtractor={(item) => item.lineCode}
-          renderItem={({ item }) => (
-            <FavoriteCard fav={item} onRemove={() => handleRemove(item.lineCode)} accentColor={primaryColor} />
-          )}
+          data={[]}
+          keyExtractor={() => ''}
+          renderItem={() => null}
+          ListHeaderComponent={
+            <>
+              {favoriteStops.length > 0 && (
+                <View style={s.stopsSection}>
+                  <Text style={s.sectionLabel}>Saved Stops</Text>
+                  {favoriteStops.map((stop) => (
+                    <FavoriteStopCard
+                      key={stop.stopCode}
+                      stop={stop}
+                      primaryColor={primaryColor}
+                      onRemove={() => handleRemoveStop(stop.stopCode, stop.stopName)}
+                    />
+                  ))}
+                </View>
+              )}
+              {favorites.length > 0 && (
+                <View>
+                  <Text style={s.sectionLabel}>Saved Lines</Text>
+                  <Text style={s.sectionHint}>Long press to remove</Text>
+                  <View style={s.lineGrid}>
+                    {favorites.map((fav) => (
+                      <FavoriteCard key={fav.lineCode} fav={fav} onRemove={() => handleRemove(fav.lineCode, fav.lineId)} accentColor={primaryColor} />
+                    ))}
+                  </View>
+                </View>
+              )}
+            </>
+          }
           contentContainerStyle={s.list}
           refreshControl={
             <RefreshControl
@@ -292,7 +335,12 @@ const s = StyleSheet.create({
     fontWeight: '800',
     color: colors.primaryLight,
   },
+  actionRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
   searchBtn: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: colors.surface,
@@ -316,13 +364,12 @@ const s = StyleSheet.create({
     paddingVertical: spacing.sm + 4,
     borderWidth: 1,
     borderColor: colors.border,
-    marginTop: spacing.sm,
+    gap: spacing.xs,
   },
   nearbyBtnText: {
     color: colors.text,
     fontSize: font.size.md,
     fontWeight: '600',
-    marginLeft: spacing.sm,
   },
   list: {
     paddingHorizontal: spacing.lg,
@@ -336,6 +383,20 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.border,
   },
+  lineGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  lineCard: {
+    backgroundColor: colors.card,
+    borderRadius: radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
   cardHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -343,9 +404,8 @@ const s = StyleSheet.create({
   lineBadge: {
     backgroundColor: colors.primary, // overridden inline
     borderRadius: radius.sm,
-    paddingHorizontal: spacing.sm + 2,
-    paddingVertical: spacing.xs,
-    marginRight: spacing.sm,
+    paddingHorizontal: spacing.sm + 4,
+    paddingVertical: spacing.xs + 2,
     minWidth: 44,
     alignItems: 'center',
   },
@@ -378,6 +438,23 @@ const s = StyleSheet.create({
     textAlign: 'center',
     marginTop: spacing.xs,
     opacity: 0.7,
+  },
+  stopsSection: {
+    marginBottom: spacing.sm,
+  },
+  sectionLabel: {
+    color: colors.textMuted,
+    fontSize: font.size.xs,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: spacing.xs,
+  },
+  sectionHint: {
+    color: colors.textMuted,
+    fontSize: font.size.xs - 1,
+    opacity: 0.5,
+    marginBottom: spacing.xs,
   },
   modalOverlay: {
     flex: 1,

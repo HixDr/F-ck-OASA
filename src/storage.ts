@@ -4,12 +4,13 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { FavoriteLine, OasaLine, MapStamp, OasaSchedLines, OasaStop } from './types';
+import type { FavoriteLine, FavoriteStop, OasaLine, MapStamp, OasaSchedLines, OasaStop } from './types';
 import { getMLInfo, getSchedLines } from './api';
 
 /* ── Keys ────────────────────────────────────────────────────── */
 
 const FAVORITES_KEY = '@oasa/favorites';
+const FAVORITE_STOPS_KEY = '@oasa/favorite_stops';
 const LINES_CACHE_KEY = '@oasa/lines_cache';
 const LINES_CACHE_TS_KEY = '@oasa/lines_cache_ts';
 const STAMPS_KEY = '@oasa/stamps';
@@ -22,6 +23,7 @@ const BUS_POS_PREFIX = '@oasa/buspos/';
 /* ── In-Memory Mirror (for synchronous access) ──────────────── */
 
 let _favorites: FavoriteLine[] = [];
+let _favoriteStops: FavoriteStop[] = [];
 let _stamps: MapStamp[] = [];
 let _toggles: Record<string, boolean> = {};
 let _settings: Record<string, string> = {};
@@ -35,6 +37,12 @@ export async function initStorage(): Promise<void> {
     if (raw) _favorites = JSON.parse(raw);
   } catch {
     _favorites = [];
+  }
+  try {
+    const raw = await AsyncStorage.getItem(FAVORITE_STOPS_KEY);
+    if (raw) _favoriteStops = JSON.parse(raw);
+  } catch {
+    _favoriteStops = [];
   }
   try {
     const raw = await AsyncStorage.getItem(STAMPS_KEY);
@@ -82,6 +90,41 @@ export function removeFavorite(lineCode: string): FavoriteLine[] {
 
 export function isFavorite(lineCode: string): boolean {
   return _favorites.some((f) => f.lineCode === lineCode);
+}
+
+/* ── Favorite Stops (sync reads from mirror, async writes) ──── */
+
+export function getFavoriteStops(): FavoriteStop[] {
+  return _favoriteStops;
+}
+
+function persistFavoriteStops(): void {
+  AsyncStorage.setItem(FAVORITE_STOPS_KEY, JSON.stringify(_favoriteStops)).catch(() => {});
+}
+
+export function addFavoriteStop(stop: FavoriteStop): FavoriteStop[] {
+  if (_favoriteStops.some((s) => s.stopCode === stop.stopCode)) return _favoriteStops;
+  _favoriteStops = [..._favoriteStops, stop];
+  persistFavoriteStops();
+  return _favoriteStops;
+}
+
+export function removeFavoriteStop(stopCode: string): FavoriteStop[] {
+  _favoriteStops = _favoriteStops.filter((s) => s.stopCode !== stopCode);
+  persistFavoriteStops();
+  return _favoriteStops;
+}
+
+export function isFavoriteStop(stopCode: string): boolean {
+  return _favoriteStops.some((s) => s.stopCode === stopCode);
+}
+
+export function updateFavoriteStop(stopCode: string, patch: Partial<FavoriteStop>): FavoriteStop[] {
+  _favoriteStops = _favoriteStops.map((s) =>
+    s.stopCode === stopCode ? { ...s, ...patch } : s,
+  );
+  persistFavoriteStops();
+  return _favoriteStops;
 }
 
 /* ── Lines Cache ─────────────────────────────────────────────── */
