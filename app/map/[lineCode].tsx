@@ -407,6 +407,9 @@ export default function LiveMapScreen() {
   }, []);
 
   // One-shot bitmap capture: track for 500ms after stops/color change, then stop for perf
+  const selectedStopCode = selectedStop?.stopCode ?? null;
+  const prevSelectedRef = useRef<string | null>(null);
+  useEffect(() => { prevSelectedRef.current = selectedStopCode; }, [selectedStopCode]);
   const [stopTracking, setStopTracking] = useState(true);
   useEffect(() => {
     setStopTracking(true);
@@ -485,7 +488,7 @@ export default function LiveMapScreen() {
       >
         {/* Route polyline */}
         {routePolyline.length > 1 && (
-          <Polyline coordinates={routePolyline} strokeColor={primaryColor}
+          <Polyline coordinates={routePolyline} strokeColor={primaryColor + 'AA'}
             strokeWidth={3.5} lineCap="round" lineJoin="round" zIndex={0} />
         )}
 
@@ -501,22 +504,35 @@ export default function LiveMapScreen() {
             strokeColor={line.color + '99'} strokeWidth={2.5} lineCap="round" />
         ))}
 
-        {/* Stop markers with direction arrows */}
-        {stopsWithBearings.map((stop, i) => (
+        {/* Stop markers — bus icon with directional arrow */}
+        {stopsWithBearings.map((stop, i) => {
+          const isSelected = selectedStopCode === stop.code;
+          return (
           <Marker key={`st-${stop.code}-${i}-${primaryColor}`}
             coordinate={{ latitude: stop.lat, longitude: stop.lng }}
-            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={stopTracking}
+            anchor={{ x: 0.5, y: 0.65 }} tracksViewChanges={stopTracking || isSelected || stop.code === prevSelectedRef.current}
             rotation={stop.bearing}
             flat={true}
-            zIndex={999}
+            zIndex={isSelected ? 1050 : 999}
             onPress={() => onStopPress(stop)}>
-            <View style={s.stopPinCombo} collapsable={false}>
-              <View style={s.stopPinArrow} />
-              <View style={[s.stopPin, { backgroundColor: primaryColor }]} />
-              <View style={s.stopPinSpacer} />
+            <View style={s.stopMarkerOuter} collapsable={false}>
+              <View style={[s.stopArrow, isSelected && { borderBottomColor: 'transparent' }]} />
+              <View style={s.stopDotWrap}>
+                {isSelected && <View style={[s.stopRing, { borderColor: primaryColor }]} />}
+                <View style={[
+                  s.stopDot,
+                  isSelected
+                    ? { backgroundColor: '#FFFFFF', borderColor: primaryColor, borderWidth: 3 }
+                    : { backgroundColor: primaryColor },
+                  { transform: [{ rotate: `${-stop.bearing}deg` }] },
+                ]}>
+                  <Ionicons name="bus" size={10} color={isSelected ? primaryColor : '#FFFFFF'} />
+                </View>
+              </View>
             </View>
           </Marker>
-        ))}
+          );
+        })}
 
         {/* Buses */}
         {busMarkerUri && busMarkers.map((bus) => (
@@ -882,17 +898,34 @@ const s = StyleSheet.create({
   stopLineArrBadge: { paddingHorizontal: spacing.sm, paddingVertical: 2, borderRadius: radius.sm },
   stopLineArrMin: { color: '#000', fontSize: font.size.xs, fontWeight: '700' },
   stopLineNone: { color: colors.textMuted, fontSize: font.size.sm, fontWeight: '600' },
-  /* ── Native map marker styles ── */
-  stopPinCombo: { width: 28, height: 28, alignItems: 'center', justifyContent: 'center' },
-  stopPin: { width: 14, height: 14, borderRadius: 7, borderWidth: 1.5, borderColor: '#FFF' },
-  stopPinArrow: {
+  /* ── Native map marker styles — bus icon + arrow ── */
+  stopMarkerOuter: {
+    width: 40, height: 40,
+    alignItems: 'center',
+  },
+  stopArrow: {
     width: 0, height: 0,
-    borderLeftWidth: 6, borderRightWidth: 6, borderBottomWidth: 10,
+    borderLeftWidth: 7, borderRightWidth: 7, borderBottomWidth: 10,
     borderLeftColor: 'transparent', borderRightColor: 'transparent',
     borderBottomColor: '#FFFFFF',
-    marginBottom: -3,
+    marginBottom: -2,
   },
-  stopPinSpacer: { width: 1, height: 7 },
+  stopDot: {
+    width: 22, height: 22, borderRadius: 11,
+    borderWidth: 2, borderColor: '#FFFFFF',
+    alignItems: 'center', justifyContent: 'center',
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.6, shadowRadius: 3, elevation: 4,
+  },
+  stopDotWrap: {
+    alignItems: 'center', justifyContent: 'center',
+  },
+  stopRing: {
+    position: 'absolute',
+    width: 32, height: 32, borderRadius: 16,
+    borderWidth: 2.5, borderColor: 'transparent',
+    backgroundColor: 'rgba(255,255,255,0.15)',
+  },
   /* ── Arrival alert styles ── */
   arrivalHeaderBtns: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   alertPickerRow: {
