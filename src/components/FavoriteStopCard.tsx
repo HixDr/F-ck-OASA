@@ -41,7 +41,10 @@ interface LineSchedule {
  *  COME: sde_start2 from come entries (departure from terminus B)
  */
 function parseSchedule(data: OasaDailySchedule, direction: 'go' | 'come'): LineSchedule {
-  const entries = direction === 'go' ? (data.go ?? []) : (data.come ?? []);
+  let entries = direction === 'go' ? (data.go ?? []) : (data.come ?? []);
+  // Circular routes: come is empty, all entries live in go with sde_start1 only
+  const isCircular = (data.come ?? []).length === 0;
+  if (isCircular) { entries = data.go ?? []; direction = 'go'; }
   const times = new Set<string>();
   for (const e of entries) {
     // GO = departure from terminus A (sde_start1), COME = departure from terminus B (sde_start2)
