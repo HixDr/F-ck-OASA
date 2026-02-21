@@ -17,7 +17,8 @@ import {
 } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
-import { getLocation, subscribe as subscribeLocation } from '../../src/location';
+import { getLocation, getHeading, subscribe as subscribeLocation, subscribeHeading } from '../../src/location';
+import HeadingBeam from '../../src/components/HeadingBeam';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font } from '../../src/theme';
 import { useClosestStops, useLines } from '../../src/hooks';
@@ -61,6 +62,7 @@ export default function NearbyMapScreen() {
   // User location
   const userLocationRef = useRef<{ lat: number; lng: number } | null>(getLocation());
   const [userLoc, setUserLoc] = useState<{ lat: number; lng: number } | null>(getLocation());
+  const [userHeading, setUserHeading] = useState<number | null>(getHeading());
   const [queryLoc, setQueryLoc] = useState<{ lat: number; lng: number } | null>(() => {
     const loc = getLocation();
     if (!loc) return null;
@@ -96,9 +98,9 @@ export default function NearbyMapScreen() {
     }
   }, [userLoc]);
 
-  // Subscribe to location updates
+  // Subscribe to location + heading updates
   useEffect(() => {
-    return subscribeLocation(async (loc) => {
+    const unLoc = subscribeLocation(async (loc) => {
       userLocationRef.current = loc;
       setUserLoc(loc);
 
@@ -121,6 +123,8 @@ export default function NearbyMapScreen() {
         }
       }
     });
+    const unHead = subscribeHeading((h) => setUserHeading(h));
+    return () => { unLoc(); unHead(); };
   }, []);
 
   const parsedStops = useMemo(() => {
@@ -299,12 +303,19 @@ export default function NearbyMapScreen() {
         {/* User location */}
         {userLoc && (
           <Marker coordinate={{ latitude: userLoc.lat, longitude: userLoc.lng }}
-            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={true}>
+            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={true} flat>
             {iconStyle === 'cat' ? (
               <Image source={{ uri: USER_MARKER_BASE64 }} style={ms.catIcon} />
             ) : (
-              <View style={ms.userDot}>
-                <View style={ms.userDotInner} />
+              <View style={ms.userMarkerWrap}>
+                {userHeading != null && (
+                  <View style={[ms.headingBeam, { transform: [{ rotate: `${userHeading}deg` }] }]}>
+                    <HeadingBeam />
+                  </View>
+                )}
+                <View style={ms.userDot}>
+                  <View style={ms.userDotInner} />
+                </View>
               </View>
             )}
           </Marker>

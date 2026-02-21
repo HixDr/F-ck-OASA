@@ -21,7 +21,8 @@ import {
 } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
-import { getLocation, subscribe as subscribeLocation } from '../../src/location';
+import { getLocation, getHeading, subscribe as subscribeLocation, subscribeHeading } from '../../src/location';
+import HeadingBeam from '../../src/components/HeadingBeam';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font } from '../../src/theme';
 import { useBusLocations, useStops, useRoutes, useSchedule, useLines } from '../../src/hooks';
@@ -175,7 +176,9 @@ export default function LiveMapScreen() {
     if (!scheduleData) return [];
     const routeIdx = allRoutes?.findIndex((r) => r.RouteCode === activeRouteCode) ?? 0;
     // OASA convention: route[0] = come (B→A), route[1] = go (A→B)
-    const isGo = routeIdx > 0;
+    // Circular routes: come is empty, all entries live in go with sde_start1
+    const isCircular = (scheduleData.come ?? []).length === 0;
+    let isGo = isCircular || routeIdx > 0;
     const entries = isGo ? (scheduleData.go ?? []) : (scheduleData.come ?? []);
     const times = new Set<string>();
     for (const e of entries) {
@@ -238,13 +241,14 @@ export default function LiveMapScreen() {
 
   // User location for marker
   const [userLoc, setUserLoc] = useState<{ lat: number; lng: number } | null>(getLocation());
+  const [userHeading, setUserHeading] = useState<number | null>(getHeading());
 
   // Walking route
   const [walkCoords, setWalkCoords] = useState<Array<{ latitude: number; longitude: number }>>([]);
 
   // Subscribe to location updates
   useEffect(() => {
-    return subscribeLocation(async (loc) => {
+    const unLoc = subscribeLocation(async (loc) => {
       userLocationRef.current = loc;
       setUserLoc(loc);
       const target = selectedStopRef.current;
@@ -257,6 +261,8 @@ export default function LiveMapScreen() {
         }
       }
     });
+    const unHead = subscribeHeading((h) => setUserHeading(h));
+    return () => { unLoc(); unHead(); };
   }, []);
 
   const parsedBuses = useMemo(() => {
@@ -615,12 +621,19 @@ export default function LiveMapScreen() {
         {/* User location */}
         {userLoc && (
           <Marker coordinate={{ latitude: userLoc.lat, longitude: userLoc.lng }}
-            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={true}>
+            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={true} flat>
             {iconStyle === 'cat' ? (
               <Image source={{ uri: USER_MARKER_BASE64 }} style={ms.catIcon} />
             ) : (
-              <View style={ms.userDot}>
-                <View style={ms.userDotInner} />
+              <View style={ms.userMarkerWrap}>
+                {userHeading != null && (
+                  <View style={[ms.headingBeam, { transform: [{ rotate: `${userHeading}deg` }] }]}>
+                    <HeadingBeam />
+                  </View>
+                )}
+                <View style={ms.userDot}>
+                  <View style={ms.userDotInner} />
+                </View>
               </View>
             )}
           </Marker>

@@ -123,6 +123,17 @@ export const mapStyles = StyleSheet.create({
     borderWidth: 2.5,
     borderColor: '#FFF',
   },
+  /** Wrapper for user marker + heading cone */
+  userMarkerWrap: {
+    width: 80,
+    height: 80,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  /** SVG heading beam wrapper — fills the 80×80 marker, rotates around center (dot position) */
+  headingBeam: {
+    ...StyleSheet.absoluteFillObject,
+  },
   catIcon: {
     width: 30,
     height: 30,
