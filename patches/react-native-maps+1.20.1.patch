@@ -1,0 +1,18 @@
+diff --git a/node_modules/react-native-maps/android/src/main/java/com/rnmaps/maps/MapMarker.java b/node_modules/react-native-maps/android/src/main/java/com/rnmaps/maps/MapMarker.java
+index b755f9b..7eaa5bb 100644
+--- a/node_modules/react-native-maps/android/src/main/java/com/rnmaps/maps/MapMarker.java
++++ b/node_modules/react-native-maps/android/src/main/java/com/rnmaps/maps/MapMarker.java
+@@ -508,6 +508,13 @@ public class MapMarker extends MapFeature {
+     }
+   }
+ 
++  @Override
++  protected void onLayout(boolean changed, int l, int t, int r, int b) {
++    super.onLayout(changed, l, t, r, b);
++    this.height = b - t;
++    this.width = r - l;
++  }
++
+   public void update(int width, int height) {
+     this.width = width;
+     this.height = height;
