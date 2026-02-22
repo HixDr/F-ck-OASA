@@ -159,6 +159,13 @@ export default function NearbyMapScreen() {
     return () => clearTimeout(t);
   }, [stampIds]);
 
+  // One-shot bitmap capture for user location marker
+  const [userTracking, setUserTracking] = useState(true);
+  useEffect(() => {
+    const t = setTimeout(() => setUserTracking(false), 800);
+    return () => clearTimeout(t);
+  }, []);
+
   // Selected stop state
   const [selectedStop, setSelectedStop] = useState<{
     name: string; stopCode: string; lat: number; lng: number;
@@ -324,7 +331,7 @@ export default function NearbyMapScreen() {
             coordinate={{ latitude: userLoc.lat, longitude: userLoc.lng }}
             anchor={{ x: 0.5, y: 0.5 }}
             rotation={iconStyle !== 'cat' ? (userHeading ?? 0) : 0}
-            tracksViewChanges={false} flat>
+            tracksViewChanges={userTracking} flat>
             {iconStyle === 'cat' ? (
               <Image source={{ uri: USER_MARKER_BASE64 }} style={ms.catIcon} />
             ) : (

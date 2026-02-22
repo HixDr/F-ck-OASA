@@ -483,6 +483,13 @@ export default function LiveMapScreen() {
     return () => clearTimeout(t);
   }, [selectedStopCode]);
 
+  // One-shot bitmap capture for user location marker
+  const [userTracking, setUserTracking] = useState(true);
+  useEffect(() => {
+    const t = setTimeout(() => setUserTracking(false), 800);
+    return () => clearTimeout(t);
+  }, []);
+
   // One-shot bitmap capture for stamp markers
   const stampIds = useMemo(() => stamps.map((s) => s.id).join(','), [stamps]);
   const [stampTracking, setStampTracking] = useState(true);
@@ -635,7 +642,7 @@ export default function LiveMapScreen() {
             coordinate={{ latitude: userLoc.lat, longitude: userLoc.lng }}
             anchor={{ x: 0.5, y: 0.5 }}
             rotation={iconStyle !== 'cat' ? (userHeading ?? 0) : 0}
-            tracksViewChanges={false} flat>
+            tracksViewChanges={userTracking} flat>
             {iconStyle === 'cat' ? (
               <Image source={{ uri: USER_MARKER_BASE64 }} style={ms.catIcon} />
             ) : (
