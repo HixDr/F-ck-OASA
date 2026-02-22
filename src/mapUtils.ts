@@ -5,6 +5,7 @@
 import { colors } from './theme';
 import type { OasaLine, OasaRoute } from './types';
 import { getStops } from './api';
+import { getCachedStops } from './storage';
 
 /** Arrival time color — red (<= 2 min), amber (<= 5 min), green (> 5 min). */
 export function getArrivalColor(minutes: number): string {
@@ -89,7 +90,8 @@ export async function enrichWithDirectionHints(
   const enriched = await Promise.all(
     lines.map(async (line) => {
       try {
-        const stops = await getStops(line.routeCode);
+        // Try cache first (works offline), fall back to API
+        const stops = await getCachedStops(line.routeCode) ?? await getStops(line.routeCode).catch(() => null);
         if (!stops || stops.length < 2) return line;
 
         // Get direction names from actual stop list (more reliable than parsing description)
