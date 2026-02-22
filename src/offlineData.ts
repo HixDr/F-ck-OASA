@@ -6,13 +6,13 @@
  */
 
 import { getLines, getAllStopsBulk, getDailySchedule, getRoutes, getStops, getRoutesForStop } from './api';
-import type { OasaRoute } from './types';
+import type { OasaDailySchedule, OasaRoute, OasaStop } from './types';
 import {
   setCachedLines,
-  setCachedSchedule,
-  setCachedRoutes,
-  setCachedStops,
-  setCachedRoutesForStop,
+  setCachedSchedulesBulk,
+  setCachedRoutesBulk,
+  setCachedStopsBulk,
+  setCachedRoutesForStopBulk,
   setAllCachedStops,
   setOfflineDataFlag,
   clearOfflineData,
@@ -74,6 +74,8 @@ export async function downloadAllOfflineData(
     const BATCH_DELAY = 200;
     let completed = 0;
     let failed = 0;
+    const allRoutesDict: Record<string, OasaRoute[]> = {};
+    const allStopsDict: Record<string, OasaStop[]> = {};
     const stopRoutesMap = new Map<string, OasaRoute[]>();
 
     for (let i = 0; i < total; i += BATCH_SIZE) {
@@ -83,15 +85,14 @@ export async function downloadAllOfflineData(
           try {
             const routes = await withTimeout(getRoutes(line.LineCode), REQUEST_TIMEOUT);
             if (routes && routes.length > 0) {
-              await setCachedRoutes(line.LineCode, routes);
-              // Cache stops for each route + build stop-to-routes index
+              allRoutesDict[line.LineCode] = routes;
+              // Fetch stops for each route + build stop-to-routes index
               await Promise.allSettled(
                 routes.map(async (route) => {
                   try {
                     const routeStops = await withTimeout(getStops(route.RouteCode), REQUEST_TIMEOUT);
                     if (routeStops && routeStops.length > 0) {
-                      await setCachedStops(route.RouteCode, routeStops);
-                      // Index: which routes serve each stop
+                      allStopsDict[route.RouteCode] = routeStops;
                       for (const stop of routeStops) {
                         const existing = stopRoutesMap.get(stop.StopCode) || [];
                         if (!existing.some((r) => r.RouteCode === route.RouteCode)) {
@@ -119,16 +120,16 @@ export async function downloadAllOfflineData(
       if (i + BATCH_SIZE < total) await delay(BATCH_DELAY);
     }
 
-    // Write stop-to-routes index for offline "All lines" lookups
-    console.log(`[offline] Writing routes-for-stop index for ${stopRoutesMap.size} stops…`);
-    onProgress({ phase: 'routes', current: completed, total, message: `Building stop index (${stopRoutesMap.size} stops)…` });
-    for (const [stopCode, stopRoutes] of stopRoutesMap) {
-      setCachedRoutesForStop(stopCode, stopRoutes);
-    }
+    // Bulk-write routes + stops as consolidated files (single file per data type)
+    console.log(`[offline] Writing ${Object.keys(allRoutesDict).length} routes, ${Object.keys(allStopsDict).length} route-stops…`);
+    onProgress({ phase: 'routes', current: completed, total, message: 'Saving routes & stops…' });
+    setCachedRoutesBulk(allRoutesDict);
+    setCachedStopsBulk(allStopsDict);
 
     // Phase 4: Schedules for every line
     completed = 0;
     failed = 0;
+    const allSchedulesDict: Record<string, OasaDailySchedule> = {};
 
     for (let i = 0; i < total; i += BATCH_SIZE) {
       const batch = lines.slice(i, i + BATCH_SIZE);
@@ -137,7 +138,7 @@ export async function downloadAllOfflineData(
           try {
             const schedule = await withTimeout(getDailySchedule(line.LineCode), REQUEST_TIMEOUT);
             if (schedule) {
-              await setCachedSchedule(line.LineCode, schedule);
+              allSchedulesDict[line.LineCode] = schedule;
             }
           } catch {
             failed++;
@@ -154,7 +155,14 @@ export async function downloadAllOfflineData(
       if (i + BATCH_SIZE < total) await delay(BATCH_DELAY);
     }
 
-    // Phase 5: Pre-fetch routes-for-stop for all favorite stops
+    // Bulk-write schedules
+    console.log(`[offline] Writing ${Object.keys(allSchedulesDict).length} schedules…`);
+    setCachedSchedulesBulk(allSchedulesDict);
+
+    // Phase 5: Build routes-for-stop index + pre-fetch for favorite stops
+    const routesForStopDict: Record<string, OasaRoute[]> = {};
+    for (const [k, v] of stopRoutesMap) routesForStopDict[k] = v;
+
     const favStops = getFavoriteStops();
     if (favStops.length > 0) {
       console.log(`[offline] Pre-caching routes for ${favStops.length} favorite stops…`);
@@ -163,12 +171,16 @@ export async function downloadAllOfflineData(
           try {
             const routes = await withTimeout(getRoutesForStop(fav.stopCode), REQUEST_TIMEOUT);
             if (routes && routes.length > 0) {
-              await setCachedRoutesForStop(fav.stopCode, routes);
+              routesForStopDict[fav.stopCode] = routes;
             }
           } catch {}
         }),
       );
     }
+
+    // Bulk-write routes-for-stop index
+    console.log(`[offline] Writing routes-for-stop index for ${Object.keys(routesForStopDict).length} stops…`);
+    setCachedRoutesForStopBulk(routesForStopDict);
 
     // Mark as downloaded
     await setOfflineDataFlag(true);
