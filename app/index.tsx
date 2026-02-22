@@ -21,7 +21,8 @@ import { Stack } from 'expo-router';
 import { useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font } from '../src/theme';
-import { getFavorites, removeFavorite, getFavoriteStops, removeFavoriteStop } from '../src/storage';
+import { getFavorites, removeFavorite, getFavoriteStops, removeFavoriteStop, isOfflineDataDownloaded, getOfflineTimestamp } from '../src/storage';
+import { downloadAllOfflineData, removeAllOfflineData, type OfflineProgress } from '../src/offlineData';
 import { useLines } from '../src/hooks';
 import { USER_MARKER_BASE64 } from '../src/userMarker';
 import { useSettings } from '../src/settings';
@@ -100,12 +101,20 @@ export default function HomeScreen() {
   const hueBarWidth = useRef(0);
   const hueBarX = useRef(0);
 
+  // Offline data download state
+  const [offlineAvailable, setOfflineAvailable] = useState(isOfflineDataDownloaded());
+  const [offlineTs, setOfflineTs] = useState<number | null>(null);
+  const [downloading, setDownloading] = useState(false);
+  const [dlProgress, setDlProgress] = useState<OfflineProgress | null>(null);
+
   // Preload lines cache in background
   useLines();
 
   const loadFavorites = useCallback(() => {
     setFavorites(getFavorites());
     setFavoriteStops(getFavoriteStops());
+    setOfflineAvailable(isOfflineDataDownloaded());
+    getOfflineTimestamp().then(setOfflineTs);
   }, []);
 
   // Reload favorites when screen gains focus (returning from other screens)
@@ -146,6 +155,31 @@ export default function HomeScreen() {
     loadFavorites();
     setRefreshing(false);
   }, [loadFavorites]);
+
+  const handleDownloadOffline = useCallback(async () => {
+    setDownloading(true);
+    setDlProgress(null);
+    const ok = await downloadAllOfflineData((p) => setDlProgress(p));
+    setDownloading(false);
+    if (ok) {
+      setOfflineAvailable(true);
+      getOfflineTimestamp().then(setOfflineTs);
+    }
+  }, []);
+
+  const handleClearOffline = useCallback(() => {
+    Alert.alert('Clear Offline Data', 'This will remove all cached stops and schedules.', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Clear', style: 'destructive', onPress: async () => {
+          await removeAllOfflineData();
+          setOfflineAvailable(false);
+          setOfflineTs(null);
+          setDlProgress(null);
+        },
+      },
+    ]);
+  }, []);
 
   return (
     <View style={s.container}>
@@ -299,6 +333,54 @@ export default function HomeScreen() {
               </View>
               <View style={[s.huePreview, { backgroundColor: primaryColor }]} />
             </View>
+
+            {/* Offline data */}
+            <Text style={[s.modalLabel, { marginTop: spacing.md }]}>Offline Data</Text>
+            {downloading ? (
+              <View style={s.offlineSection}>
+                <Text style={s.offlineStatus}>
+                  {!dlProgress && 'Starting…'}
+                  {dlProgress?.phase === 'lines' && 'Fetching lines…'}
+                  {dlProgress?.phase === 'stops' && 'Fetching all stops…'}
+                  {dlProgress?.phase === 'routes' && `Routes ${dlProgress.current}/${dlProgress.total}`}
+                  {dlProgress?.phase === 'schedules' && `Schedules ${dlProgress.current}/${dlProgress.total}`}
+                  {dlProgress?.phase === 'done' && 'Saving…'}
+                </Text>
+                {dlProgress && dlProgress.total > 0 && (
+                  <View style={s.progressBarBg}>
+                    <View style={[s.progressBarFill, { width: `${Math.round((dlProgress.current / dlProgress.total) * 100)}%`, backgroundColor: primaryColor }]} />
+                  </View>
+                )}
+                {(!dlProgress || dlProgress.total === 0) && (
+                  <ActivityIndicator size="small" color={primaryColor} />
+                )}
+              </View>
+            ) : dlProgress?.phase === 'error' ? (
+              <View>
+                <Text style={[s.offlineStatus, { color: colors.danger, marginBottom: spacing.xs }]}>
+                  {dlProgress.message}
+                </Text>
+                <TouchableOpacity style={[s.offlineDownloadBtn, { borderColor: primaryColor }]} onPress={handleDownloadOffline}>
+                  <Ionicons name="refresh" size={18} color={primaryColor} />
+                  <Text style={[s.offlineDownloadText, { color: primaryColor }]}>Retry</Text>
+                </TouchableOpacity>
+              </View>
+            ) : offlineAvailable ? (
+              <View style={s.offlineSection}>
+                <Text style={s.offlineStatus}>
+                  Downloaded {offlineTs ? new Date(offlineTs).toLocaleDateString() : ''}
+                </Text>
+                <TouchableOpacity style={s.offlineClearBtn} onPress={handleClearOffline}>
+                  <Ionicons name="trash-outline" size={16} color={colors.danger} />
+                  <Text style={[s.offlineClearText, { color: colors.danger }]}>Clear</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <TouchableOpacity style={[s.offlineDownloadBtn, { borderColor: primaryColor }]} onPress={handleDownloadOffline}>
+                <Ionicons name="cloud-download-outline" size={18} color={primaryColor} />
+                <Text style={[s.offlineDownloadText, { color: primaryColor }]}>Download for offline use</Text>
+              </TouchableOpacity>
+            )}
 
             <TouchableOpacity style={[s.modalDone, { backgroundColor: primaryColor }]} onPress={() => setShowSettings(false)}>
               <Text style={s.modalDoneText}>Done</Text>
@@ -542,5 +624,49 @@ const s = StyleSheet.create({
     color: '#FFF',
     fontSize: font.size.md,
     fontWeight: '700',
+  },
+  offlineSection: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: spacing.sm,
+  },
+  offlineStatus: {
+    color: colors.textMuted,
+    fontSize: font.size.xs,
+    flex: 1,
+  },
+  offlineClearBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  offlineClearText: {
+    fontSize: font.size.xs,
+    fontWeight: '600',
+  },
+  offlineDownloadBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingVertical: spacing.sm,
+  },
+  offlineDownloadText: {
+    fontSize: font.size.sm,
+    fontWeight: '600',
+  },
+  progressBarBg: {
+    flex: 1,
+    height: 6,
+    backgroundColor: colors.border,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%',
+    borderRadius: 3,
   },
 });

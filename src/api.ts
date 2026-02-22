@@ -18,6 +18,7 @@ import type {
   OasaMLInfo,
   OasaSchedLines,
   OasaDailySchedule,
+  OasaBulkStop,
 } from './types';
 
 const BASE = 'http://telematics.oasa.gr/api/';
@@ -95,6 +96,12 @@ export const getBusLocations = (routeCode: string) =>
 /** Closest stops to a lat/lng coordinate. */
 export const getClosestStops = (lat: number, lng: number) =>
   api<OasaNearbyStop[]>('getClosestStops', { p1: String(lat), p2: String(lng) });
+
+/* ── Bulk / Offline Endpoints (undocumented) ─────────────────── */
+
+/** All 9,000+ stops in the network — single call, ~2 MB JSON.
+ *  Uses the undocumented `getAllStops` action (no params). */
+export const getAllStopsBulk = () => api<OasaBulkStop[]>('getAllStops');
 
 /* ── Schedule Endpoints ──────────────────────────────────────── */
 

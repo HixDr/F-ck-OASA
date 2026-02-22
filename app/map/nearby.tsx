@@ -23,7 +23,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font } from '../../src/theme';
 import { useClosestStops, useLines } from '../../src/hooks';
 import { getStopArrivals, getRoutesForStop, getWalkingRoute } from '../../src/api';
-import { getStamps, addStamp, removeStamp, getToggle, setToggle, isFavoriteStop, addFavoriteStop, removeFavoriteStop } from '../../src/storage';
+import { getStamps, addStamp, removeStamp, getToggle, setToggle, isFavoriteStop, addFavoriteStop, removeFavoriteStop, getCachedRoutesForStop, setCachedRoutesForStop } from '../../src/storage';
 import { GOOGLE_DARK_STYLE } from '../../src/googleMapStyle';
 import { METRO_LINES } from '../../src/metro';
 import { mapStyles as ms } from '../../src/mapStyles';
@@ -177,11 +177,29 @@ export default function NearbyMapScreen() {
     });
 
     const ul = userLocationRef.current;
-    const [routes, arrivals, walkRoute] = await Promise.all([
-      getRoutesForStop(stop.code),
-      getStopArrivals(stop.code),
-      ul ? getWalkingRoute(ul.lat, ul.lng, stop.lat, stop.lng) : Promise.resolve(null),
-    ]);
+    let routes: Awaited<ReturnType<typeof getRoutesForStop>> | null = null;
+    let arrivals: Awaited<ReturnType<typeof getStopArrivals>> = [];
+    try {
+      [routes, arrivals] = await Promise.all([
+        getRoutesForStop(stop.code),
+        getStopArrivals(stop.code),
+      ]);
+      // Cache routes for offline use
+      if (routes && routes.length > 0) {
+        setCachedRoutesForStop(stop.code, routes);
+      }
+    } catch {
+      // Offline fallback
+      routes = await getCachedRoutesForStop(stop.code);
+      arrivals = [];
+    }
+
+    let walkRoute;
+    try {
+      walkRoute = ul ? await getWalkingRoute(ul.lat, ul.lng, stop.lat, stop.lng) : null;
+    } catch {
+      walkRoute = null;
+    }
 
     let walkMin: number | null = null;
     if (walkRoute && walkRoute.coords.length > 1) {
@@ -302,14 +320,17 @@ export default function NearbyMapScreen() {
 
         {/* User location */}
         {userLoc && (
-          <Marker coordinate={{ latitude: userLoc.lat, longitude: userLoc.lng }}
-            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={true} flat>
+          <Marker key={`user-${iconStyle}`}
+            coordinate={{ latitude: userLoc.lat, longitude: userLoc.lng }}
+            anchor={{ x: 0.5, y: 0.5 }}
+            rotation={iconStyle !== 'cat' ? (userHeading ?? 0) : 0}
+            tracksViewChanges={false} flat>
             {iconStyle === 'cat' ? (
               <Image source={{ uri: USER_MARKER_BASE64 }} style={ms.catIcon} />
             ) : (
               <View style={ms.userMarkerWrap}>
                 {userHeading != null && (
-                  <View style={[ms.headingBeam, { transform: [{ rotate: `${userHeading}deg` }] }]}>
+                  <View style={ms.headingBeam}>
                     <HeadingBeam />
                   </View>
                 )}

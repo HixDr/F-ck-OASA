@@ -27,7 +27,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font } from '../../src/theme';
 import { useBusLocations, useStops, useRoutes, useSchedule, useLines } from '../../src/hooks';
 import { getStopArrivals, getWalkingRoute, getRoutesForStop, getRouteDetails } from '../../src/api';
-import { isFavorite, addFavorite, removeFavorite, getStamps, addStamp, removeStamp, getToggle, setToggle, getCachedBusPositions, setCachedBusPositions, isFavoriteStop, addFavoriteStop, removeFavoriteStop } from '../../src/storage';
+import { isFavorite, addFavorite, removeFavorite, getStamps, addStamp, removeStamp, getToggle, setToggle, getCachedBusPositions, setCachedBusPositions, isFavoriteStop, addFavoriteStop, removeFavoriteStop, getCachedRoutesForStop, setCachedRoutesForStop } from '../../src/storage';
 import { useNetworkStatus } from '../../src/network';
 import { startAlertWatch, stopAlertWatch, subscribeAlertConfig, type AlertConfig } from '../../src/notifications';
 import { useSettings } from '../../src/settings';
@@ -214,7 +214,7 @@ export default function LiveMapScreen() {
     getRouteDetails(activeRouteCode).then(setRoutePath).catch(() => setRoutePath([]));
   }, [activeRouteCode]);
 
-  const { data: buses, isLoading: loadingBuses } = useBusLocations(activeRouteCode);
+  const { data: buses } = useBusLocations(activeRouteCode);
   const { data: stops } = useStops(activeRouteCode);
   const isOnline = useNetworkStatus();
   const mapRef = useRef<MapView>(null);
@@ -284,6 +284,9 @@ export default function LiveMapScreen() {
       staleLoadedRef.current = true;
       getCachedBusPositions(activeRouteCode).then((cached) => {
         if (cached && cached.buses.length > 0) {
+          // Discard stale positions older than 1 hour
+          const ageMin = (Date.now() - cached.ts) / 60000;
+          if (ageMin > 60) return;
           setStaleBuses(cached.buses);
           setStaleBusTs(cached.ts);
         }
@@ -412,10 +415,12 @@ export default function LiveMapScreen() {
     setSelectedStop({ name: stop.name, stopCode: stop.code, arrivals: null, loading: true, walkMin: null, lat: stop.lat, lng: stop.lng });
 
     const ul = userLocationRef.current;
-    const [arrivals, walkRoute] = await Promise.all([
+    const [arrivalsResult, walkResult] = await Promise.allSettled([
       getStopArrivals(stop.code),
       ul ? getWalkingRoute(ul.lat, ul.lng, stop.lat, stop.lng) : Promise.resolve(null),
     ]);
+    const arrivals = arrivalsResult.status === 'fulfilled' ? arrivalsResult.value ?? [] : [];
+    const walkRoute = walkResult.status === 'fulfilled' ? walkResult.value : null;
 
     let walkMin: number | null = null;
     if (walkRoute && walkRoute.coords.length > 1) {
@@ -463,14 +468,20 @@ export default function LiveMapScreen() {
 
   // One-shot bitmap capture: track for 500ms after stops/color change, then stop for perf
   const selectedStopCode = selectedStop?.stopCode ?? null;
-  const prevSelectedRef = useRef<string | null>(null);
-  useEffect(() => { prevSelectedRef.current = selectedStopCode; }, [selectedStopCode]);
   const [stopTracking, setStopTracking] = useState(true);
   useEffect(() => {
     setStopTracking(true);
     const t = setTimeout(() => setStopTracking(false), 500);
     return () => clearTimeout(t);
   }, [stopsWithBearings, primaryColor]);
+
+  // One-shot bitmap capture for selected stop changes
+  const [selectedTracking, setSelectedTracking] = useState(false);
+  useEffect(() => {
+    setSelectedTracking(true);
+    const t = setTimeout(() => setSelectedTracking(false), 500);
+    return () => clearTimeout(t);
+  }, [selectedStopCode]);
 
   // One-shot bitmap capture for stamp markers
   const stampIds = useMemo(() => stamps.map((s) => s.id).join(','), [stamps]);
@@ -565,7 +576,7 @@ export default function LiveMapScreen() {
           return (
           <Marker key={`st-${stop.code}-${i}-${primaryColor}`}
             coordinate={{ latitude: stop.lat, longitude: stop.lng }}
-            anchor={{ x: 0.5, y: 0.65 }} tracksViewChanges={stopTracking || isSelected || stop.code === prevSelectedRef.current}
+            anchor={{ x: 0.5, y: 0.65 }} tracksViewChanges={stopTracking || selectedTracking}
             rotation={stop.bearing}
             flat={true}
             zIndex={isSelected ? 1050 : 999}
@@ -620,14 +631,17 @@ export default function LiveMapScreen() {
 
         {/* User location */}
         {userLoc && (
-          <Marker coordinate={{ latitude: userLoc.lat, longitude: userLoc.lng }}
-            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={true} flat>
+          <Marker key={`user-${iconStyle}`}
+            coordinate={{ latitude: userLoc.lat, longitude: userLoc.lng }}
+            anchor={{ x: 0.5, y: 0.5 }}
+            rotation={iconStyle !== 'cat' ? (userHeading ?? 0) : 0}
+            tracksViewChanges={false} flat>
             {iconStyle === 'cat' ? (
               <Image source={{ uri: USER_MARKER_BASE64 }} style={ms.catIcon} />
             ) : (
               <View style={ms.userMarkerWrap}>
                 {userHeading != null && (
-                  <View style={[ms.headingBeam, { transform: [{ rotate: `${userHeading}deg` }] }]}>
+                  <View style={ms.headingBeam}>
                     <HeadingBeam />
                   </View>
                 )}
@@ -762,9 +776,17 @@ export default function LiveMapScreen() {
               if (stopLines) { setStopLines(null); return; }
               setLoadingStopLines(true);
               try {
-                const [routes, arrivals] = await Promise.all([
-                  getRoutesForStop(selectedStop.stopCode), getStopArrivals(selectedStop.stopCode),
-                ]);
+                let routes: Awaited<ReturnType<typeof getRoutesForStop>> | null = null;
+                let arrivals: Awaited<ReturnType<typeof getStopArrivals>> = [];
+                try {
+                  [routes, arrivals] = await Promise.all([
+                    getRoutesForStop(selectedStop.stopCode), getStopArrivals(selectedStop.stopCode),
+                  ]);
+                  if (routes && routes.length > 0) setCachedRoutesForStop(selectedStop.stopCode, routes);
+                } catch {
+                  routes = await getCachedRoutesForStop(selectedStop.stopCode);
+                  arrivals = [];
+                }
                 const { lines } = buildLineGroups(routes ?? [], arrivals ?? [], linesMap);
                 setStopLines(lines);
               } catch {} finally { setLoadingStopLines(false); }
@@ -884,7 +906,7 @@ export default function LiveMapScreen() {
         </View>
       )}
 
-      {loadingBuses && (
+      {!allRoutes && (
         <View style={ms.loaderOverlay}>
           <ActivityIndicator size="large" color={colors.primaryLight} />
         </View>

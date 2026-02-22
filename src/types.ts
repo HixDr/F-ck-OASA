@@ -111,6 +111,19 @@ export interface OasaDailySchedule {
   go: OasaDailySchedEntry[];
 }
 
+/* ── Bulk Data Types (undocumented endpoints) ────────────────── */
+
+/** Stop record from `getAllStops` (snake_case, undocumented endpoint). */
+export interface OasaBulkStop {
+  stop_code: string;
+  stop_descr: string;
+  stop_descr_eng: string;
+  stop_id: string;
+  stop_lng: string;
+  stop_lat: string;
+  stop_heading: string | null;
+}
+
 /* ── App-Level Types ─────────────────────────────────────────── */
 
 export interface FavoriteLine {
