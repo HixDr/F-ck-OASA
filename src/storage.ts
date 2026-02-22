@@ -70,6 +70,14 @@ export async function initStorage(): Promise<void> {
   } catch {
     _offlineDownloaded = false;
   }
+  // Migration: reset offline flag if old directory format (consolidated files missing)
+  if (_offlineDownloaded) {
+    const check = new File(Paths.document, 'oasa_schedules.json');
+    if (!check.exists) {
+      _offlineDownloaded = false;
+      AsyncStorage.removeItem(OFFLINE_FLAG_KEY).catch(() => {});
+    }
+  }
   _initialized = true;
 }
 
@@ -208,117 +216,135 @@ export function setSetting(key: string, value: string): void {
   AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(_settings)).catch(() => {});
 }
 
-/* ── Schedule Cache (file-system backed) ─────────────────────── */
+/* ── Consolidated File Caches (single file + in-memory dict) ─── */
 
-const schedDir = new Directory(Paths.document, 'oasa_schedules');
+/**
+ * Key-value cache backed by a single JSON file on disk.
+ * - In-memory dict loaded lazily on first access (deduplicates concurrent loads).
+ * - Runtime writes are debounced (1 s) to avoid blocking the JS thread on large files.
+ * - Bulk writes (used by the download orchestrator) are immediate.
+ */
+function createDictCache<T>(fileName: string) {
+  const file = new File(Paths.document, fileName);
+  let _dict: Record<string, T> | null = null;
+  let _loading: Promise<Record<string, T>> | null = null;
+  let _persistTimer: ReturnType<typeof setTimeout> | null = null;
 
-/** Ensure the schedules directory exists. */
-function ensureSchedDir(): void {
-  if (!schedDir.exists) schedDir.create({ intermediates: true });
-}
-
-export async function getCachedSchedule(lineCode: string): Promise<OasaDailySchedule | null> {
-  try {
-    const f = new File(schedDir, `${lineCode}.json`);
-    if (!f.exists) return null;
-    const raw = await f.text();
-    return JSON.parse(raw) as OasaDailySchedule;
-  } catch {
-    return null;
+  async function load(): Promise<Record<string, T>> {
+    if (_dict) return _dict;
+    if (_loading) return _loading;
+    _loading = (async () => {
+      try {
+        if (file.exists) _dict = JSON.parse(await file.text()) as Record<string, T>;
+      } catch {}
+      if (!_dict) _dict = {};
+      _loading = null;
+      return _dict;
+    })();
+    return _loading;
   }
-}
 
-export async function setCachedSchedule(lineCode: string, data: OasaDailySchedule): Promise<void> {
-  try {
-    ensureSchedDir();
-    const f = new File(schedDir, `${lineCode}.json`);
-    f.create({ overwrite: true });
-    f.write(JSON.stringify(data));
-  } catch {}
-}
-
-/* ── Routes Cache (file-system backed) ────────────────────────── */
-
-const routesDir = new Directory(Paths.document, 'oasa_routes');
-
-function ensureRoutesDir(): void {
-  if (!routesDir.exists) routesDir.create({ intermediates: true });
-}
-
-export async function getCachedRoutes(lineCode: string): Promise<OasaRoute[] | null> {
-  try {
-    const f = new File(routesDir, `${lineCode}.json`);
-    if (!f.exists) return null;
-    const raw = await f.text();
-    return JSON.parse(raw) as OasaRoute[];
-  } catch {
-    return null;
+  function persistNow(): void {
+    if (_persistTimer) { clearTimeout(_persistTimer); _persistTimer = null; }
+    if (!_dict) return;
+    try {
+      file.create({ overwrite: true });
+      file.write(JSON.stringify(_dict));
+    } catch {}
   }
-}
 
-export async function setCachedRoutes(lineCode: string, data: OasaRoute[]): Promise<void> {
-  try {
-    ensureRoutesDir();
-    const f = new File(routesDir, `${lineCode}.json`);
-    f.create({ overwrite: true });
-    f.write(JSON.stringify(data));
-  } catch {}
-}
-
-/* ── Routes-For-Stop Cache (file-system backed) ──────────────── */
-
-const routesForStopDir = new Directory(Paths.document, 'oasa_routes_for_stop');
-
-function ensureRoutesForStopDir(): void {
-  if (!routesForStopDir.exists) routesForStopDir.create({ intermediates: true });
-}
-
-export async function getCachedRoutesForStop(stopCode: string): Promise<OasaRoute[] | null> {
-  try {
-    const f = new File(routesForStopDir, `${stopCode}.json`);
-    if (!f.exists) return null;
-    const raw = await f.text();
-    return JSON.parse(raw) as OasaRoute[];
-  } catch {
-    return null;
+  function persistDebounced(): void {
+    if (_persistTimer) clearTimeout(_persistTimer);
+    _persistTimer = setTimeout(persistNow, 1000);
   }
+
+  return {
+    get: async (key: string): Promise<T | null> => {
+      const d = await load();
+      return d[key] ?? null;
+    },
+    set: async (key: string, data: T): Promise<void> => {
+      const d = await load();
+      d[key] = data;
+      persistDebounced();
+    },
+    setBulk: (all: Record<string, T>): void => {
+      _dict = all;
+      _loading = null;
+      persistNow();
+    },
+    clear: (): void => {
+      if (_persistTimer) { clearTimeout(_persistTimer); _persistTimer = null; }
+      _dict = null;
+      _loading = null;
+      try { if (file.exists) file.delete(); } catch {}
+    },
+  };
 }
 
-export async function setCachedRoutesForStop(stopCode: string, data: OasaRoute[]): Promise<void> {
-  try {
-    ensureRoutesForStopDir();
-    const f = new File(routesForStopDir, `${stopCode}.json`);
-    f.create({ overwrite: true });
-    f.write(JSON.stringify(data));
-  } catch {}
+const _schedCache = createDictCache<OasaDailySchedule>('oasa_schedules.json');
+const _routesCache = createDictCache<OasaRoute[]>('oasa_routes.json');
+const _routesForStopCache = createDictCache<OasaRoute[]>('oasa_routes_for_stop.json');
+const _stopsCache = createDictCache<OasaStop[]>('oasa_route_stops.json');
+
+/* ── Schedule Cache ──────────────────────────────────────────── */
+
+export function getCachedSchedule(lineCode: string): Promise<OasaDailySchedule | null> {
+  return _schedCache.get(lineCode);
 }
 
-/* ── Route Stops Cache (file-system backed) ──────────────────── */
-
-const stopsDir = new Directory(Paths.document, 'oasa_route_stops');
-
-function ensureStopsDir(): void {
-  if (!stopsDir.exists) stopsDir.create({ intermediates: true });
+export function setCachedSchedule(lineCode: string, data: OasaDailySchedule): Promise<void> {
+  return _schedCache.set(lineCode, data);
 }
 
-export async function getCachedStops(routeCode: string): Promise<OasaStop[] | null> {
-  try {
-    const f = new File(stopsDir, `${routeCode}.json`);
-    if (!f.exists) return null;
-    const raw = await f.text();
-    return JSON.parse(raw) as OasaStop[];
-  } catch {
-    return null;
-  }
+export function setCachedSchedulesBulk(data: Record<string, OasaDailySchedule>): void {
+  _schedCache.setBulk(data);
 }
 
-export async function setCachedStops(routeCode: string, data: OasaStop[]): Promise<void> {
-  try {
-    ensureStopsDir();
-    const f = new File(stopsDir, `${routeCode}.json`);
-    f.create({ overwrite: true });
-    f.write(JSON.stringify(data));
-  } catch {}
+/* ── Routes Cache ────────────────────────────────────────────── */
+
+export function getCachedRoutes(lineCode: string): Promise<OasaRoute[] | null> {
+  return _routesCache.get(lineCode);
+}
+
+export function setCachedRoutes(lineCode: string, data: OasaRoute[]): Promise<void> {
+  return _routesCache.set(lineCode, data);
+}
+
+export function setCachedRoutesBulk(data: Record<string, OasaRoute[]>): void {
+  _routesCache.setBulk(data);
+}
+
+/* ── Routes-For-Stop Cache ───────────────────────────────────── */
+
+export function getCachedRoutesForStop(stopCode: string): Promise<OasaRoute[] | null> {
+  return _routesForStopCache.get(stopCode);
+}
+
+export function setCachedRoutesForStop(stopCode: string, data: OasaRoute[]): Promise<void> {
+  // Skip runtime writes when bulk offline data exists (avoids re-serializing large file)
+  if (_offlineDownloaded) return Promise.resolve();
+  return _routesForStopCache.set(stopCode, data);
+}
+
+export function setCachedRoutesForStopBulk(data: Record<string, OasaRoute[]>): void {
+  _routesForStopCache.setBulk(data);
+}
+
+/* ── Route Stops Cache ───────────────────────────────────────── */
+
+export function getCachedStops(routeCode: string): Promise<OasaStop[] | null> {
+  return _stopsCache.get(routeCode);
+}
+
+export function setCachedStops(routeCode: string, data: OasaStop[]): Promise<void> {
+  // Skip runtime writes when bulk offline data exists (avoids re-serializing large file)
+  if (_offlineDownloaded) return Promise.resolve();
+  return _stopsCache.set(routeCode, data);
+}
+
+export function setCachedStopsBulk(data: Record<string, OasaStop[]>): void {
+  _stopsCache.setBulk(data);
 }
 
 /* ── Last-Known Bus Positions Cache ──────────────────────────── */
@@ -418,20 +444,19 @@ export async function setAllCachedStops(stops: OasaBulkStop[]): Promise<void> {
 
 /** Clear all offline data. */
 export async function clearOfflineData(): Promise<void> {
-  try {
-    if (stopsFile.exists) stopsFile.delete();
-  } catch {}
-  try {
-    if (schedDir.exists) schedDir.delete();
-  } catch {}
-  try {
-    if (routesDir.exists) routesDir.delete();
-  } catch {}
-  try {
-    if (stopsDir.exists) stopsDir.delete();
-  } catch {}
-  try {
-    if (routesForStopDir.exists) routesForStopDir.delete();
-  } catch {}
+  // Clear consolidated file caches
+  _schedCache.clear();
+  _routesCache.clear();
+  _routesForStopCache.clear();
+  _stopsCache.clear();
+  // Clear bulk stops file
+  try { if (stopsFile.exists) stopsFile.delete(); } catch {}
+  // Clean up old directory-based caches (backward compat from earlier versions)
+  for (const name of ['oasa_schedules', 'oasa_routes', 'oasa_routes_for_stop', 'oasa_route_stops']) {
+    try {
+      const dir = new Directory(Paths.document, name);
+      if (dir.exists) dir.delete();
+    } catch {}
+  }
   await setOfflineDataFlag(false);
 }
