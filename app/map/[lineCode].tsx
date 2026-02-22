@@ -483,12 +483,15 @@ export default function LiveMapScreen() {
     return () => clearTimeout(t);
   }, [selectedStopCode]);
 
-  // One-shot bitmap capture for user location marker
+  // Re-enable bitmap capture briefly when heading changes so the beam rotates
   const [userTracking, setUserTracking] = useState(true);
+  const userTrackingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    const t = setTimeout(() => setUserTracking(false), 800);
-    return () => clearTimeout(t);
-  }, []);
+    setUserTracking(true);
+    if (userTrackingTimer.current) clearTimeout(userTrackingTimer.current);
+    userTrackingTimer.current = setTimeout(() => setUserTracking(false), 400);
+    return () => { if (userTrackingTimer.current) clearTimeout(userTrackingTimer.current); };
+  }, [userHeading]);
 
   // One-shot bitmap capture for stamp markers
   const stampIds = useMemo(() => stamps.map((s) => s.id).join(','), [stamps]);
@@ -636,19 +639,20 @@ export default function LiveMapScreen() {
           </Marker>
         ))}
 
-        {/* User location */}
+        {/* User location — single marker, beam rotated via CSS transform */}
         {userLoc && (
           <Marker key={`user-${iconStyle}`}
             coordinate={{ latitude: userLoc.lat, longitude: userLoc.lng }}
             anchor={{ x: 0.5, y: 0.5 }}
-            rotation={iconStyle !== 'cat' ? (userHeading ?? 0) : 0}
-            tracksViewChanges={userTracking} flat>
+            tracksViewChanges={userTracking}
+            flat
+            zIndex={999}>
             {iconStyle === 'cat' ? (
               <Image source={{ uri: USER_MARKER_BASE64 }} style={ms.catIcon} />
             ) : (
               <View style={ms.userMarkerWrap}>
                 {userHeading != null && (
-                  <View style={ms.headingBeam}>
+                  <View style={[ms.headingBeam, { transform: [{ rotate: `${userHeading}deg` }] }]}>
                     <HeadingBeam />
                   </View>
                 )}
