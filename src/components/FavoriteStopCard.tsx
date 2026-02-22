@@ -21,7 +21,7 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font } from '../theme';
 import { getStopArrivals, getRoutesForStop, getRoutes, getDailySchedule } from '../api';
-import { updateFavoriteStop, getCachedSchedule, setCachedSchedule } from '../storage';
+import { updateFavoriteStop, getCachedSchedule, setCachedSchedule, getCachedRoutesForStop, setCachedRoutesForStop, getCachedRoutes } from '../storage';
 import { useLines } from '../hooks';
 import { buildLineGroups, enrichWithDirectionHints, getArrivalColor, type LineGroup } from '../mapUtils';
 import { startAlertWatch, stopAlertWatch, subscribeAlertConfig, type AlertConfig } from '../notifications';
@@ -148,10 +148,22 @@ export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props
   // Initial load — fetch routes and arrivals
   const fetchData = useCallback(async () => {
     try {
-      const [routes, arrivals] = await Promise.all([
-        getRoutesForStop(stop.stopCode),
-        getStopArrivals(stop.stopCode),
-      ]);
+      let routes: Awaited<ReturnType<typeof getRoutesForStop>> | null = null;
+      let arrivals: Awaited<ReturnType<typeof getStopArrivals>> = [];
+      try {
+        [routes, arrivals] = await Promise.all([
+          getRoutesForStop(stop.stopCode),
+          getStopArrivals(stop.stopCode),
+        ]);
+        // Cache routes for offline use
+        if (routes && routes.length > 0) {
+          setCachedRoutesForStop(stop.stopCode, routes);
+        }
+      } catch {
+        // Offline fallback — use cached routes, no arrivals
+        routes = await getCachedRoutesForStop(stop.stopCode);
+        arrivals = [];
+      }
       const { lines: grouped, routeToLine } = buildLineGroups(routes ?? [], arrivals ?? [], linesMap);
       routeToLineRef.current = routeToLine;
       // Save raw descriptions before enrichment (for edit mode)
@@ -167,8 +179,9 @@ export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props
   }, [stop.stopCode, linesMap]);
 
   useEffect(() => {
+    if (!allLines) return; // Wait for lines data to populate linesMap
     fetchData();
-  }, [fetchData]);
+  }, [fetchData, allLines]);
 
   // Auto-refresh arrivals
   useEffect(() => {
@@ -211,7 +224,13 @@ export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props
             // Determine direction: fetch line's routes, find index of our routeCode
             let direction: 'go' | 'come' = 'go';
             try {
-              const lineRoutes = await getRoutes(line.lineCode);
+              // Try API first, fall back to cache
+              let lineRoutes;
+              try {
+                lineRoutes = await getRoutes(line.lineCode);
+              } catch {
+                lineRoutes = await getCachedRoutes(line.lineCode);
+              }
               if (lineRoutes && lineRoutes.length > 0) {
                 const idx = lineRoutes.findIndex((r) => r.RouteCode === line.routeCode);
                 direction = idx <= 0 ? 'come' : 'go';
@@ -221,8 +240,10 @@ export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props
             // Try cache first, then network
             let data = await getCachedSchedule(line.lineCode);
             if (!data) {
-              data = await getDailySchedule(line.lineCode);
-              if (data) setCachedSchedule(line.lineCode, data);
+              try {
+                data = await getDailySchedule(line.lineCode);
+                if (data) setCachedSchedule(line.lineCode, data);
+              } catch {}
             }
             if (data) {
               newMap.set(line.lineCode, parseSchedule(data, direction));

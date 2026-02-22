@@ -20,6 +20,7 @@ const queryClient = new QueryClient({
     queries: {
       retry: 2,
       refetchOnWindowFocus: false,
+      networkMode: 'always',
     },
   },
 });

@@ -4,7 +4,8 @@
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { FavoriteLine, FavoriteStop, OasaLine, MapStamp, OasaDailySchedule, OasaStop } from './types';
+import { File, Directory, Paths } from 'expo-file-system';
+import type { FavoriteLine, FavoriteStop, OasaLine, MapStamp, OasaDailySchedule, OasaStop, OasaBulkStop, OasaRoute } from './types';
 import { getDailySchedule } from './api';
 
 /* ── Keys ────────────────────────────────────────────────────── */
@@ -16,9 +17,9 @@ const LINES_CACHE_TS_KEY = '@oasa/lines_cache_ts';
 const STAMPS_KEY = '@oasa/stamps';
 const TOGGLES_KEY = '@oasa/toggles';
 const SETTINGS_KEY = '@oasa/settings';
-const SCHEDULE_CACHE_PREFIX = '@oasa/schedule/';
-const STOPS_CACHE_PREFIX = '@oasa/stops/';
 const BUS_POS_PREFIX = '@oasa/buspos/';
+const OFFLINE_FLAG_KEY = '@oasa/offline_downloaded';
+const OFFLINE_TS_KEY = '@oasa/offline_ts';
 
 /* ── In-Memory Mirror (for synchronous access) ──────────────── */
 
@@ -27,6 +28,7 @@ let _favoriteStops: FavoriteStop[] = [];
 let _stamps: MapStamp[] = [];
 let _toggles: Record<string, boolean> = {};
 let _settings: Record<string, string> = {};
+let _offlineDownloaded = false;
 let _initialized = false;
 
 /** Must be called once at app start (e.g. in _layout). */
@@ -61,6 +63,12 @@ export async function initStorage(): Promise<void> {
     if (raw) _settings = JSON.parse(raw);
   } catch {
     _settings = {};
+  }
+  try {
+    const raw = await AsyncStorage.getItem(OFFLINE_FLAG_KEY);
+    _offlineDownloaded = raw === '1';
+  } catch {
+    _offlineDownloaded = false;
   }
   _initialized = true;
 }
@@ -136,7 +144,8 @@ export async function getCachedLines(): Promise<OasaLine[] | null> {
     const tsRaw = await AsyncStorage.getItem(LINES_CACHE_TS_KEY);
     if (!tsRaw) return null;
     const ts = Number(tsRaw);
-    if (Date.now() - ts > CACHE_TTL) return null;
+    // Skip TTL check if offline data has been downloaded (store indefinitely)
+    if (!_offlineDownloaded && Date.now() - ts > CACHE_TTL) return null;
     const raw = await AsyncStorage.getItem(LINES_CACHE_KEY);
     if (!raw) return null;
     return JSON.parse(raw) as OasaLine[];
@@ -199,12 +208,20 @@ export function setSetting(key: string, value: string): void {
   AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(_settings)).catch(() => {});
 }
 
-/* ── Schedule Cache (offline) ────────────────────────────────── */
+/* ── Schedule Cache (file-system backed) ─────────────────────── */
+
+const schedDir = new Directory(Paths.document, 'oasa_schedules');
+
+/** Ensure the schedules directory exists. */
+function ensureSchedDir(): void {
+  if (!schedDir.exists) schedDir.create({ intermediates: true });
+}
 
 export async function getCachedSchedule(lineCode: string): Promise<OasaDailySchedule | null> {
   try {
-    const raw = await AsyncStorage.getItem(SCHEDULE_CACHE_PREFIX + lineCode);
-    if (!raw) return null;
+    const f = new File(schedDir, `${lineCode}.json`);
+    if (!f.exists) return null;
+    const raw = await f.text();
     return JSON.parse(raw) as OasaDailySchedule;
   } catch {
     return null;
@@ -212,15 +229,83 @@ export async function getCachedSchedule(lineCode: string): Promise<OasaDailySche
 }
 
 export async function setCachedSchedule(lineCode: string, data: OasaDailySchedule): Promise<void> {
-  AsyncStorage.setItem(SCHEDULE_CACHE_PREFIX + lineCode, JSON.stringify(data)).catch(() => {});
+  try {
+    ensureSchedDir();
+    const f = new File(schedDir, `${lineCode}.json`);
+    f.create({ overwrite: true });
+    f.write(JSON.stringify(data));
+  } catch {}
 }
 
-/* ── Route Stops Cache (offline) ─────────────────────────────── */
+/* ── Routes Cache (file-system backed) ────────────────────────── */
+
+const routesDir = new Directory(Paths.document, 'oasa_routes');
+
+function ensureRoutesDir(): void {
+  if (!routesDir.exists) routesDir.create({ intermediates: true });
+}
+
+export async function getCachedRoutes(lineCode: string): Promise<OasaRoute[] | null> {
+  try {
+    const f = new File(routesDir, `${lineCode}.json`);
+    if (!f.exists) return null;
+    const raw = await f.text();
+    return JSON.parse(raw) as OasaRoute[];
+  } catch {
+    return null;
+  }
+}
+
+export async function setCachedRoutes(lineCode: string, data: OasaRoute[]): Promise<void> {
+  try {
+    ensureRoutesDir();
+    const f = new File(routesDir, `${lineCode}.json`);
+    f.create({ overwrite: true });
+    f.write(JSON.stringify(data));
+  } catch {}
+}
+
+/* ── Routes-For-Stop Cache (file-system backed) ──────────────── */
+
+const routesForStopDir = new Directory(Paths.document, 'oasa_routes_for_stop');
+
+function ensureRoutesForStopDir(): void {
+  if (!routesForStopDir.exists) routesForStopDir.create({ intermediates: true });
+}
+
+export async function getCachedRoutesForStop(stopCode: string): Promise<OasaRoute[] | null> {
+  try {
+    const f = new File(routesForStopDir, `${stopCode}.json`);
+    if (!f.exists) return null;
+    const raw = await f.text();
+    return JSON.parse(raw) as OasaRoute[];
+  } catch {
+    return null;
+  }
+}
+
+export async function setCachedRoutesForStop(stopCode: string, data: OasaRoute[]): Promise<void> {
+  try {
+    ensureRoutesForStopDir();
+    const f = new File(routesForStopDir, `${stopCode}.json`);
+    f.create({ overwrite: true });
+    f.write(JSON.stringify(data));
+  } catch {}
+}
+
+/* ── Route Stops Cache (file-system backed) ──────────────────── */
+
+const stopsDir = new Directory(Paths.document, 'oasa_route_stops');
+
+function ensureStopsDir(): void {
+  if (!stopsDir.exists) stopsDir.create({ intermediates: true });
+}
 
 export async function getCachedStops(routeCode: string): Promise<OasaStop[] | null> {
   try {
-    const raw = await AsyncStorage.getItem(STOPS_CACHE_PREFIX + routeCode);
-    if (!raw) return null;
+    const f = new File(stopsDir, `${routeCode}.json`);
+    if (!f.exists) return null;
+    const raw = await f.text();
     return JSON.parse(raw) as OasaStop[];
   } catch {
     return null;
@@ -228,7 +313,12 @@ export async function getCachedStops(routeCode: string): Promise<OasaStop[] | nu
 }
 
 export async function setCachedStops(routeCode: string, data: OasaStop[]): Promise<void> {
-  AsyncStorage.setItem(STOPS_CACHE_PREFIX + routeCode, JSON.stringify(data)).catch(() => {});
+  try {
+    ensureStopsDir();
+    const f = new File(stopsDir, `${routeCode}.json`);
+    f.create({ overwrite: true });
+    f.write(JSON.stringify(data));
+  } catch {}
 }
 
 /* ── Last-Known Bus Positions Cache ──────────────────────────── */
@@ -275,4 +365,73 @@ export async function prefetchFavoriteSchedules(): Promise<void> {
       }),
     );
   } catch {}
+}
+
+/* ── Offline Data — Bulk Stops (file-system backed) ──────────── */
+
+const stopsFile = new File(Paths.document, 'oasa_all_stops.json');
+
+/** Check if offline data has been downloaded. */
+export function isOfflineDataDownloaded(): boolean {
+  return _offlineDownloaded;
+}
+
+/** Get the timestamp when offline data was last downloaded. */
+export async function getOfflineTimestamp(): Promise<number | null> {
+  try {
+    const raw = await AsyncStorage.getItem(OFFLINE_TS_KEY);
+    return raw ? Number(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Mark offline data as downloaded (or cleared). */
+export async function setOfflineDataFlag(downloaded: boolean): Promise<void> {
+  _offlineDownloaded = downloaded;
+  if (downloaded) {
+    await AsyncStorage.setItem(OFFLINE_FLAG_KEY, '1');
+    await AsyncStorage.setItem(OFFLINE_TS_KEY, String(Date.now()));
+  } else {
+    await AsyncStorage.removeItem(OFFLINE_FLAG_KEY);
+    await AsyncStorage.removeItem(OFFLINE_TS_KEY);
+  }
+}
+
+/** Get all cached stops (from file system). */
+export async function getAllCachedStops(): Promise<OasaBulkStop[] | null> {
+  try {
+    if (!stopsFile.exists) return null;
+    const raw = await stopsFile.text();
+    return JSON.parse(raw) as OasaBulkStop[];
+  } catch (err) {
+    console.warn('[offline] Failed to read cached stops:', err);
+    return null;
+  }
+}
+
+/** Store all stops to the file system (~2 MB). */
+export async function setAllCachedStops(stops: OasaBulkStop[]): Promise<void> {
+  stopsFile.create({ overwrite: true });
+  stopsFile.write(JSON.stringify(stops));
+}
+
+/** Clear all offline data. */
+export async function clearOfflineData(): Promise<void> {
+  try {
+    if (stopsFile.exists) stopsFile.delete();
+  } catch {}
+  try {
+    if (schedDir.exists) schedDir.delete();
+  } catch {}
+  try {
+    if (routesDir.exists) routesDir.delete();
+  } catch {}
+  try {
+    if (stopsDir.exists) stopsDir.delete();
+  } catch {}
+  try {
+    if (routesForStopDir.exists) routesForStopDir.delete();
+  } catch {}
+  await setOfflineDataFlag(false);
 }
