@@ -3,7 +3,7 @@
  * Extracted from FavoriteStopCard so the planner can reuse the same logic.
  */
 
-import type { OasaDailySchedule } from './types';
+import type { OasaDailySchedule } from '../types';
 
 /** Parsed schedule info per line */
 export interface LineSchedule {

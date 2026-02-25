@@ -9,11 +9,11 @@ import { View, Text, ActivityIndicator, StyleSheet, TouchableOpacity } from 'rea
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, font, spacing, radius } from '../src/theme';
-import { initStorage, prefetchFavoriteSchedules } from '../src/storage';
-import { initLocation } from '../src/location';
-import { setupNetworkListener, useNetworkStatus } from '../src/network';
-import { subscribeAlertConfig, stopAlertWatch, type AlertConfig } from '../src/notifications';
-import { SettingsProvider } from '../src/settings';
+import { initStorage, prefetchFavoriteSchedules, warmPlannerCaches } from '../src/services/storage';
+import { initLocation } from '../src/services/location';
+import { setupNetworkListener, useNetworkStatus } from '../src/services/network';
+import { subscribeAlertConfig, stopAlertWatch, type AlertConfig } from '../src/services/notifications';
+import { SettingsProvider } from '../src/features/settings/SettingsProvider';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -131,6 +131,8 @@ export default function RootLayout() {
       setReady(true);
       // Silently pre-cache schedules for all favorite lines
       prefetchFavoriteSchedules();
+      // Eagerly warm dict caches so the planner's first run is fast
+      warmPlannerCaches();
     });
   }, []);
 

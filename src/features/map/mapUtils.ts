@@ -2,10 +2,10 @@
  * Shared map utility functions used by all map screens.
  */
 
-import { colors } from './theme';
-import type { OasaLine, OasaRoute } from './types';
-import { getStops } from './api';
-import { getCachedStops } from './storage';
+import { colors } from '../../theme';
+import type { OasaLine, OasaRoute } from '../../types';
+import { getStops } from '../../services/api';
+import { getCachedStops } from '../../services/storage';
 
 /** Arrival time color — red (<= 2 min), amber (<= 5 min), green (> 5 min). */
 export function getArrivalColor(minutes: number): string {

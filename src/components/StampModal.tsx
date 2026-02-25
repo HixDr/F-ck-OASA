@@ -6,7 +6,7 @@
 import React from 'react';
 import { View, Text, Modal, TextInput, TouchableOpacity, StyleSheet } from 'react-native';
 import { colors, spacing, radius, font } from '../theme';
-import { STAMP_EMOJIS } from '../stamps';
+import { STAMP_EMOJIS } from '../data/stamps';
 
 interface StampModalProps {
   visible: boolean;

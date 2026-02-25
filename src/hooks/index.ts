@@ -3,9 +3,9 @@
  */
 
 import { useQuery } from '@tanstack/react-query';
-import * as api from './api';
-import { getCachedLines, setCachedLines, getCachedSchedule, setCachedSchedule, getCachedStops, setCachedStops, getCachedRoutes, setCachedRoutes, getCachedRoutesForStop, setCachedRoutesForStop, getAllCachedStops, isOfflineDataDownloaded } from './storage';
-import type { OasaLine, OasaMLInfo, OasaDailySchedule, OasaNearbyStop, OasaRoute } from './types';
+import * as api from '../services/api';
+import { getCachedLines, setCachedLines, getCachedSchedule, setCachedSchedule, getCachedStops, setCachedStops, getCachedRoutes, setCachedRoutes, getCachedRoutesForStop, setCachedRoutesForStop, getAllCachedStops, isOfflineDataDownloaded } from '../services/storage';
+import type { OasaLine, OasaMLInfo, OasaDailySchedule, OasaNearbyStop, OasaRoute } from '../types';
 
 /** All bus lines — backed by AsyncStorage cache with 24h TTL. */
 export function useLines() {

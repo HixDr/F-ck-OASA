@@ -10,63 +10,25 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   View,
   Text,
-  TextInput,
-  StyleSheet,
   TouchableOpacity,
   ActivityIndicator,
   ScrollView,
-  Modal,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, spacing, radius, font } from '../theme';
-import { getStopArrivals, getRoutesForStop, getRoutes, getDailySchedule } from '../api';
-import { updateFavoriteStop, getCachedSchedule, setCachedSchedule, getCachedRoutesForStop, setCachedRoutesForStop, getCachedRoutes } from '../storage';
-import { useLines } from '../hooks';
-import { buildLineGroups, enrichWithDirectionHints, getArrivalColor, type LineGroup } from '../mapUtils';
-import { startAlertWatch, stopAlertWatch, subscribeAlertConfig, type AlertConfig } from '../notifications';
-import { parseSchedule, type LineSchedule } from '../scheduleUtils';
-import type { FavoriteStop, OasaLine, OasaDailySchedule } from '../types';
+import { colors, spacing } from '../theme';
+import { getStopArrivals, getRoutesForStop, getRoutes, getDailySchedule } from '../services/api';
+import { updateFavoriteStop, getCachedSchedule, setCachedSchedule, getCachedRoutesForStop, setCachedRoutesForStop, getCachedRoutes } from '../services/storage';
+import { useLinesMap } from '../hooks/useLinesMap';
+import { buildLineGroups, enrichWithDirectionHints, getArrivalColor, type LineGroup } from '../features/map/mapUtils';
+import { startAlertWatch, stopAlertWatch, subscribeAlertConfig, type AlertConfig } from '../services/notifications';
+import { parseSchedule, type LineSchedule } from '../utils/scheduleUtils';
+import ScheduleGrid from './ScheduleGrid';
+import AlertPickerModal from './AlertPickerModal';
+import { s } from './FavoriteStopCard.styles';
+import type { FavoriteStop } from '../types';
 
 const POLL_INTERVAL = 15_000;
-
-/* ── Schedule grid with auto-scroll to next departure ────────── */
-
-function ScheduleGrid({ times, nextDeparture, accentColor }: { times: string[]; nextDeparture: string | null; accentColor: string }) {
-  const scrollRef = useRef<ScrollView>(null);
-  const nextY = useRef(0);
-
-  return (
-    <ScrollView
-      ref={scrollRef}
-      style={schedStyles.scheduleScroll}
-      showsVerticalScrollIndicator={false}
-      nestedScrollEnabled
-    >
-      <View style={schedStyles.scheduleGrid}>
-        {times.map((t, i) => {
-          const now = new Date();
-          const nowMin = now.getHours() * 60 + now.getMinutes();
-          const [h, m] = t.split(':').map(Number);
-          const isPast = h * 60 + m < nowMin;
-          const isNext = t === nextDeparture;
-          return (
-            <View
-              key={i}
-              style={[schedStyles.scheduleTime, isNext && { backgroundColor: accentColor }]}
-              onLayout={isNext ? (e) => {
-                nextY.current = e.nativeEvent.layout.y;
-                scrollRef.current?.scrollTo({ y: Math.max(0, nextY.current - 40), animated: false });
-              } : undefined}
-            >
-              <Text style={[schedStyles.scheduleTimeText, isPast && schedStyles.scheduleTimePast, isNext && schedStyles.scheduleTimeNextText]}>{t}</Text>
-            </View>
-          );
-        })}
-      </View>
-    </ScrollView>
-  );
-}
 
 interface Props {
   stop: FavoriteStop;
@@ -76,11 +38,7 @@ interface Props {
 
 export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props) {
   const router = useRouter();
-  const { data: allLines } = useLines();
-  const linesMap = useMemo(() => {
-    if (!allLines) return new Map<string, OasaLine>();
-    return new Map(allLines.map((l) => [l.LineCode, l]));
-  }, [allLines]);
+  const { allLines, linesMap } = useLinesMap();
 
   const [allLineGroups, setAllLineGroups] = useState<LineGroup[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -331,7 +289,6 @@ export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props
         ) : displayLines && displayLines.length > 0 ? (
           displayLines.map((line) => {
             const isAlertActive = arrivalAlert?.stopCode === stop.stopCode && arrivalAlert?.lineId === line.lineId;
-            const isAlertPicking = alertLineCode === line.lineCode;
             const lineSched = scheduleMap.get(line.lineCode);
             const isSchedExpanded = expandedScheduleLine === line.lineCode;
             return (
@@ -378,7 +335,7 @@ export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props
                 {/* Inline full schedule grid */}
                 {isSchedExpanded && lineSched && (
                   <View style={s.schedExpandContainer}>
-                    <ScheduleGrid times={lineSched.times} nextDeparture={lineSched.nextDeparture} accentColor={primaryColor} />
+                    <ScheduleGrid times={lineSched.times} nextDeparture={lineSched.nextDeparture} accentColor={primaryColor} maxHeight={120} />
                   </View>
                 )}
               </View>
@@ -392,245 +349,19 @@ export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props
       )}
 
       {/* Alert picker modal */}
-      <Modal visible={!!alertLineCode} transparent animationType="fade" onRequestClose={() => setAlertLineCode(null)}>
-        <TouchableOpacity style={s.alertOverlay} activeOpacity={1} onPress={() => setAlertLineCode(null)}>
-          <TouchableOpacity style={s.alertModal} activeOpacity={1} onPress={() => {}}>
-            <Text style={s.alertModalTitle}>Set Arrival Alert</Text>
-            <Text style={s.alertModalSubtitle}>
-              {alertLineCode && displayLines ? displayLines.find(l => l.lineCode === alertLineCode)?.lineId : ''} at {stop.stopName}
-            </Text>
-            <View style={s.alertPickerRow}>
-              <Text style={s.alertPickerLabel}>Alert when ≤</Text>
-              <TextInput
-                style={s.alertPickerInput}
-                value={alertThreshold}
-                onChangeText={setAlertThreshold}
-                keyboardType="number-pad"
-                maxLength={2}
-                placeholderTextColor={colors.textMuted}
-                autoFocus
-              />
-              <Text style={s.alertPickerLabel}>min</Text>
-            </View>
-            <View style={s.alertModalBtns}>
-              <TouchableOpacity style={s.alertModalCancel} onPress={() => setAlertLineCode(null)}>
-                <Text style={s.alertModalCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[s.alertModalConfirm, { backgroundColor: primaryColor }]}
-                onPress={() => {
-                  const line = displayLines?.find(l => l.lineCode === alertLineCode);
-                  if (line) handleAlertConfirm(line);
-                }}>
-                <Ionicons name="notifications" size={16} color="#FFF" />
-                <Text style={s.alertModalConfirmText}>Start</Text>
-              </TouchableOpacity>
-            </View>
-          </TouchableOpacity>
-        </TouchableOpacity>
-      </Modal>
+      <AlertPickerModal
+        visible={!!alertLineCode}
+        subtitle={`${alertLineCode && displayLines ? displayLines.find(l => l.lineCode === alertLineCode)?.lineId : ''} at ${stop.stopName}`}
+        threshold={alertThreshold}
+        onChangeThreshold={setAlertThreshold}
+        accentColor={primaryColor}
+        onCancel={() => setAlertLineCode(null)}
+        onConfirm={() => {
+          const line = displayLines?.find(l => l.lineCode === alertLineCode);
+          if (line) handleAlertConfirm(line);
+        }}
+      />
     </View>
   );
 }
 
-const s = StyleSheet.create({
-  card: {
-    backgroundColor: colors.card,
-    borderRadius: radius.lg,
-    padding: spacing.md,
-    marginBottom: spacing.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    marginBottom: spacing.xs,
-  },
-  stopName: {
-    flex: 1,
-    color: colors.text,
-    fontSize: font.size.md,
-    fontWeight: '600',
-  },
-  editScroll: {
-    maxHeight: 200,
-  },
-  editRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    paddingVertical: spacing.xs + 1,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
-  },
-  lineRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: spacing.xs + 1,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
-  },
-  lineBadge: {
-    borderRadius: radius.sm,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    marginRight: spacing.sm,
-    minWidth: 40,
-    alignItems: 'center',
-  },
-  lineBadgeText: {
-    color: '#FFFFFF',
-    fontSize: font.size.xs,
-    fontWeight: '700',
-  },
-  lineDescr: {
-    flex: 1,
-    color: colors.textMuted,
-    fontSize: font.size.xs,
-    marginRight: spacing.sm,
-  },
-  arrivalBadge: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
-    borderRadius: radius.sm,
-  },
-  arrivalMin: {
-    color: '#000',
-    fontSize: font.size.xs,
-    fontWeight: '700',
-  },
-  noArrival: {
-    color: colors.textMuted,
-    fontSize: font.size.sm,
-    fontWeight: '600',
-  },
-  emptyText: {
-    color: colors.textMuted,
-    fontSize: font.size.sm,
-    textAlign: 'center',
-    marginTop: spacing.xs,
-    opacity: 0.7,
-  },
-  alertOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  alertModal: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    padding: spacing.lg,
-    minWidth: 280,
-    maxWidth: 340,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  alertModalTitle: {
-    color: colors.text,
-    fontSize: font.size.lg,
-    fontWeight: '700',
-    marginBottom: spacing.xs,
-  },
-  alertModalSubtitle: {
-    color: colors.textMuted,
-    fontSize: font.size.sm,
-    marginBottom: spacing.md,
-  },
-  alertPickerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: spacing.lg,
-  },
-  alertPickerLabel: {
-    color: colors.textMuted,
-    fontSize: font.size.md,
-    fontWeight: '600',
-  },
-  alertPickerInput: {
-    color: colors.text,
-    fontSize: font.size.lg,
-    fontWeight: '700',
-    backgroundColor: colors.card,
-    borderRadius: radius.sm,
-    paddingHorizontal: spacing.sm,
-    paddingVertical: spacing.xs,
-    minWidth: 52,
-    textAlign: 'center',
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  alertModalBtns: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: spacing.sm,
-  },
-  alertModalCancel: {
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.sm,
-  },
-  alertModalCancelText: {
-    color: colors.textMuted,
-    fontSize: font.size.sm,
-    fontWeight: '600',
-  },
-  alertModalConfirm: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.xs,
-    paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm,
-    borderRadius: radius.sm,
-  },
-  alertModalConfirmText: {
-    color: '#FFF',
-    fontSize: font.size.sm,
-    fontWeight: '700',
-  },
-  schedBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: spacing.xs,
-    paddingVertical: 2,
-    borderRadius: radius.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
-    backgroundColor: colors.surface,
-  },
-  schedBadgeText: {
-    color: colors.textMuted,
-    fontSize: font.size.xs,
-    fontWeight: '600',
-    fontVariant: ['tabular-nums'],
-  },
-  schedExpandContainer: {
-    paddingVertical: spacing.xs,
-    paddingLeft: spacing.sm,
-    maxHeight: 140,
-  },
-});
-
-/* ── Schedule grid styles ──────────────────────────────────────── */
-
-const schedStyles = StyleSheet.create({
-  scheduleScroll: { maxHeight: 120 },
-  scheduleGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 3 },
-  scheduleTime: {
-    paddingHorizontal: 5,
-    paddingVertical: 2,
-    borderRadius: radius.sm,
-    backgroundColor: colors.surface,
-  },
-  scheduleTimeText: {
-    color: colors.text,
-    fontSize: font.size.xs,
-    fontWeight: '600',
-    fontVariant: ['tabular-nums'],
-  },
-  scheduleTimePast: { color: colors.textMuted, opacity: 0.5 },
-  scheduleTimeNextText: { color: '#FFF', fontWeight: '700' },
-});
