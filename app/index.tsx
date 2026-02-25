@@ -198,7 +198,7 @@ export default function HomeScreen() {
             onPress={() => router.push('/search')}
           >
             <Ionicons name="search" size={20} color={colors.text} />
-            <Text style={s.searchBtnText}>Find a line…</Text>
+            <Text style={s.searchBtnText} numberOfLines={1}>Find a line…</Text>
           </TouchableOpacity>
           <TouchableOpacity
             style={s.nearbyBtn}
@@ -207,6 +207,14 @@ export default function HomeScreen() {
           >
             <Ionicons name="location" size={20} color={primaryColor} />
             <Text style={s.nearbyBtnText}>Nearby</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={s.nearbyBtn}
+            activeOpacity={0.7}
+            onPress={() => router.push('/planner')}
+          >
+            <Ionicons name="navigate" size={20} color={primaryColor} />
+            <Text style={s.nearbyBtnText}>Go To</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -433,11 +441,13 @@ const s = StyleSheet.create({
     paddingVertical: spacing.sm + 4,
     borderWidth: 1,
     borderColor: colors.border,
+    overflow: 'hidden',
   },
   searchBtnText: {
     color: colors.textMuted,
     fontSize: font.size.md,
     marginLeft: spacing.sm,
+    flexShrink: 1,
   },
   nearbyBtn: {
     flexDirection: 'row',

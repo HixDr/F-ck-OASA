@@ -36,7 +36,7 @@ interface BusState {
 const R = 6_371_000; // Earth radius in metres
 const toRad = Math.PI / 180;
 
-function haversine(a: LatLng, b: LatLng): number {
+export function haversine(a: LatLng, b: LatLng): number {
   const dLat = (b.lat - a.lat) * toRad;
   const dLng = (b.lng - a.lng) * toRad;
   const sinLat = Math.sin(dLat / 2);
