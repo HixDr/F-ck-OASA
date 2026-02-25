@@ -4,7 +4,7 @@
  */
 
 import React, { createContext, useContext, useState, useCallback } from 'react';
-import { getSetting, setSetting } from './storage';
+import { getSetting, setSetting } from '../../services/storage';
 
 /* ── Defaults ────────────────────────────────────────────────── */
 

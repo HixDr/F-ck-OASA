@@ -3,7 +3,7 @@
  */
 
 import { StyleSheet } from 'react-native';
-import { colors, spacing, radius, font } from './theme';
+import { colors, spacing, font } from '.';
 
 export const mapStyles = StyleSheet.create({
   container: {

@@ -5,7 +5,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { File, Directory, Paths } from 'expo-file-system';
-import type { FavoriteLine, FavoriteStop, OasaLine, MapStamp, OasaDailySchedule, OasaStop, OasaBulkStop, OasaRoute } from './types';
+import type { FavoriteLine, FavoriteStop, OasaLine, MapStamp, OasaDailySchedule, OasaStop, OasaBulkStop, OasaRoute } from '../types';
 import { getDailySchedule } from './api';
 
 /* ── Keys ────────────────────────────────────────────────────── */
@@ -259,6 +259,8 @@ function createDictCache<T>(fileName: string) {
   }
 
   return {
+    /** Eagerly load the backing file into memory (idempotent). */
+    preload: (): Promise<void> => load().then(() => {}),
     get: async (key: string): Promise<T | null> => {
       const d = await load();
       return d[key] ?? null;
@@ -286,6 +288,20 @@ const _schedCache = createDictCache<OasaDailySchedule>('oasa_schedules.json');
 const _routesCache = createDictCache<OasaRoute[]>('oasa_routes.json');
 const _routesForStopCache = createDictCache<OasaRoute[]>('oasa_routes_for_stop.json');
 const _stopsCache = createDictCache<OasaStop[]>('oasa_route_stops.json');
+
+/**
+ * Eagerly load all dict-cache backing files into memory.
+ * Call once at app startup (fire-and-forget) so the planner's first run
+ * doesn't pay the cold-cache file-read penalty.
+ */
+export function warmPlannerCaches(): Promise<void> {
+  return Promise.all([
+    _schedCache.preload(),
+    _routesCache.preload(),
+    _routesForStopCache.preload(),
+    _stopsCache.preload(),
+  ]).then(() => {});
+}
 
 /* ── Schedule Cache ──────────────────────────────────────────── */
 

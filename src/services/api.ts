@@ -19,7 +19,7 @@ import type {
   OasaSchedLines,
   OasaDailySchedule,
   OasaBulkStop,
-} from './types';
+} from '../types';
 
 const BASE = 'http://telematics.oasa.gr/api/';
 const UA = 'OASALive/1.0 (personal telematics client)';

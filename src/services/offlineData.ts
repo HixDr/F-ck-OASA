@@ -6,7 +6,7 @@
  */
 
 import { getLines, getAllStopsBulk, getDailySchedule, getRoutes, getStops, getRoutesForStop } from './api';
-import type { OasaDailySchedule, OasaRoute, OasaStop } from './types';
+import type { OasaDailySchedule, OasaRoute, OasaStop } from '../types';
 import {
   setCachedLines,
   setCachedSchedulesBulk,

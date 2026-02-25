@@ -86,7 +86,7 @@ async function startSilentLoop(): Promise<void> {
   });
   if (_silentSound) return;
   const { sound } = await Audio.Sound.createAsync(
-    require('../assets/silence.mp3'),
+    require('../../assets/silence.mp3'),
     { isLooping: true, volume: 0 },
   );
   _silentSound = sound;
@@ -103,7 +103,7 @@ async function playArrivalSound(): Promise<void> {
   try {
     if (_alertSound) { await _alertSound.unloadAsync(); _alertSound = null; }
     const { sound } = await Audio.Sound.createAsync(
-      require('../assets/arrival.mp3'),
+      require('../../assets/arrival.mp3'),
       { volume: 1 },
     );
     _alertSound = sound;
