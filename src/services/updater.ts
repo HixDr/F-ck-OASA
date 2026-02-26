@@ -8,7 +8,7 @@
 
 import { Alert, Platform } from 'react-native';
 import Constants from 'expo-constants';
-import * as LegacyFileSystem from 'expo-file-system/build/legacy/FileSystem';
+import * as LegacyFileSystem from 'expo-file-system/legacy';
 import { startActivityAsync } from 'expo-intent-launcher';
 
 const REPO = 'HixDr/F-ck-OASA';
