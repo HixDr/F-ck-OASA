@@ -13,6 +13,7 @@ import { initStorage, prefetchFavoriteSchedules, warmPlannerCaches } from '../sr
 import { initLocation } from '../src/services/location';
 import { setupNetworkListener, useNetworkStatus } from '../src/services/network';
 import { probeApiBase } from '../src/services/api';
+import { checkForUpdate, type UpdateProgress } from '../src/services/updater';
 import { subscribeAlertConfig, stopAlertWatch, type AlertConfig } from '../src/services/notifications';
 import { SettingsProvider } from '../src/features/settings/SettingsProvider';
 
@@ -121,10 +122,43 @@ const ls = StyleSheet.create({
     fontSize: font.size.xs,
     fontWeight: '700',
   },
+  updateOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 9999,
+  },
+  updateCard: {
+    backgroundColor: colors.card,
+    borderRadius: radius.lg,
+    padding: spacing.lg,
+    alignItems: 'center',
+    gap: spacing.sm,
+    width: 260,
+  },
+  updateText: {
+    color: colors.text,
+    fontSize: font.size.sm,
+    fontWeight: '600',
+  },
+  progressTrack: {
+    width: '100%',
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: colors.border,
+    overflow: 'hidden' as const,
+  },
+  progressFill: {
+    height: '100%',
+    backgroundColor: colors.primaryLight,
+    borderRadius: 3,
+  },
 });
 
 export default function RootLayout() {
   const [ready, setReady] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress>({ phase: 'idle', progress: 0 });
 
   useEffect(() => {
     setupNetworkListener();
@@ -134,6 +168,8 @@ export default function RootLayout() {
       prefetchFavoriteSchedules();
       // Eagerly warm dict caches so the planner's first run is fast
       warmPlannerCaches();
+      // Check for app updates (non-blocking)
+      checkForUpdate(setUpdateProgress);
     });
   }, []);
 
@@ -144,6 +180,8 @@ export default function RootLayout() {
       </View>
     );
   }
+
+  const showDownloadOverlay = updateProgress.phase === 'downloading' || updateProgress.phase === 'installing';
 
   return (
     <SettingsProvider>
@@ -160,6 +198,21 @@ export default function RootLayout() {
         }}
       />
       <AlertPill />
+      {showDownloadOverlay && (
+        <View style={ls.updateOverlay}>
+          <View style={ls.updateCard}>
+            <ActivityIndicator size="small" color={colors.primaryLight} />
+            <Text style={ls.updateText}>
+              {updateProgress.phase === 'installing'
+                ? 'Launching installer…'
+                : `Downloading update… ${Math.round(updateProgress.progress * 100)}%`}
+            </Text>
+            <View style={ls.progressTrack}>
+              <View style={[ls.progressFill, { width: `${Math.round(updateProgress.progress * 100)}%` }]} />
+            </View>
+          </View>
+        </View>
+      )}
     </QueryClientProvider>
     </SettingsProvider>
   );
