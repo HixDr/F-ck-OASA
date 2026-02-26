@@ -21,12 +21,52 @@ import type {
   OasaBulkStop,
 } from '../types';
 
-const BASE = 'http://telematics.oasa.gr/api/';
+const BASES = [
+  'https://telematics.oasa.gr/api/',
+  'http://telematics.oasa.gr/api/',
+] as const;
+let _resolvedBase: string = BASES[0]; // default to HTTPS
 const UA = 'OASALive/1.0 (personal telematics client)';
+
+/**
+ * Probe both HTTP and HTTPS endpoints at startup and lock onto whichever
+ * responds successfully first. Prefers HTTPS. Call once at app boot.
+ */
+export async function probeApiBase(): Promise<void> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+
+  try {
+    const results = await Promise.allSettled(
+      BASES.map(async (base) => {
+        const res = await fetch(`${base}?act=webGetLines`, {
+          method: 'GET',
+          headers: { 'User-Agent': UA },
+          signal: controller.signal,
+        });
+        if (!res.ok) throw new Error(`${res.status}`);
+        return base;
+      }),
+    );
+
+    // Pick HTTPS if it succeeded, else HTTP, else keep default
+    for (const r of results) {
+      if (r.status === 'fulfilled') {
+        _resolvedBase = r.value;
+        break;
+      }
+    }
+  } catch {
+    // Both failed or aborted — keep HTTPS default
+  } finally {
+    clearTimeout(timeout);
+  }
+  console.log(`[api] Using base: ${_resolvedBase}`);
+}
 
 async function api<T>(action: string, params: Record<string, string> = {}): Promise<T> {
   const qs = new URLSearchParams({ act: action, ...params }).toString();
-  const url = `${BASE}?${qs}`;
+  const url = `${_resolvedBase}?${qs}`;
 
   const res = await fetch(url, {
     method: 'GET',

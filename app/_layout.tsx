@@ -12,6 +12,7 @@ import { colors, font, spacing, radius } from '../src/theme';
 import { initStorage, prefetchFavoriteSchedules, warmPlannerCaches } from '../src/services/storage';
 import { initLocation } from '../src/services/location';
 import { setupNetworkListener, useNetworkStatus } from '../src/services/network';
+import { probeApiBase } from '../src/services/api';
 import { subscribeAlertConfig, stopAlertWatch, type AlertConfig } from '../src/services/notifications';
 import { SettingsProvider } from '../src/features/settings/SettingsProvider';
 
@@ -127,7 +128,7 @@ export default function RootLayout() {
 
   useEffect(() => {
     setupNetworkListener();
-    Promise.all([initStorage(), initLocation()]).then(() => {
+    Promise.all([initStorage(), initLocation(), probeApiBase()]).then(() => {
       setReady(true);
       // Silently pre-cache schedules for all favorite lines
       prefetchFavoriteSchedules();
