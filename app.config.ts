@@ -1,10 +1,18 @@
 import { ExpoConfig, ConfigContext } from "expo/config";
 
+// Single source of truth: version from package.json
+const { version } = require('./package.json');
+
+// Auto-compute Android versionCode from semver: 1.2.3 → 10203
+const versionCode = version
+  .split('.')
+  .reduce((acc: number, part: string, i: number) => acc + Number(part) * Math.pow(100, 2 - i), 0);
+
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: "F*ck OASA",
   slug: "fck-oasa",
-  version: "1.0.0",
+  version,
   orientation: "portrait",
   icon: "./assets/icon.png",
   userInterfaceStyle: "dark",
@@ -33,6 +41,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       "android.permission.ACCESS_FINE_LOCATION",
       "android.permission.POST_NOTIFICATIONS",
     ],
+    versionCode,
     package: "com.itshix.fckoasa",
     config: {
       googleMaps: {
