@@ -21,11 +21,12 @@ import {
   TOO_CLOSE_M,
   UNKNOWN_WAIT_MIN,
   MAX_RESULTS,
+  getTrafficMultiplier,
 } from './constants';
 import { buildRaptorIndex } from './raptorIndex';
 import { raptorScan } from './raptorScan';
 import { extractTrips } from './tripExtraction';
-import { scoreTripOptions, hydrateWaitTimes, computeCompositeScore } from './scoring';
+import { scoreTripOptions, hydrateWaitTimes, computeCompositeScore, validateMultiLegTiming, populateSingleLegTimes, minToHHMM } from './scoring';
 
 /* ── Re-exports ──────────────────────────────────────────────── */
 
@@ -118,29 +119,70 @@ export async function planTrips(
 
   if (rawTrips.length === 0) return [];
 
+  // Apply time-of-day traffic multiplier to ride times.
+  // Estimates each leg's departure time to pick the right traffic band.
+  for (const trip of rawTrips) {
+    let estTimeMin = nowMin + trip.walkToOriginMin + UNKNOWN_WAIT_MIN;
+    for (const leg of trip.legs) {
+      const mult = getTrafficMultiplier(estTimeMin);
+      leg.rideTimeMin = Math.max(1, Math.round(leg.rideTimeMin * mult));
+      estTimeMin += leg.rideTimeMin + UNKNOWN_WAIT_MIN;
+    }
+  }
+
   // Score, rank, then hydrate wait times for top candidates
   const candidates = scoreTripOptions(rawTrips);
-  await hydrateWaitTimes(candidates);
+  const caches = await hydrateWaitTimes(candidates);
 
-  // Recompute actual travel time using real wait data
-  for (const trip of candidates) {
-    let realTime = trip.walkToOriginMin + trip.walkFromDestMin + trip.transferWalkMin;
+  // Validate temporal feasibility of multi-leg trips (correct wait times
+  // on subsequent legs based on when the user actually arrives at each
+  // transfer stop, and discard trips where a connection is missed)
+  const validated = validateMultiLegTiming(candidates, caches, nowMin);
+  if (validated.length === 0) return [];
+
+  // Populate board/alight times on single-leg trips
+  populateSingleLegTimes(validated, nowMin);
+
+  // Recompute times: arrivalMin (for sorting) and totalTimeMin (for display).
+  // totalTimeMin = active travel only (walk + ride), excludes wait times.
+  // arrivalMin   = full time from now including waits (used for ranking).
+  const arrivalMap = new Map<TripOption, number>();
+  for (const trip of validated) {
+    let activeTime = trip.walkToOriginMin + trip.walkFromDestMin + trip.transferWalkMin;
+    let fullTime = activeTime;
     for (const leg of trip.legs) {
-      realTime += leg.rideTimeMin;
-      realTime += leg.waitTimeMin ?? UNKNOWN_WAIT_MIN;
+      activeTime += leg.rideTimeMin;
+      fullTime += leg.rideTimeMin + (leg.waitTimeMin ?? UNKNOWN_WAIT_MIN);
     }
-    trip.totalTimeMin = Math.round(realTime);
+    trip.totalTimeMin = Math.round(activeTime);
+    arrivalMap.set(trip, Math.round(fullTime));
+    // Arrival at destination = last alight time + walk from dest
+    const lastLeg = trip.legs[trip.legs.length - 1];
+    if (lastLeg.alightTimeStr) {
+      const [h, m] = lastLeg.alightTimeStr.split(':').map(Number);
+      trip.arrivalTimeStr = minToHHMM(h * 60 + m + trip.walkFromDestMin);
+    } else {
+      trip.arrivalTimeStr = minToHHMM(nowMin + Math.round(fullTime));
+    }
   }
 
   // Compute composite scores (multi-factor: wait cost, reliability, transfers)
-  const scored: { trip: TripOption; score: number }[] = await Promise.all(
-    candidates.map(async (trip) => ({
+  const scored: { trip: TripOption; score: number; arrivalMin: number }[] = await Promise.all(
+    validated.map(async (trip) => ({
       trip,
       score: await computeCompositeScore(trip),
+      arrivalMin: arrivalMap.get(trip) ?? trip.totalTimeMin,
     })),
   );
 
-  // Sort by composite score (used only for ordering), keep totalTimeMin for display
-  scored.sort((a, b) => a.score - b.score);
+  // Sort primarily by arrival time (soonest first); composite score breaks ties
+  // within a 3-minute window so near-simultaneous arrivals still prefer the
+  // more reliable / fewer-transfer option.
+  const ARRIVAL_TIE_WINDOW = 3;
+  scored.sort((a, b) => {
+    const timeDiff = a.arrivalMin - b.arrivalMin;
+    if (Math.abs(timeDiff) > ARRIVAL_TIE_WINDOW) return timeDiff;
+    return a.score - b.score;
+  });
   return scored.slice(0, MAX_RESULTS).map((s) => s.trip);
 }

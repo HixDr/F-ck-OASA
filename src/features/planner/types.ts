@@ -31,6 +31,12 @@ export interface TripLeg {
   waitTimeMin: number | null;
   waitSource: 'live' | 'scheduled' | null;
   scheduledTime: string | null;
+  /** HH:MM when the user boards this bus (null if timing unknown). */
+  boardTimeStr: string | null;
+  /** HH:MM when the user alights this bus (null if timing unknown). */
+  alightTimeStr: string | null;
+  /** Estimated minutes from route terminus to this board stop. */
+  boardOffsetMin: number;
 }
 
 /** A complete trip from origin to destination. */
@@ -40,6 +46,8 @@ export interface TripOption {
   walkFromDestMin: number;
   transferWalkMin: number;             // sum of all transfer walks
   totalTimeMin: number;
+  /** HH:MM estimated arrival at destination (including waits + walk). */
+  arrivalTimeStr: string | null;
   originStop: { code: string; name: string; lat: number; lng: number };
   destStop: { code: string; name: string; lat: number; lng: number };
 }

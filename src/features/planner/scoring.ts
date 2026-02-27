@@ -8,11 +8,15 @@ import {
   getCachedRoutes,
 } from '../../services/storage';
 import { getStopArrivals } from '../../services/api';
-import type { OasaArrival } from '../../types';
+import type { OasaArrival, OasaDailySchedule, OasaRoute } from '../../types';
 import type { TripOption } from './types';
+import { haversine } from '../map/busInterpolation';
 import {
   FALLBACK_MIN_PER_STOP,
   PRE_HYDRATE_MAX,
+  WALK_SPEED_M_PER_MIN,
+  TRANSFER_FLAT_PENALTY_MIN,
+  UNKNOWN_WAIT_MIN,
 } from './constants';
 
 /* ── Ride Time Estimation (schedule-based, used for re-scoring) ─ */
@@ -84,12 +88,20 @@ function fetchWithTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null>
   ]);
 }
 
+/** Caches returned by hydrateWaitTimes, reused by validateMultiLegTiming. */
+export interface HydrationCaches {
+  arrivalCache: Map<string, OasaArrival[]>;
+  schedCache: Map<string, OasaDailySchedule | null>;
+  routesLookup: Map<string, OasaRoute[] | null>;
+}
+
 /**
  * Populate `waitTimeMin` on legs of already-scored top results.
  * Uses per-stop arrival caching so the same stop is only queried once.
  * All unique stops are fetched in parallel (each with a 5 s timeout).
+ * Returns caches for downstream multi-leg validation.
  */
-export async function hydrateWaitTimes(trips: TripOption[]): Promise<void> {
+export async function hydrateWaitTimes(trips: TripOption[]): Promise<HydrationCaches> {
   // 1. Collect all unique boarding-stop codes across all trips
   const uniqueStops = new Set<string>();
   for (const trip of trips) {
@@ -114,11 +126,11 @@ export async function hydrateWaitTimes(trips: TripOption[]): Promise<void> {
   const uniqueLines = new Set<string>();
   for (const trip of trips) {
     for (const leg of trip.legs) {
-      if (leg.waitTimeMin === null) uniqueLines.add(leg.lineCode);
+      uniqueLines.add(leg.lineCode);
     }
   }
-  const schedCache = new Map<string, Awaited<ReturnType<typeof getCachedSchedule>>>();
-  const routesLookup = new Map<string, Awaited<ReturnType<typeof getCachedRoutes>>>();
+  const schedCache = new Map<string, OasaDailySchedule | null>();
+  const routesLookup = new Map<string, OasaRoute[] | null>();
   await Promise.all([...uniqueLines].map(async (lc) => {
     const [sched, routes] = await Promise.all([getCachedSchedule(lc), getCachedRoutes(lc)]);
     schedCache.set(lc, sched);
@@ -172,6 +184,8 @@ export async function hydrateWaitTimes(trips: TripOption[]): Promise<void> {
       }
     }
   }
+
+  return { arrivalCache, schedCache, routesLookup };
 }
 
 /* ── Scoring & Deduplication ─────────────────────────────────── */
@@ -304,4 +318,249 @@ export async function computeCompositeScore(trip: TripOption): Promise<number> {
   else if (unknownCount === total)              score += 20;
 
   return Math.round(score);
+}
+
+/* ── Multi-Leg Temporal Validation ───────────────────────────── */
+
+/** Maximum minutes to wait at a transfer stop before the trip is infeasible. */
+const MAX_TRANSFER_WAIT_MIN = 30;
+
+/** Format minutes since midnight to HH:MM string. Wraps past midnight. */
+export function minToHHMM(min: number): string {
+  const wrapped = ((min % 1440) + 1440) % 1440;
+  const h = Math.floor(wrapped / 60);
+  const m = Math.round(wrapped % 60);
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+/**
+ * Find the next scheduled departure from a sorted HH:MM list at or after
+ * `afterMin` (minutes since midnight).
+ * Returns the wait in minutes and the HH:MM string, or null if no service.
+ */
+function findNextDepartureFromSchedule(
+  sortedTimes: string[],
+  afterMin: number,
+): { time: string; waitMin: number } | null {
+  if (sortedTimes.length === 0) return null;
+  for (const t of sortedTimes) {
+    const [h, m] = t.split(':').map(Number);
+    const tMin = h * 60 + m;
+    if (tMin >= afterMin) {
+      return { time: t, waitMin: tMin - afterMin };
+    }
+  }
+  // Wrap to next day's first departure
+  const [h, m] = sortedTimes[0].split(':').map(Number);
+  const tMin = h * 60 + m;
+  return { time: sortedTimes[0], waitMin: (1440 - afterMin) + tMin };
+}
+
+/**
+ * Find the next live bus for a specific route at a stop, arriving at or after
+ * `afterMin` (absolute minutes since midnight).
+ * Returns wait in minutes from `afterMin`, or null if no matching arrival.
+ */
+function findNextLiveArrival(
+  arrivals: OasaArrival[],
+  routeCode: string,
+  nowMin: number,
+  afterMin: number,
+): number | null {
+  let bestWait: number | null = null;
+  for (const a of arrivals) {
+    if (a.route_code !== routeCode) continue;
+    const btime = parseInt(a.btime2, 10);
+    if (isNaN(btime)) continue;
+    const arrivalAbsMin = nowMin + btime; // absolute time this bus arrives at the stop
+    if (arrivalAbsMin >= afterMin) {
+      const wait = arrivalAbsMin - afterMin;
+      if (bestWait === null || wait < bestWait) bestWait = wait;
+    }
+  }
+  return bestWait;
+}
+
+/**
+ * Compute the walk time between two stops for a transfer, using their coords.
+ * Applies a minimum of TRANSFER_FLAT_PENALTY_MIN even for same-stop transfers.
+ */
+function computeTransferWalkMin(
+  alightLat: number, alightLng: number,
+  boardLat: number, boardLng: number,
+): number {
+  const d = haversine(
+    { lat: alightLat, lng: alightLng },
+    { lat: boardLat, lng: boardLng },
+  );
+  const walkMin = Math.round(d / WALK_SPEED_M_PER_MIN);
+  return Math.max(walkMin, TRANSFER_FLAT_PENALTY_MIN);
+}
+
+/**
+ * Resolve the direction ('go' | 'come') for a route given cached route data.
+ */
+function resolveDirection(
+  lineCode: string,
+  routeCode: string,
+  routesLookup: Map<string, OasaRoute[] | null>,
+): 'go' | 'come' {
+  const lineRoutes = routesLookup.get(lineCode);
+  if (lineRoutes && lineRoutes.length > 0) {
+    const ri = lineRoutes.findIndex((r) => r.RouteCode === routeCode);
+    return ri <= 0 ? 'come' : 'go';
+  }
+  return 'go';
+}
+
+/**
+ * Validate temporal feasibility of multi-leg trips and correct wait times
+ * for legs beyond the first.
+ *
+ * For each multi-leg trip, chains timing forward:
+ *   1. Leg 1 departs at: now + walkToOrigin + leg1.waitTimeMin
+ *   2. Leg 1 arrives at alight stop: departure + rideTimeMin
+ *   3. Walk to leg 2 board stop (computed from coords)
+ *   4. Check if leg 2's bus is reachable from that arrival time
+ *      — live data first, then scheduled, then headway estimate
+ *   5. Cascade to leg 3 if present
+ *
+ * Trips where any transfer wait exceeds MAX_TRANSFER_WAIT_MIN are removed.
+ * Surviving trips get corrected waitTimeMin values on subsequent legs.
+ */
+export function validateMultiLegTiming(
+  trips: TripOption[],
+  caches: HydrationCaches,
+  nowMin: number,
+): TripOption[] {
+  const { arrivalCache, schedCache, routesLookup } = caches;
+  const valid: TripOption[] = [];
+
+  for (const trip of trips) {
+    // Single-leg trips pass through — no transfer to validate
+    if (trip.legs.length < 2) {
+      valid.push(trip);
+      continue;
+    }
+
+    let currentTimeMin = nowMin + trip.walkToOriginMin;
+    let feasible = true;
+
+    for (let i = 0; i < trip.legs.length; i++) {
+      const leg = trip.legs[i];
+
+      if (i === 0) {
+        // First leg: wait was hydrated from "now", just advance the clock
+        currentTimeMin += leg.waitTimeMin ?? UNKNOWN_WAIT_MIN;
+        // Board time = when we finish walking + waiting
+        leg.boardTimeStr = minToHHMM(currentTimeMin);
+        // After riding leg 1
+        currentTimeMin += leg.rideTimeMin;
+        leg.alightTimeStr = minToHHMM(currentTimeMin);
+      } else {
+        // Compute transfer walk from previous leg's alight to this leg's board
+        const prevLeg = trip.legs[i - 1];
+        const xferWalk = computeTransferWalkMin(
+          prevLeg.alightStop.lat, prevLeg.alightStop.lng,
+          leg.boardStop.lat, leg.boardStop.lng,
+        );
+        currentTimeMin += xferWalk;
+
+        // Now currentTimeMin = when we arrive at this leg's board stop.
+        // Find the next bus for this route.
+
+        let resolved = false;
+
+        // 1) Try live arrivals
+        const arrivals = arrivalCache.get(leg.boardStop.code) ?? [];
+        if (arrivals.length > 0) {
+          const liveWait = findNextLiveArrival(arrivals, leg.routeCode, nowMin, currentTimeMin);
+          if (liveWait !== null) {
+            leg.waitTimeMin = liveWait;
+            leg.waitSource = 'live';
+            leg.scheduledTime = null;
+            resolved = true;
+          }
+        }
+
+        // 2) Fallback to cached schedule
+        if (!resolved) {
+          const data = schedCache.get(leg.lineCode);
+          if (data) {
+            const dir = resolveDirection(leg.lineCode, leg.routeCode, routesLookup);
+            const sched = parseSchedule(data, dir);
+            const next = findNextDepartureFromSchedule(sched.times, currentTimeMin);
+            if (next) {
+              leg.waitTimeMin = next.waitMin;
+              leg.waitSource = 'scheduled';
+              leg.scheduledTime = next.time;
+              resolved = true;
+            }
+          }
+        }
+
+        // 3) Fallback: keep existing waitTimeMin or use UNKNOWN_WAIT_MIN
+        if (!resolved && leg.waitTimeMin === null) {
+          leg.waitTimeMin = UNKNOWN_WAIT_MIN;
+        }
+
+        const actualWait = leg.waitTimeMin ?? UNKNOWN_WAIT_MIN;
+
+        // Feasibility: if the wait at this transfer is too long, discard the trip
+        if (actualWait > MAX_TRANSFER_WAIT_MIN) {
+          feasible = false;
+          break;
+        }
+
+        currentTimeMin += actualWait;
+        // Board time = arrival at transfer stop + wait
+        leg.boardTimeStr = minToHHMM(currentTimeMin);
+        // After riding this leg
+        currentTimeMin += leg.rideTimeMin;
+        leg.alightTimeStr = minToHHMM(currentTimeMin);
+      }
+    }
+
+    if (feasible) valid.push(trip);
+  }
+
+  return valid;
+}
+
+/**
+ * Populate boardTimeStr / alightTimeStr on single-leg trips.
+ * For multi-leg trips, validateMultiLegTiming already does this.
+ *
+ * - Scheduled: boardTimeStr = the scheduled departure (leg.scheduledTime).
+ * - Live:      boardTimeStr = nowMin + waitTimeMin (bus arrival time at stop).
+ * - Unknown:   boardTimeStr = nowMin + walkToOrigin + UNKNOWN_WAIT_MIN.
+ */
+export function populateSingleLegTimes(
+  trips: TripOption[],
+  nowMin: number,
+): void {
+  for (const trip of trips) {
+    if (trip.legs.length !== 1) continue;
+    const leg = trip.legs[0];
+    if (leg.boardTimeStr !== null) continue; // already populated
+
+    let boardMin: number;
+
+    if (leg.waitSource === 'scheduled' && leg.scheduledTime) {
+      // Board at the scheduled departure time
+      const [h, m] = leg.scheduledTime.split(':').map(Number);
+      boardMin = h * 60 + m;
+      leg.boardTimeStr = leg.scheduledTime;
+    } else if (leg.waitSource === 'live' && leg.waitTimeMin !== null) {
+      // Board when the live bus arrives at the stop
+      boardMin = nowMin + leg.waitTimeMin;
+      leg.boardTimeStr = minToHHMM(boardMin);
+    } else {
+      // Unknown: estimate from walk + default wait
+      boardMin = nowMin + trip.walkToOriginMin + (leg.waitTimeMin ?? UNKNOWN_WAIT_MIN);
+      leg.boardTimeStr = minToHHMM(boardMin);
+    }
+
+    leg.alightTimeStr = minToHHMM(boardMin + leg.rideTimeMin);
+  }
 }

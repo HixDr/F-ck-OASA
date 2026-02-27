@@ -534,11 +534,15 @@ export default function PlannerScreen() {
                     </View>
                     {/* Board */}
                     <View style={s.legDetailRow}>
-                      <Text style={s.legDetailText}>Board: {leg.boardStop.name}</Text>
+                      <Text style={s.legDetailText}>
+                        Board: {leg.boardStop.name}{leg.boardTimeStr ? ` · ${leg.boardTimeStr}` : ''}
+                      </Text>
                     </View>
                     {/* Get off */}
                     <View style={s.legDetailRow}>
-                      <Text style={s.legDetailText}>Get off: {leg.alightStop.name}</Text>
+                      <Text style={s.legDetailText}>
+                        Get off: {leg.alightStop.name}{leg.alightTimeStr ? ` · ${leg.alightTimeStr}` : ''}
+                      </Text>
                     </View>
                     {/* Stops + ride time */}
                     <View style={s.legDetailRow}>
@@ -560,7 +564,7 @@ export default function PlannerScreen() {
                   <View>
                     <Text style={s.totalText}>Total: ~{trip.totalTimeMin} min</Text>
                     <Text style={s.etaText}>
-                      Arrive ~{(() => {
+                      Arrive ~{trip.arrivalTimeStr ?? (() => {
                         const d = new Date();
                         d.setMinutes(d.getMinutes() + trip.totalTimeMin);
                         return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });

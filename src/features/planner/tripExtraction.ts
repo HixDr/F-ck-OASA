@@ -108,6 +108,8 @@ function buildTripOption(
     const lineInfo = linesMap.get(lineCode);
     const boardInfo = idx.stopInfo.get(leg.boardStop);
     const alightInfo = idx.stopInfo.get(leg.alightStop);
+    const times = idx.travelTimesMin.get(leg.routeCode);
+    const boardOffset = times ? times[leg.boardIdx] - times[0] : 0;
 
     tripLegs.push({
       lineCode,
@@ -133,6 +135,9 @@ function buildTripOption(
       waitTimeMin: null,
       waitSource: null,
       scheduledTime: null,
+      boardTimeStr: null,
+      alightTimeStr: null,
+      boardOffsetMin: Math.round(boardOffset),
     });
   }
 
@@ -154,6 +159,7 @@ function buildTripOption(
     walkFromDestMin: Math.round(walkFromDestMin),
     transferWalkMin: Math.round(totalTransferWalk),
     totalTimeMin: total,
+    arrivalTimeStr: null,
     originStop: { code: firstBoard.code, name: firstBoard.name, lat: firstBoard.lat, lng: firstBoard.lng },
     destStop: { code: lastAlight.code, name: lastAlight.name, lat: lastAlight.lat, lng: lastAlight.lng },
   };
