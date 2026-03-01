@@ -12,8 +12,7 @@ import { Alert as RNAlert, Platform, Vibration } from 'react-native';
 import { Audio } from 'expo-av';
 import * as Notifications from 'expo-notifications';
 import BackgroundService from 'react-native-background-actions';
-
-const OASA_BASE = 'http://telematics.oasa.gr/api/';
+import { getApiBase } from './api';
 
 /* ── Notification setup (expo-notifications for alert popup) ──── */
 
@@ -120,7 +119,7 @@ async function playArrivalSound(): Promise<void> {
 /* ── OASA API ─────────────────────────────────────────────────── */
 
 async function fetchStopArrivals(stopCode: string): Promise<any[]> {
-  const url = `${OASA_BASE}?act=getStopArrivals&p1=${stopCode}`;
+  const url = `${getApiBase()}?act=getStopArrivals&p1=${stopCode}`;
   const res = await fetch(url, { headers: { 'User-Agent': 'FckOASA/1.0' } });
   if (!res.ok) return [];
   const data = await res.json();

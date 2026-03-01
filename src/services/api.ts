@@ -64,6 +64,11 @@ export async function probeApiBase(): Promise<void> {
   console.log(`[api] Using base: ${_resolvedBase}`);
 }
 
+/** Return the currently resolved API base URL. */
+export function getApiBase(): string {
+  return _resolvedBase;
+}
+
 async function api<T>(action: string, params: Record<string, string> = {}): Promise<T> {
   const qs = new URLSearchParams({ act: action, ...params }).toString();
   const url = `${_resolvedBase}?${qs}`;
