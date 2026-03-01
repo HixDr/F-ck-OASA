@@ -128,10 +128,12 @@ async function downloadAndInstall(
     const contentUri = await LegacyFileSystem.getContentUriAsync(result.uri);
 
     // Launch Android package installer via ACTION_VIEW intent
-    await startActivityAsync('android.intent.action.VIEW', {
+    // FLAG_GRANT_READ_URI_PERMISSION (0x1) | FLAG_ACTIVITY_NEW_TASK (0x10000000)
+    // Both flags are required: the content URI needs read permission granted,
+    // and the installer must launch as a new task from a non-Activity context.
+    await startActivityAsync('android.intent.action.INSTALL_PACKAGE', {
       data: contentUri,
-      type: 'application/vnd.android.package-archive',
-      flags: 1, // FLAG_GRANT_READ_URI_PERMISSION
+      flags: 0x10000001,
     });
 
     onProgress?.({ phase: 'idle', progress: 0 });
