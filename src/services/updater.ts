@@ -6,7 +6,7 @@
  * the Android package installer directly.
  */
 
-import { Alert, Platform } from 'react-native';
+import { Alert, Linking, Platform } from 'react-native';
 import Constants from 'expo-constants';
 import * as LegacyFileSystem from 'expo-file-system/legacy';
 import { startActivityAsync } from 'expo-intent-launcher';
@@ -127,14 +127,29 @@ async function downloadAndInstall(
     // Convert file:// URI to content:// URI (required for Android 7+ FileProvider)
     const contentUri = await LegacyFileSystem.getContentUriAsync(result.uri);
 
-    // Launch Android package installer via ACTION_VIEW intent
-    // FLAG_GRANT_READ_URI_PERMISSION (0x1) | FLAG_ACTIVITY_NEW_TASK (0x10000000)
-    // Both flags are required: the content URI needs read permission granted,
-    // and the installer must launch as a new task from a non-Activity context.
-    await startActivityAsync('android.intent.action.INSTALL_PACKAGE', {
-      data: contentUri,
-      flags: 0x10000001,
-    });
+    try {
+      // FLAG_GRANT_READ_URI_PERMISSION (0x1) | FLAG_ACTIVITY_NEW_TASK (0x10000000)
+      await startActivityAsync('android.intent.action.INSTALL_PACKAGE', {
+        data: contentUri,
+        flags: 0x10000001,
+      });
+    } catch (installErr: any) {
+      // If install is blocked by "unknown sources" policy, redirect user to settings
+      console.warn('[updater] Install intent failed, opening settings:', installErr);
+      Alert.alert(
+        'Allow Installation',
+        'Please enable "Install unknown apps" for this app in the settings that will open, then try updating again.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Open Settings',
+            onPress: () => {
+              Linking.openSettings();
+            },
+          },
+        ],
+      );
+    }
 
     onProgress?.({ phase: 'idle', progress: 0 });
   } catch (err) {

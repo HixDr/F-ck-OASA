@@ -40,6 +40,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       "android.permission.ACCESS_COARSE_LOCATION",
       "android.permission.ACCESS_FINE_LOCATION",
       "android.permission.POST_NOTIFICATIONS",
+      "android.permission.REQUEST_INSTALL_PACKAGES",
     ],
     versionCode,
     package: "com.itshix.fckoasa",
