@@ -146,7 +146,11 @@ async function pollingTask(taskData: any): Promise<void> {
       const match = filtered.find((a: any) => Number(a.btime2) <= thresholdMin);
       if (match) {
         await playArrivalSound();
-        if (_hasNotifPermission) {
+
+        // Always fire system notification (primary alert mechanism —
+        // works even when the app is in background)
+        try {
+          await ensureNotificationPermission();
           await Notifications.scheduleNotificationAsync({
             content: {
               title: `🚌 ${lineId} arriving!`,
@@ -156,13 +160,21 @@ async function pollingTask(taskData: any): Promise<void> {
             },
             trigger: null,
           });
-        }
-        RNAlert.alert(
-          `🚌 ${lineId} arriving!`,
-          `${Number(match.btime2)} min away at ${stopName}`,
-        );
+        } catch {}
+
+        // In-app alert — will only show if app is in foreground
+        try { RNAlert.alert(`🚌 ${lineId} arriving!`, `${Number(match.btime2)} min away at ${stopName}`); } catch {}
+
+        // Capture callback before clearing config, then stop the service.
+        // Use a short delay to let the notification/sound finish before
+        // tearing down the foreground service.
         const cb = _onAlertFired;
-        await stopAlertWatch();
+        _alertConfig = null;
+        _onAlertFired = null;
+        notifyConfigChange();
+        await sleep(2000);
+        await stopSilentLoop();
+        try { if (BackgroundService.isRunning()) await BackgroundService.stop(); } catch {}
         cb?.();
         return;
       }
@@ -178,6 +190,14 @@ export async function startAlertWatch(
   config: AlertConfig,
   onFired?: () => void,
 ): Promise<void> {
+  if (!BackgroundService) {
+    RNAlert.alert(
+      'Alert unavailable',
+      'Background alerts require a development build. They are not supported in Expo Go.',
+    );
+    return;
+  }
+
   _alertConfig = config;
   _onAlertFired = onFired ?? null;
   notifyConfigChange();
@@ -211,7 +231,7 @@ export async function stopAlertWatch(): Promise<void> {
   _onAlertFired = null;
   notifyConfigChange();
   await stopSilentLoop();
-  if (BackgroundService.isRunning()) {
+  if (BackgroundService && BackgroundService.isRunning()) {
     await BackgroundService.stop();
   }
 }

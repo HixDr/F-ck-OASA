@@ -50,6 +50,8 @@ export interface TripOption {
   arrivalTimeStr: string | null;
   originStop: { code: string; name: string; lat: number; lng: number };
   destStop: { code: string; name: string; lat: number; lng: number };
+  /** UI tag: 'Soonest' | 'Shortest' — set by planner after sorting. */
+  _tag?: 'Soonest' | 'Shortest';
 }
 
 /** Stop candidate with distance from pin. */

@@ -180,8 +180,10 @@ export default function LiveMapScreen() {
 
   const parsedBuses = useMemo(() => {
     if (!buses || buses.length === 0) return [];
-    return buses.map((b) => ({ lat: parseFloat(b.CS_LAT), lng: parseFloat(b.CS_LNG), id: b.VEH_NO }));
-  }, [buses]);
+    return buses
+      .filter((b) => b.ROUTE_CODE === activeRouteCode)
+      .map((b) => ({ lat: parseFloat(b.CS_LAT), lng: parseFloat(b.CS_LNG), id: b.VEH_NO }));
+  }, [buses, activeRouteCode]);
 
   useEffect(() => {
     if (parsedBuses.length > 0 && activeRouteCode) {

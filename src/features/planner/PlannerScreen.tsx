@@ -497,6 +497,12 @@ export default function PlannerScreen() {
                 activeOpacity={0.7}
                 onPress={() => onResultTap(idx)}
               >
+                {/* Featured tag badge */}
+                {trip._tag && (
+                  <View style={[s.tagBadge, trip._tag === 'Soonest' ? { backgroundColor: '#22C55E' } : { backgroundColor: '#3B82F6' }]}>
+                    <Text style={s.tagBadgeText}>{trip._tag}</Text>
+                  </View>
+                )}
                 {/* Walk to origin */}
                 {trip.walkToOriginMin > 0 && (
                   <View style={s.legRow}>

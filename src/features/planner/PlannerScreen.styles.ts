@@ -200,4 +200,18 @@ export const s = StyleSheet.create({
     fontSize: font.size.md,
     fontWeight: '700',
   },
+  tagBadge: {
+    alignSelf: 'flex-start',
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 1,
+    marginBottom: spacing.xs,
+  },
+  tagBadgeText: {
+    color: '#FFF',
+    fontSize: font.size.xs - 1,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
 });

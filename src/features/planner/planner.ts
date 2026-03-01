@@ -184,5 +184,26 @@ export async function planTrips(
     if (Math.abs(timeDiff) > ARRIVAL_TIE_WINDOW) return timeDiff;
     return a.score - b.score;
   });
-  return scored.slice(0, MAX_RESULTS).map((s) => s.trip);
+
+  const sorted = scored.slice(0, MAX_RESULTS).map((s) => s.trip);
+
+  // Tag the soonest arrival ("Soonest") and shortest active travel ("Shortest").
+  // If they differ, promote the shortest route to position 2 so both featured
+  // results are visible without scrolling.
+  if (sorted.length > 0) {
+    sorted[0]._tag = 'Soonest';
+    let shortestIdx = 0;
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i].totalTimeMin < sorted[shortestIdx].totalTimeMin) shortestIdx = i;
+    }
+    if (shortestIdx !== 0) {
+      sorted[shortestIdx]._tag = 'Shortest';
+      if (shortestIdx > 1) {
+        const [item] = sorted.splice(shortestIdx, 1);
+        sorted.splice(1, 0, item);
+      }
+    }
+  }
+
+  return sorted;
 }

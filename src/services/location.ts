@@ -63,7 +63,8 @@ export async function initLocation(): Promise<void> {
   _sub = await Location.watchPositionAsync(
     { accuracy: Location.Accuracy.High, distanceInterval: 2, timeInterval: 1000 },
     (loc) => {
-      _location = { lat: loc.coords.latitude, lng: loc.coords.longitude };
+      const raw = { lat: loc.coords.latitude, lng: loc.coords.longitude };
+      _location = _smoothPosition(raw);
       // Use GPS heading when moving (more accurate than compass)
       if (loc.coords.heading != null && loc.coords.heading >= 0 && loc.coords.speed != null && loc.coords.speed > 0.5) {
         _updateHeading(loc.coords.heading);
@@ -78,6 +79,25 @@ export async function initLocation(): Promise<void> {
       _updateHeading(h.trueHeading);
     }
   });
+}
+
+/**
+ * Low-pass position smoothing — eliminates GPS "snapping" / jumping.
+ * Uses exponential smoothing (alpha 0.35 = responsive yet smooth).
+ * Only emits a visual change when the smoothed position moves ≥ 0.5 m
+ * (approx 0.0000045° lat) to avoid sub-pixel re-renders.
+ */
+const _POS_ALPHA = 0.35;
+const _POS_MIN_DELTA = 0.0000045; // ~0.5 m at equator
+
+function _smoothPosition(raw: LatLng): LatLng {
+  if (!_location) return raw;
+  const sLat = _location.lat + (raw.lat - _location.lat) * _POS_ALPHA;
+  const sLng = _location.lng + (raw.lng - _location.lng) * _POS_ALPHA;
+  const dLat = Math.abs(sLat - _location.lat);
+  const dLng = Math.abs(sLng - _location.lng);
+  if (dLat < _POS_MIN_DELTA && dLng < _POS_MIN_DELTA) return _location;
+  return { lat: sLat, lng: sLng };
 }
 
 /** Low-pass filter for heading: smooths jitter by blending old+new values.
