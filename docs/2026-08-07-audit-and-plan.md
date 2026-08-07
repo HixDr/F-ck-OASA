@@ -193,3 +193,67 @@ the planner also preserves the README's headline feature, and deleting it later 
 
 P0 → P1 → P2 → P3 → P4 → P5, with P6 interleaved (it is mostly config).
 P1 and P2 are where the "feels slow and janky" complaint actually lives.
+
+---
+
+# Outcome (2026-08-07)
+
+Executed as six parallel workstreams over disjoint file sets, plus a shared
+foundation landed first. Branch `revive/audit-fixes`, 4 commits.
+
+## Verified
+
+- `npx tsc --noEmit` — **0 errors** across 50 changed files.
+- `expo prebuild --platform android --clean` — succeeds.
+- **Release manifest audited from the merged output**: `RECORD_AUDIO`,
+  `MODIFY_AUDIO_SETTINGS`, `READ/WRITE_EXTERNAL_STORAGE` and
+  `SYSTEM_ALERT_WINDOW` are all gone; `usesCleartextTraffic` is absent;
+  `networkSecurityConfig` is scoped to `telematics.oasa.gr`. The debug variant
+  keeps cleartext and the overlay permission so Metro and the dev menu work.
+- **The manifest-merger concern about the debug `tools:replace` did not
+  materialise** — `processDebugMainManifest` and `processReleaseMainManifest`
+  both succeed.
+- **Signing guard fires**: `packageRelease` without credentials fails with
+  "Refusing to fall back to the public AOSP debug key."
+- **Full release build succeeds with credentials** — verified with a throwaway
+  keystore generated outside the repo and deleted afterwards. 27 MB APK,
+  `apksigner` confirms the supplied cert (not `CN=Android Debug`), v2+v3.
+- No keystore, secret, or `.env` is tracked by git.
+
+## NOT verified
+
+**Nothing has been run on a device or emulator.** The Android toolchain here
+builds, but WSL2 has no usable emulator, so there is no runtime confirmation
+of: the bus-animation rewrite (`setNativeProps` path), map smoothness, the
+planner's live-hydration timings, haptics, the splash handoff, or the alert
+foreground service. Those need a sideload.
+
+Known runtime watch-items:
+- The `MarkerAnimated` → `setNativeProps` path emits a one-time deprecation
+  warning per instance on Fabric. Expected, noisy in dev.
+- First debug build after the permission changes is worth an eye.
+
+## Deferred
+
+- **3-leg trips.** The planner is honestly a 2-leg planner (`MAX_ROUNDS = 2`);
+  indexing enough of the network for a real round 3 is a larger change.
+- **Two concurrent arrival alerts.** Still one global watch; the collision is
+  now reported to the user instead of being silent.
+- **Schedule-grid virtualization.** ~150 cells in a nested ScrollView; a wrap
+  layout cannot be virtualized with the available primitives. Cells are
+  memoized instead.
+- **`canRequestPackageInstalls()` pre-check** — unreachable from JS with the
+  current dependency set.
+
+## Owner actions required
+
+1. Generate the release keystore and set the GitHub secrets (exact commands in
+   README → "Release signing"). **This is a breaking change**: users must
+   uninstall/reinstall.
+2. **Ship a build containing the Settings → Export/Restore pane BEFORE the
+   re-signed release**, or the migration notice references a button users do
+   not have yet.
+3. Rotate the Google Maps key, restrict it to the new signing SHA-1, and set a
+   billing quota cap.
+4. Publish `<apk>.apk.sha256` with each release (the workflow now does this) —
+   without a digest the updater's integrity check degrades to size-only.
