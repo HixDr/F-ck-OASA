@@ -114,22 +114,44 @@ mitigation is a **key restriction**, not secrecy:
 3. Restrict the key's **API targets** to *Maps SDK for Android* only.
 4. Set a **Cloud Billing budget + quota cap** so a leaked key cannot run up a bill.
 
-> ### ⚠️ Change the signing key and the map goes blank until you update the restriction
->
-> The restriction matches on **(package name, signing certificate SHA-1)**. Sign with a different
-> key and the package still matches but the certificate does not, so Google silently refuses every
-> tile request.
->
-> **The symptom is not an error.** The map surface renders normally — Google watermark, the
-> recenter control, and all app overlays are drawn — and only the tiles are missing, leaving a
-> blank beige rectangle. Nothing is logged to logcat on current Play Services. It looks exactly
-> like a broken MapView or a dead network, which is what makes it expensive to diagnose.
-> (Confirmed on-device 2026-08-07 while testing a build signed with a throwaway key.)
->
-> So when migrating to the real keystore, **add the new SHA-1 to the key restriction before
-> shipping**, and if you ever build locally with a different key, expect a blank map and do not
-> go hunting in the app code. A key may carry several SHA-1s at once, so add the new one
-> alongside the old before cutting over.
+### Diagnosing a blank map
+
+A blank map is always an authorization problem, never an app bug — and the symptom is
+deceptive. The map *surface* renders normally (Google watermark, recenter control, and all app
+overlays draw fine); only the tiles are missing, leaving a blank beige rectangle. It looks
+exactly like a broken MapView or a dead network.
+
+**Get the real reason from logcat — do not theorise from the blank screen:**
+
+```bash
+adb logcat -c && adb shell am force-stop com.itshix.fckoasa
+# open the map in the app, then:
+adb logcat -d | grep -A6 "Google Android Maps SDK"
+```
+
+**Then test the key itself before touching any code.** This takes 20 seconds and rules out
+the most common cause outright:
+
+```bash
+curl -s "https://maps.googleapis.com/maps/api/geocode/json?address=Athens&key=$GOOGLE_MAPS_API_KEY" \
+  | python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('status'),d.get('error_message',''))"
+```
+
+Read the message carefully — the two failure modes look identical on screen but need opposite fixes:
+
+| Message | Meaning | Fix |
+|---|---|---|
+| `The provided API key is invalid.` | The key **does not exist**. Deleted, or the Cloud project was suspended / lost billing. | Create a new key. A restriction change will not help. |
+| `This IP, site or mobile application is not authorized…` | The key exists but the **(package, SHA-1)** pair does not match its Android restriction. | Add the signing SHA-1 to the restriction. |
+
+> **⚠️ The signing migration will trigger the second one.** The restriction matches on
+> (package name, certificate SHA-1), so the moment you sign with the new release keystore the
+> package still matches but the certificate does not. Add the new SHA-1 to the key restriction
+> **before** shipping — a key can carry several fingerprints at once, so add the new one
+> alongside the old and cut over safely.
+
+*(Observed 2026-08-07: the committed key returned `The provided API key is invalid` — it had
+lapsed during the project's idle period, so every build had a blank map regardless of signing.)*
 
 ## Release signing
 
