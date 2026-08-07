@@ -2,7 +2,7 @@
  * Shared map utility functions used by all map screens.
  */
 
-import { colors } from '../../theme';
+import { arrival, colors } from '../../theme';
 import type { OasaLine, OasaRoute } from '../../types';
 import {
   ApiEmptyError, ApiParseError, ApiShapeError, ApiTimeoutError, ApiError, getStops,
@@ -27,9 +27,9 @@ export function describeApiError(err: unknown, what: string): string {
 
 /** Arrival time color — red (<= 2 min), amber (<= 5 min), green (> 5 min). */
 export function getArrivalColor(minutes: number): string {
-  if (minutes <= 2) return '#F44336';
-  if (minutes <= 5) return '#F59E0B';
-  return '#22C55E';
+  if (minutes <= 2) return arrival.imminent;
+  if (minutes <= 5) return arrival.soon;
+  return arrival.later;
 }
 
 /* ── Geometry helpers for the map layer ──────────────────────── */
