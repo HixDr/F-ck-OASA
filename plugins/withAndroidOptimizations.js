@@ -140,6 +140,14 @@ const RELEASE_SIGNING_CONFIG = `        if (oasaHasReleaseSigning) {
                 storePassword oasaStorePassword
                 keyAlias oasaKeyAlias
                 keyPassword oasaKeyPassword
+                // minSdk is 24, so v1 (JAR) signing buys nothing and only slows
+                // installs. v3 is the important one: it carries a rotation
+                // proof, so this key can be replaced later WITHOUT forcing
+                // another uninstall/reinstall. Having just put users through
+                // one signature migration, it is worth never repeating it.
+                enableV1Signing false
+                enableV2Signing true
+                enableV3Signing true
             }
         }
 `;
