@@ -21,7 +21,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Stack, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, spacing, radius, font, onAccent, HIT_SIZE } from '../../theme';
+import { colors, spacing, radius, font, fontScaleCap, onAccent, HIT_SIZE } from '../../theme';
 import Pressable from '../../ui/Pressable';
 import { SkeletonListRow } from '../../ui/Skeleton';
 import { duration, easing, spring, useReduceMotion } from '../../ui/motion';
@@ -225,7 +225,7 @@ export default function SearchScreen() {
         accessibilityHint="Opens the live map for this line"
       >
         <View style={[s.badge, { backgroundColor: primaryColor }]}>
-          <Text style={[s.badgeText, s.num, { color: badgeInk }]}>{item.LineID}</Text>
+          <Text style={[s.badgeText, s.num, { color: badgeInk }]} maxFontSizeMultiplier={fontScaleCap.badge}>{item.LineID}</Text>
         </View>
         <View style={s.rowMeta}>
           <Text style={s.rowTitle} numberOfLines={1}>{item.LineDescrEng}</Text>

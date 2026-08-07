@@ -15,7 +15,7 @@ import {
   Platform,
   StyleSheet,
 } from 'react-native';
-import { colors, spacing, radius, font, withAlpha } from '../theme';
+import { colors, spacing, radius, font, onAccent, withAlpha } from '../theme';
 import { STAMP_EMOJIS } from '../data/stamps';
 
 interface StampModalProps {
@@ -117,7 +117,7 @@ export default function StampModal({
               accessibilityState={{ disabled: !canSave }}
               accessibilityLabel="Save stamp"
             >
-              <Text style={ms.saveText}>Save</Text>
+              <Text style={[ms.saveText, { color: onAccent(accentColor) }]}>Save</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -204,8 +204,8 @@ const ms = StyleSheet.create({
     borderRadius: radius.sm,
     alignItems: 'center',
   },
+  /** Color comes from `onAccent(accentColor)` inline. */
   saveText: {
-    color: '#FFF',
     fontSize: font.size.sm,
     fontWeight: '700',
   },

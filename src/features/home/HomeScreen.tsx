@@ -46,7 +46,7 @@ import { Stack, useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQueryClient } from '@tanstack/react-query';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, onAccent, spacing } from '../../theme';
+import { colors, fontScaleCap, onAccent, spacing } from '../../theme';
 import * as storage from '../../services/storage';
 import {
   getFavorites,
@@ -400,7 +400,7 @@ const FavoriteCard = React.memo(function FavoriteCard({
       accessibilityHint={editing ? undefined : 'Opens the live map for this line'}
     >
       <View style={[s.lineBadge, { backgroundColor: accentColor }]}>
-        <Text style={[s.lineBadgeText, { color: onAccent(accentColor) }]}>{fav.lineId}</Text>
+        <Text style={[s.lineBadgeText, { color: onAccent(accentColor) }]} maxFontSizeMultiplier={fontScaleCap.badge}>{fav.lineId}</Text>
       </View>
       {editing && (
         <Ionicons name="close-circle" size={20} color={colors.danger} style={s.lineRemove} />

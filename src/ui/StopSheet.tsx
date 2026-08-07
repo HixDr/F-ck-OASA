@@ -24,7 +24,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, font, onAccent, radius, spacing } from '../theme';
+import { colors, font, fontScaleCap, onAccent, radius, spacing } from '../theme';
 import {
   startAlertWatch,
   stopAlertWatch,
@@ -232,7 +232,7 @@ export default function StopSheet({
         accessibilityHint="Opens the live map for this line"
       >
         <View style={[s.lineBadge, { backgroundColor: accentColor }]}>
-          <Text style={[s.lineBadgeText, { color: onAccentColor }]}>{line.lineId}</Text>
+          <Text style={[s.lineBadgeText, { color: onAccentColor }]} maxFontSizeMultiplier={fontScaleCap.badge}>{line.lineId}</Text>
         </View>
         <Text style={s.lineDescr} numberOfLines={1}>{line.lineDescrEng}</Text>
         {line.nextMin != null ? (
@@ -336,7 +336,7 @@ export default function StopSheet({
             <View style={s.arrivalRow}>
               {arrivals.map((a, i) => (
                 <View key={i} style={[s.arrivalBadge, { backgroundColor: a.color }]}>
-                  <Text style={[s.arrivalMin, { color: onAccent(a.color) }]}>{a.min} min</Text>
+                  <Text style={[s.arrivalMin, { color: onAccent(a.color) }]} maxFontSizeMultiplier={fontScaleCap.figure}>{a.min} min</Text>
                 </View>
               ))}
             </View>

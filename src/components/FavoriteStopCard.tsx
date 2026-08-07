@@ -23,7 +23,7 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, onAccent, radius } from '../theme';
+import { colors, fontScaleCap, onAccent, radius } from '../theme';
 import Pressable from '../ui/Pressable';
 import { SkeletonBox } from '../ui/Skeleton';
 import { getRoutes, getDailySchedule, isUsableSchedule } from '../services/api';
@@ -224,7 +224,7 @@ const LineRow = React.memo(function LineRow({
         accessibilityHint="Opens the live map for this line"
       >
         <View style={[s.lineBadge, { backgroundColor: primaryColor }]}>
-          <Text style={[s.lineBadgeText, { color: onAccent(primaryColor) }]}>{lineId}</Text>
+          <Text style={[s.lineBadgeText, { color: onAccent(primaryColor) }]} maxFontSizeMultiplier={fontScaleCap.badge}>{lineId}</Text>
         </View>
 
         <View style={s.lineMain}>
@@ -259,10 +259,10 @@ const LineRow = React.memo(function LineRow({
           {arrivalText == null ? (
             <Text style={s.noArrival}>—</Text>
           ) : arrivalText === 'now' ? (
-            <Text style={[s.arrivalNow, { color }]}>now</Text>
+            <Text style={[s.arrivalNow, { color }]} maxFontSizeMultiplier={fontScaleCap.figure}>now</Text>
           ) : (
             <>
-              <Text style={[s.arrivalMin, { color }]}>{arrivalText}</Text>
+              <Text style={[s.arrivalMin, { color }]} maxFontSizeMultiplier={fontScaleCap.figure}>{arrivalText}</Text>
               <Text style={s.arrivalUnit}>min</Text>
             </>
           )}

@@ -8,9 +8,10 @@
  */
 
 import React, { memo } from 'react';
-import { ActivityIndicator, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font } from '../../../theme';
+import Pressable from '../../../ui/Pressable';
 
 interface Props {
   /** Nothing usable is on the map yet — take the screen. */
@@ -57,14 +58,22 @@ const MapStatus = memo(function MapStatus({
           <Ionicons name="warning-outline" size={12} color={colors.danger} />
           <Text style={s.errorText} numberOfLines={2}>{error}</Text>
           {onRetry ? (
-            <TouchableOpacity onPress={onRetry} hitSlop={8}>
+            <Pressable
+              onPress={onRetry}
+              accessibilityRole="button"
+              accessibilityLabel="Retry loading the map data"
+            >
               <Text style={s.retryText}>Retry</Text>
-            </TouchableOpacity>
+            </Pressable>
           ) : null}
           {onDismissError ? (
-            <TouchableOpacity onPress={onDismissError} hitSlop={8}>
+            <Pressable
+              onPress={onDismissError}
+              accessibilityRole="button"
+              accessibilityLabel="Dismiss this error"
+            >
               <Ionicons name="close" size={14} color={colors.textMuted} />
-            </TouchableOpacity>
+            </Pressable>
           ) : null}
         </View>
       ) : null}

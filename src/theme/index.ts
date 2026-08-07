@@ -163,6 +163,23 @@ export const font = {
 export const HIT_SIZE = 44;
 
 /**
+ * Caps for `maxFontSizeMultiplier`, for the few places text cannot be allowed
+ * to grow without limit.
+ *
+ * The default everywhere else is deliberately no cap: system font scaling is an
+ * accessibility setting, and text that refuses to honour it is the failure
+ * mode, not the fix. These two exist because their containers are physically
+ * fixed — capping the text is the difference between "large and legible" and
+ * "clipped and unreadable", which serves the same user.
+ */
+export const fontScaleCap = {
+  /** The arrival figure. Fixed `lineHeight`, inside a fixed-height row. */
+  figure: 1.3,
+  /** Line badges. Fixed `minWidth` and padding, sized to 2-4 glyphs. */
+  badge: 1.2,
+} as const;
+
+/**
  * `#RRGGBB` → `rgba(r,g,b,alpha)`.
  * Used to tint surfaces with the user's accent color, which is a runtime hex
  * string and therefore cannot be baked into the palette above.
