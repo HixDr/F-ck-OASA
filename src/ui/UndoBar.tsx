@@ -49,11 +49,6 @@ export function showUndo(req: UndoRequest): void {
   else queued = req;
 }
 
-/** Dismiss any visible bar, committing it. */
-export function hideUndo(): void {
-  listener?.(null);
-}
-
 /**
  * Renders the bar. Mounted once, as an overlay, in the root layout.
  */

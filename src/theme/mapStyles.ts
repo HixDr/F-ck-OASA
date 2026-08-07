@@ -28,6 +28,9 @@ export const mapStyles = StyleSheet.create({
     backgroundColor: colors.overlay,
     borderWidth: 1,
     borderColor: colors.border,
+    // Lit from above like every other floating surface — an 85%-black pill on a
+    // dark basemap otherwise has no edge at all where it overlaps water or park.
+    borderTopColor: colors.edge,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -48,6 +51,7 @@ export const mapStyles = StyleSheet.create({
     backgroundColor: colors.overlay,
     borderWidth: 1,
     borderColor: colors.border,
+    borderTopColor: colors.edge,
     justifyContent: 'center',
     alignItems: 'center',
   },

@@ -60,28 +60,14 @@ export function SkeletonBox({ width = '100%', height = 12, radius: r = radius.sm
 }
 
 /**
- * Stop-card skeleton — mirrors FavoriteStopCard: a title row and three arrival
- * rows, each with a line badge, a label and the big number on the right.
+ * Search / line-list row skeleton — badge, two text lines, trailing action.
+ *
+ * There is deliberately no whole-stop-card skeleton. The saved-stop list seeds
+ * synchronously from storage's mirror, so a card's name and chrome are real on
+ * frame 1 and only its arrivals are pending — a full-card placeholder would
+ * hide information the app already has. FavoriteStopCard builds arrival-row
+ * placeholders from `SkeletonBox` instead.
  */
-export function SkeletonStopCard() {
-  return (
-    <View style={s.card} accessibilityLabel="Loading stop">
-      <View style={s.headerRow}>
-        <SkeletonBox width={14} height={14} radius={7} />
-        <SkeletonBox width="55%" height={14} />
-      </View>
-      {[0, 1, 2].map((i) => (
-        <View key={i} style={s.line}>
-          <SkeletonBox width={44} height={22} radius={radius.sm} />
-          <SkeletonBox width="42%" height={11} style={s.grow} />
-          <SkeletonBox width={40} height={28} radius={radius.sm} />
-        </View>
-      ))}
-    </View>
-  );
-}
-
-/** Search / line-list row skeleton — badge, two text lines, trailing action. */
 export function SkeletonListRow() {
   return (
     <View style={s.row}>

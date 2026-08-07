@@ -2,6 +2,8 @@
  * OASA Live — Dark purple theme constants.
  */
 
+import type { TextStyle } from 'react-native';
+
 export const colors = {
   /** Pure black background */
   bg: '#000000',
@@ -99,6 +101,9 @@ export const radius = {
   full: 9999,
 } as const;
 
+/** Backing value for `font.num`. See the comment on that property. */
+const numStyle: Pick<TextStyle, 'fontVariant'> = { fontVariant: ['tabular-nums'] };
+
 /**
  * Type scale, by role rather than t-shirt size.
  *
@@ -144,8 +149,14 @@ export const font = {
    * applied in five places and missing from both map stop cards — precisely the
    * two that count down. Spreading a shared object is harder to forget than
    * remembering a property.
+   *
+   * Annotated rather than inferred, and deliberately NOT `as const`: RN types
+   * `fontVariant` as a mutable `FontVariant[]`, so a readonly tuple makes
+   * `style={[s.foo, font.num]}` fail to compile — the exact usage this exists
+   * to encourage. The annotation also survives the outer `as const` below,
+   * which would otherwise deep-freeze it right back.
    */
-  num: { fontVariant: ['tabular-nums'] as const },
+  num: numStyle,
 } as const;
 
 /** Minimum touch target. Below this, taps land on the neighbour. */

@@ -1,8 +1,9 @@
 /**
  * Trip Planner Screen — "Get Me There"
  *
- * Full-screen with Google Map (top ~55%) + results panel (bottom).
- * User drops origin (green, draggable) + destination (red, long-press) pins.
+ * A full-bleed Google Map with a draggable results sheet floating over it.
+ * User drops origin (green, draggable) + destination (red) pins, either with
+ * the "Drop pin" control or with a long press on the map.
  * Finds direct and 1-transfer bus routes, ranked by when you actually arrive.
  * Requires offline data to be downloaded.
  *
@@ -15,17 +16,20 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   View,
   Text,
-  TouchableOpacity,
   ActivityIndicator,
   ScrollView,
-  Dimensions,
+  useWindowDimensions,
 } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, spacing } from '../../theme';
+import { colors, onAccent, spacing } from '../../theme';
 import { GOOGLE_DARK_STYLE } from '../../theme/googleMapStyle';
 import { mapStyles as ms } from '../../theme/mapStyles';
+import Pressable from '../../ui/Pressable';
+import BottomSheet, { type BottomSheetHandle } from '../../ui/BottomSheet';
+import { SkeletonTripCard } from '../../ui/Skeleton';
 import { useSettings } from '../settings/SettingsProvider';
 import { useLinesMap } from '../../hooks/useLinesMap';
 import { useInitialRegion } from '../../hooks/useInitialRegion';
@@ -45,11 +49,25 @@ import {
   type NoneReason,
 } from './planner';
 import { LONG_WAIT_WARN_MIN } from './constants';
-import { s } from './PlannerScreen.styles';
+import TripCardShell from './components/TripCardShell';
+import { num, s } from './PlannerScreen.styles';
 import type { MapStamp, OasaStop } from '../../types';
 
-const { height: SCREEN_H } = Dimensions.get('window');
-const MAP_HEIGHT = SCREEN_H * 0.55;
+/**
+ * Sheet heights as fractions of the space below the status bar.
+ *
+ * Peek shows one card and the phase row; results is the resting size the old
+ * fixed panel had; full is for reading a long list without the map stealing
+ * two thirds of the screen.
+ */
+const SNAP_POINTS = [0.28, 0.55, 0.85];
+/** Index into SNAP_POINTS. */
+const PEEK_SNAP = 0;
+const RESULTS_SNAP = 1;
+
+/** How many placeholders stand in for the answer while the search runs. Three
+ *  is what a typical plan returns, so the panel barely moves when they land. */
+const SKELETON_COUNT = 3;
 
 /** Native marker views are expensive on Android — each one is a snapshotted
  *  bitmap. A 3-leg trip with 40-stop legs used to emit ~120 of them and freeze
@@ -110,6 +128,8 @@ interface HighlightPin {
   color: string;
   type: 'board' | 'alight' | 'stop';
 }
+/** Which pin the next map tap will place, or null when tapping does nothing. */
+type Placing = 'origin' | 'destination' | null;
 
 /* ── Marker with layout-driven bitmap capture ────────────────── */
 
@@ -209,12 +229,19 @@ export default function PlannerScreen() {
   const metroData = METRO_POLYLINES;
   const stamps = useMemo<MapStamp[]>(() => getStamps(), []);
 
+  /* Read through the hook, not `Dimensions.get` at module scope: a module-level
+     read is captured once on first import and is then wrong for the rest of the
+     process after a rotation, a fold, or entering split screen. */
+  const { height: winH } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+
   // Pin state
   const [origin, setOrigin] = useState<{ lat: number; lng: number } | null>(() => {
     const loc = getLocation();
     return loc ? { lat: loc.lat, lng: loc.lng } : null;
   });
   const [destination, setDestination] = useState<{ lat: number; lng: number } | null>(null);
+  const [placing, setPlacing] = useState<Placing>(null);
 
   // Results
   const [phase, setPhase] = useState<PlannerPhase | null>(null);
@@ -237,8 +264,23 @@ export default function PlannerScreen() {
   const planAbort = useRef<AbortController | null>(null);
   const highlightAbort = useRef<AbortController | null>(null);
   const mapRef = useRef<MapView>(null);
+  const sheetRef = useRef<BottomSheetHandle>(null);
 
   const loading = phase !== null;
+
+  /* The strip of map the sheet never covers. Mirrors BottomSheet's own height
+     maths so `animateToRegion` centres on somewhere the user can actually see
+     rather than under the panel. Recomputed on every window change, which is
+     the point of the hook above. */
+  const mapPadding = useMemo(
+    () => ({
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: Math.round(SNAP_POINTS[PEEK_SNAP] * Math.max(1, winH - insets.top)),
+    }),
+    [winH, insets.top],
+  );
 
   // Set origin to GPS on first fix
   useEffect(() => {
@@ -286,7 +328,7 @@ export default function PlannerScreen() {
     // computations fighting for the JS thread after three pin drags.
     planAbort.current?.abort();
 
-    // Show the spinner (and a way out) during the debounce, not only once the
+    // Show the skeletons (and a way out) during the debounce, not only once the
     // work starts.
     setPhase('preparing');
     setCancelled(false);
@@ -348,6 +390,12 @@ export default function PlannerScreen() {
 
   /* ── Pin handlers ───────────────────────────────────────────── */
 
+  /** Every path that sets the destination ends here, so the answer is never
+   *  left behind a sheet the user pushed out of the way. */
+  const revealResults = useCallback(() => {
+    sheetRef.current?.snapTo(RESULTS_SNAP);
+  }, []);
+
   const onMapLongPress = useCallback(
     (e: { nativeEvent: { coordinate: { latitude: number; longitude: number } } }) => {
       const { latitude, longitude } = e.nativeEvent.coordinate;
@@ -357,8 +405,56 @@ export default function PlannerScreen() {
         if (prev) setDestination({ lat: latitude, lng: longitude });
         return prev ?? { lat: latitude, lng: longitude };
       });
+      // A long press satisfies an in-progress button placement too — the user
+      // used the gesture they already knew.
+      setPlacing(null);
+      revealResults();
     },
-    [],
+    [revealResults],
+  );
+
+  /**
+   * Placement mode: the discoverable half of the same job the long press does.
+   *
+   * The long press is kept because people who know it will keep using it, but
+   * an invisible gesture cannot be the only way to state where you are going —
+   * the screen used to need a line of instruction text to admit as much.
+   */
+  const startPlacing = useCallback(() => {
+    // No origin yet means the pin the user actually needs first is the start
+    // one, matching the order the long-press path uses.
+    setPlacing(origin ? 'destination' : 'origin');
+    // Nothing can be tapped through the panel, so get it out of the way.
+    sheetRef.current?.snapTo(PEEK_SNAP);
+  }, [origin]);
+
+  const cancelPlacing = useCallback(() => {
+    setPlacing(null);
+    revealResults();
+  }, [revealResults]);
+
+  const onMapPress = useCallback(
+    (e: { nativeEvent: { coordinate: { latitude: number; longitude: number } } }) => {
+      if (!placing) return;
+      const { latitude, longitude } = e.nativeEvent.coordinate;
+      if (placing === 'origin') {
+        setOrigin({ lat: latitude, lng: longitude });
+        // Chain into the destination when there isn't one: the user asked to
+        // place pins, and stopping after the start pin strands them on a map
+        // with nothing to plan.
+        if (destination) {
+          setPlacing(null);
+          revealResults();
+        } else {
+          setPlacing('destination');
+        }
+        return;
+      }
+      setDestination({ lat: latitude, lng: longitude });
+      setPlacing(null);
+      revealResults();
+    },
+    [placing, destination, revealResults],
   );
 
   const onOriginDragEnd = useCallback(
@@ -374,6 +470,16 @@ export default function PlannerScreen() {
     },
     [],
   );
+
+  const recenter = useCallback(() => {
+    const loc = getLocation();
+    if (loc && mapRef.current) {
+      mapRef.current.animateToRegion({
+        latitude: loc.lat, longitude: loc.lng,
+        latitudeDelta: 0.015, longitudeDelta: 0.015,
+      }, 500);
+    }
+  }, []);
 
   /* ── Route highlight on card tap ────────────────────────────── */
 
@@ -533,18 +639,34 @@ export default function PlannerScreen() {
         <Text style={s.offlineSubtitle}>
           Go to Settings and download offline data first. The planner needs stop and schedule data to work.
         </Text>
-        <TouchableOpacity
+        <Pressable
           style={[s.offlineBtn, { borderColor: primaryColor }]}
-          activeOpacity={0.7}
           onPress={() => router.back()}
         >
           <Text style={[s.offlineBtnText, { color: primaryColor }]}>Go Back</Text>
-        </TouchableOpacity>
+        </Pressable>
       </View>
     );
   }
 
   /* ── Panel body ─────────────────────────────────────────────── */
+
+  /** The panel's own "drop a pin" button, for the moment the user is looking
+   *  at the instruction rather than at the map. */
+  function renderDropPinButton(label: string) {
+    const fg = onAccent(primaryColor);
+    return (
+      <Pressable
+        style={[s.primaryBtn, { backgroundColor: primaryColor }]}
+        onPress={startPlacing}
+        accessibilityRole="button"
+        accessibilityLabel={label}
+      >
+        <Ionicons name="location" size={16} color={fg} />
+        <Text style={[s.primaryBtnText, { color: fg }]}>{label}</Text>
+      </Pressable>
+    );
+  }
 
   function renderPanel() {
     if (!origin) {
@@ -553,6 +675,7 @@ export default function PlannerScreen() {
         <View style={s.instructionWrap}>
           <Ionicons name="locate-outline" size={24} color={colors.textMuted} />
           <Text style={s.emptyTitle}>Waiting for your location</Text>
+          {renderDropPinButton('Drop start pin')}
           <Text style={s.instructionText}>
             No GPS fix yet. Long press anywhere on the map to set your starting point manually.
           </Text>
@@ -563,22 +686,31 @@ export default function PlannerScreen() {
     if (!destination) {
       return (
         <View style={s.instructionWrap}>
-          <Ionicons name="hand-left-outline" size={24} color={colors.textMuted} />
-          <Text style={s.instructionText}>Long press on the map to drop your destination pin</Text>
+          <Ionicons name="flag-outline" size={24} color={colors.textMuted} />
+          <Text style={s.emptyTitle}>Where are you going?</Text>
+          {renderDropPinButton('Drop destination pin')}
+          {/* The gesture still works; it is just no longer the only way in. */}
+          <Text style={s.instructionText}>
+            Or long press on the map to drop your destination pin
+          </Text>
         </View>
       );
     }
 
-    // Loading with no partial results yet — show the phase and a way out.
+    // Loading with no results yet. Skeletons shaped like the answer, so the
+    // panel settles instead of jumping when the real cards land — but the
+    // phase label stays, because "which stage" is what separates "working"
+    // from "stuck".
     if (loading && !results) {
       return (
-        <View style={s.loadingWrap}>
-          <ActivityIndicator size="small" color={primaryColor} />
-          <Text style={s.loadingText}>{PHASE_LABEL[phase ?? 'preparing']}</Text>
-          <TouchableOpacity style={s.cancelBtn} activeOpacity={0.7} onPress={cancelPlan}>
-            <Text style={s.cancelBtnText}>Cancel</Text>
-          </TouchableOpacity>
-        </View>
+        <ScrollView
+          style={s.resultScroll}
+          contentContainerStyle={s.resultScrollContent}
+          showsVerticalScrollIndicator={false}
+        >
+          {renderPhaseRow('preparing')}
+          {Array.from({ length: SKELETON_COUNT }, (_, i) => <SkeletonTripCard key={i} />)}
+        </ScrollView>
       );
     }
 
@@ -586,7 +718,7 @@ export default function PlannerScreen() {
       return (
         <View style={s.instructionWrap}>
           <Ionicons name="walk-outline" size={24} color={WALK_COLOR} />
-          <Text style={s.instructionText}>
+          <Text style={[s.instructionText, num]}>
             Walk there directly — {tooClose.walkMin} min walk ({Math.round(tooClose.distM)}m)
           </Text>
         </View>
@@ -618,13 +750,12 @@ export default function PlannerScreen() {
         <View style={s.instructionWrap}>
           <Ionicons name="close-circle-outline" size={24} color={colors.textMuted} />
           <Text style={s.instructionText}>Search cancelled.</Text>
-          <TouchableOpacity
+          <Pressable
             style={[s.offlineBtn, { borderColor: primaryColor, marginTop: spacing.sm }]}
-            activeOpacity={0.7}
             onPress={() => setRetryTick((n) => n + 1)}
           >
             <Text style={[s.offlineBtnText, { color: primaryColor }]}>Try again</Text>
-          </TouchableOpacity>
+          </Pressable>
         </View>
       );
     }
@@ -632,39 +763,51 @@ export default function PlannerScreen() {
     if (!results) return null;
 
     return (
-      <ScrollView style={s.resultScroll} showsVerticalScrollIndicator={false}>
-        {loading && (
-          <View style={s.cardSpinnerRow}>
-            <ActivityIndicator size="small" color={primaryColor} />
-            <Text style={s.loadingHint}>{PHASE_LABEL[phase ?? 'live']}</Text>
-            <TouchableOpacity hitSlop={8} onPress={cancelPlan}>
-              <Text style={s.cancelBtnText}>  Cancel</Text>
-            </TouchableOpacity>
-          </View>
-        )}
-        {results.map((trip) => renderCard(trip))}
+      <ScrollView
+        style={s.resultScroll}
+        contentContainerStyle={s.resultScrollContent}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Partial results are on screen and the live tier is still landing. */}
+        {loading && renderPhaseRow('live')}
+        {results.map((trip, i) => renderCard(trip, i))}
       </ScrollView>
     );
   }
 
-  function renderCard(trip: TripOption) {
+  /** Which stage the search is in, plus the way out of it. */
+  function renderPhaseRow(fallback: PlannerPhase) {
+    return (
+      <View style={s.phaseRow}>
+        <ActivityIndicator size="small" color={primaryColor} />
+        {/* Takes the slack so Cancel stays pinned right however long the
+            phase label runs. */}
+        <Text style={[s.loadingText, s.grow]} numberOfLines={1}>
+          {PHASE_LABEL[phase ?? fallback]}
+        </Text>
+        <Pressable style={s.cancelInline} onPress={cancelPlan}>
+          <Text style={s.cancelBtnText}>Cancel</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  function renderCard(trip: TripOption, index: number) {
     const selected = selectedId === trip.id;
     const conf = CONF_STYLE[trip.confidence];
+    const tagColor = trip._tag === 'Soonest' ? '#22C55E' : '#3B82F6';
 
     return (
-      <TouchableOpacity
+      <TripCardShell
         key={trip.id}
+        index={index}
         style={[s.resultCard, selected && { borderColor: primaryColor }]}
-        activeOpacity={0.7}
         onPress={() => onResultTap(trip)}
       >
         <View style={s.cardHeader}>
           {trip._tag ? (
-            <View style={[
-              s.tagBadge,
-              { backgroundColor: trip._tag === 'Soonest' ? '#22C55E' : '#3B82F6', marginBottom: 0 },
-            ]}>
-              <Text style={s.tagBadgeText}>{trip._tag}</Text>
+            <View style={[s.tagBadge, { backgroundColor: tagColor, marginBottom: 0 }]}>
+              <Text style={[s.tagBadgeText, { color: onAccent(tagColor) }]}>{trip._tag}</Text>
             </View>
           ) : <View />}
           <View style={[s.confChip, { borderColor: conf.color }]}>
@@ -675,7 +818,7 @@ export default function PlannerScreen() {
         {trip.walkToOriginMin > 0 && (
           <View style={s.legRow}>
             <Ionicons name="walk-outline" size={14} color={WALK_COLOR} />
-            <Text style={s.legWalkText}>{trip.walkToOriginMin} min walk to the stop</Text>
+            <Text style={[s.legWalkText, num]}>{trip.walkToOriginMin} min walk to the stop</Text>
           </View>
         )}
 
@@ -686,30 +829,36 @@ export default function PlannerScreen() {
                 <Ionicons name="swap-horizontal-outline" size={14} color={colors.textMuted} />
                 {/* Per-leg walk. This row used to print the SUM of every
                     transfer on the trip, on every transfer row. */}
-                <Text style={s.legTransferText}>Transfer — {leg.transferWalkMin} min walk</Text>
+                <Text style={[s.legTransferText, num]}>
+                  Transfer — {leg.transferWalkMin} min walk
+                </Text>
               </View>
             )}
 
             <View style={s.legRow}>
               <Ionicons name="bus" size={14} color={primaryColor} />
               <View style={[s.lineBadge, { backgroundColor: primaryColor }]}>
-                <Text style={s.lineBadgeText}>{leg.lineId}</Text>
+                {/* The accent is user-picked across the whole hue circle, so
+                    white is not a safe assumption on top of it. */}
+                <Text style={[s.lineBadgeText, num, { color: onAccent(primaryColor) }]}>
+                  {leg.lineId}
+                </Text>
               </View>
               {renderWait(leg)}
             </View>
 
             <View style={s.legDetailRow}>
-              <Text style={s.legDetailText}>
+              <Text style={[s.legDetailText, num]}>
                 Board: {leg.boardStop.name}{stopTimeLabel(leg, 'board')}
               </Text>
             </View>
             <View style={s.legDetailRow}>
-              <Text style={s.legDetailText}>
+              <Text style={[s.legDetailText, num]}>
                 Get off: {leg.alightStop.name}{stopTimeLabel(leg, 'alight')}
               </Text>
             </View>
             <View style={s.legDetailRow}>
-              <Text style={s.legDetailMuted}>{rideLabel(leg)}</Text>
+              <Text style={[s.legDetailMuted, num]}>{rideLabel(leg)}</Text>
             </View>
           </View>
         ))}
@@ -717,18 +866,20 @@ export default function PlannerScreen() {
         {trip.walkFromDestMin > 0 && (
           <View style={s.legRow}>
             <Ionicons name="walk-outline" size={14} color={WALK_COLOR} />
-            <Text style={s.legWalkText}>{trip.walkFromDestMin} min walk to your destination</Text>
+            <Text style={[s.legWalkText, num]}>
+              {trip.walkFromDestMin} min walk to your destination
+            </Text>
           </View>
         )}
 
         <View style={s.totalRow}>
           <View>
-            <Text style={s.totalText}>Total {totalLabel(trip)}</Text>
-            <Text style={s.etaText}>{arriveLabel(trip)}</Text>
+            <Text style={[s.totalText, num]}>Total {totalLabel(trip)}</Text>
+            <Text style={[s.etaText, num]}>{arriveLabel(trip)}</Text>
           </View>
-          <TouchableOpacity style={s.navBtn} hitSlop={8} onPress={() => onResultNavigate(trip)}>
+          <Pressable style={s.navBtn} onPress={() => onResultNavigate(trip)}>
             <Ionicons name="arrow-forward-circle" size={24} color={primaryColor} />
-          </TouchableOpacity>
+          </Pressable>
         </View>
 
         {selected && highlightLoading && (
@@ -740,15 +891,18 @@ export default function PlannerScreen() {
         {selected && highlightError && (
           <Text style={s.cardErrorText}>{highlightError}</Text>
         )}
-      </TouchableOpacity>
+      </TripCardShell>
     );
   }
 
   function renderWait(leg: TripLeg) {
     if (leg.waitSource === 'live' && leg.waitTimeMin !== null) {
+      const bg = getArrivalColor(leg.waitTimeMin);
       return (
-        <View style={[s.waitBadge, { backgroundColor: getArrivalColor(leg.waitTimeMin) }]}>
-          <Text style={s.waitBadgeText}>● {leg.waitTimeMin} min</Text>
+        <View style={[s.waitBadge, { backgroundColor: bg }]}>
+          <Text style={[s.waitBadgeText, num, { color: onAccent(bg) }]}>
+            ● {leg.waitTimeMin} min
+          </Text>
         </View>
       );
     }
@@ -757,11 +911,13 @@ export default function PlannerScreen() {
       return (
         <>
           <View style={[s.waitBadge, { backgroundColor: colors.border }]}>
-            <Text style={[s.waitBadgeText, { color: colors.textMuted }]}>○ {leg.scheduledTime}</Text>
+            <Text style={[s.waitBadgeText, num, { color: colors.textMuted }]}>
+              ○ {leg.scheduledTime}
+            </Text>
           </View>
           {/* A long wait is surfaced, not used to delete the trip — Athens
               off-peak headways are routinely 20-40 minutes. */}
-          {long && <Text style={s.waitWarnText}>{leg.waitTimeMin} min wait</Text>}
+          {long && <Text style={[s.waitWarnText, num]}>{leg.waitTimeMin} min wait</Text>}
         </>
       );
     }
@@ -770,6 +926,8 @@ export default function PlannerScreen() {
   }
 
   /* ── Main Render ────────────────────────────────────────────── */
+
+  const placingLabel = placing === 'origin' ? 'start' : 'destination';
 
   return (
     <View style={ms.container}>
@@ -781,17 +939,19 @@ export default function PlannerScreen() {
         }}
       />
 
-      <View style={{ height: MAP_HEIGHT }}>
+      <View style={s.mapFill}>
         <MapView
           ref={mapRef}
           provider={PROVIDER_GOOGLE}
           style={ms.map}
           initialRegion={initialRegion}
           customMapStyle={GOOGLE_DARK_STYLE}
+          mapPadding={mapPadding}
           showsUserLocation={false}
           showsMyLocationButton={false}
           showsCompass={false}
           toolbarEnabled={false}
+          onPress={onMapPress}
           onLongPress={onMapLongPress}
           moveOnMarkerPress={false}
         >
@@ -849,28 +1009,61 @@ export default function PlannerScreen() {
           ))}
         </MapView>
 
-        <View style={[ms.bottomControls, { bottom: spacing.md, right: spacing.md }]}>
-          <TouchableOpacity
-            style={ms.locationBtn}
-            onPress={() => {
-              const loc = getLocation();
-              if (loc && mapRef.current) {
-                mapRef.current.animateToRegion({
-                  latitude: loc.lat, longitude: loc.lng,
-                  latitudeDelta: 0.015, longitudeDelta: 0.015,
-                }, 500);
-              }
-            }}
-          >
-            <View style={ms.locationIcon}><View style={ms.locationDot} /></View>
-          </TouchableOpacity>
+        {/* Map furniture lives at the top: the sheet owns the bottom of the
+            screen at every snap point, and a control that spends most of its
+            life behind the panel is not a control. */}
+        <View style={s.mapOverlay} pointerEvents="box-none">
+          {placing && (
+            <View style={[s.placingBanner, { borderColor: primaryColor }]} pointerEvents="none">
+              <Ionicons name="location" size={16} color={primaryColor} />
+              <Text style={s.placingText}>Tap the map to place your {placingLabel} pin</Text>
+            </View>
+          )}
+
+          <View style={s.mapControls} pointerEvents="box-none">
+            {/* Filled while placement is armed: the pill is the only thing on
+                screen saying the next tap will move a pin, so it has to read
+                as on rather than as merely highlighted. */}
+            <Pressable
+              style={[
+                s.mapPill,
+                placing != null && { backgroundColor: primaryColor, borderColor: primaryColor },
+              ]}
+              onPress={placing ? cancelPlacing : startPlacing}
+              accessibilityRole="button"
+              accessibilityLabel={placing ? 'Cancel pin placement' : 'Drop a pin on the map'}
+            >
+              <Ionicons
+                name={placing ? 'close' : 'location-outline'}
+                size={16}
+                color={placing ? onAccent(primaryColor) : colors.text}
+              />
+              <Text style={[s.mapPillText, placing != null && { color: onAccent(primaryColor) }]}>
+                {placing ? 'Cancel' : 'Drop pin'}
+              </Text>
+            </Pressable>
+
+            <Pressable
+              style={s.mapRoundBtn}
+              onPress={recenter}
+              accessibilityRole="button"
+              accessibilityLabel="Centre the map on my location"
+            >
+              <View style={ms.locationIcon}><View style={ms.locationDot} /></View>
+            </Pressable>
+          </View>
         </View>
       </View>
 
-      <View style={s.panel}>
-        <View style={s.panelHandle} />
-        {renderPanel()}
-      </View>
+      {/* The grabber the old fixed panel drew but could not honour. */}
+      <BottomSheet
+        ref={sheetRef}
+        snapPoints={SNAP_POINTS}
+        initialSnap={RESULTS_SNAP}
+        style={s.sheet}
+      >
+        <View style={s.sheetBody}>{renderPanel()}</View>
+      </BottomSheet>
     </View>
   );
 }

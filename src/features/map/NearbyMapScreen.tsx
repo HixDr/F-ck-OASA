@@ -1,21 +1,13 @@
 /**
  * Nearby Stops Map — shows bus stops near the user's location on a dark-themed Google Map.
- * Tapping a stop reveals all bus lines serving it, each pressable
- * to open that line's full route map with live tracking.
+ * Tapping a stop opens the shared `StopSheet`: every line serving it, each
+ * pressable to open that line's full route map with live tracking.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  View,
-  Text,
-  ActivityIndicator,
-  TouchableOpacity,
-  ScrollView,
-  Alert,
-} from 'react-native';
+import { View, Alert } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import MapView, { Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
-import { Ionicons } from '@expo/vector-icons';
 import { colors } from '../../theme';
 import { useArrivals, useClosestStops, useRoutesForStop } from '../../hooks';
 import { useLinesMap } from '../../hooks/useLinesMap';
@@ -34,11 +26,12 @@ import { haversineM } from '../../utils/geo';
 import { useSettings } from '../settings/SettingsProvider';
 import StampModal from '../../components/StampModal';
 import UserLocationMarker from '../../components/UserLocationMarker';
+import MapControls, { type MapToggle } from '../../ui/MapControls';
+import StopSheet, { useStopSheetInset, type StopSheetLine } from '../../ui/StopSheet';
 import MapStatus from './components/MapStatus';
 import StampLayer from './components/StampLayer';
 import { NearbyStopMarker } from './components/StopMarkers';
 import { useScreenFocused, useWalkingRoute } from './components/mapHooks';
-import { s } from './NearbyMapScreen.styles';
 import type { MapStamp } from '../../types';
 
 /* ── Helpers ─────────────────────────────────────────────────── */
@@ -197,6 +190,27 @@ export default function NearbyMapScreen() {
     return buildLineGroups(stopRoutes, arrivals ?? [], linesMap).lines;
   }, [stopRoutes, arrivals, linesMap]);
 
+  /**
+   * Every route calling here. Unlike Live, this screen is not scoped to a line,
+   * so an alert armed from it watches the whole stop.
+   */
+  const stopRouteCodes = useMemo(
+    () => (stopRoutes ?? []).map((r) => r.RouteCode),
+    [stopRoutes],
+  );
+  const alertTarget = useMemo(
+    () => ({ lineId: 'Any bus', routeCodes: stopRouteCodes }),
+    [stopRouteCodes],
+  );
+
+  const openLine = useCallback((line: StopSheetLine) => {
+    const info = linesMap.get(line.lineCode);
+    router.push({ pathname: '/map/[lineCode]', params: {
+      lineCode: line.lineCode, lineId: line.lineId,
+      lineDescr: info?.LineDescrEng ?? info?.LineDescr ?? line.lineDescrEng,
+    }});
+  }, [linesMap, router]);
+
   const walkTarget = useMemo(
     () => (selectedStop ? { lat: selectedStop.lat, lng: selectedStop.lng, key: selectedStop.code } : null),
     [selectedStop],
@@ -256,6 +270,25 @@ export default function NearbyMapScreen() {
     headerTitle: 'Nearby Stops',
     headerTitleStyle: { color: colors.text, fontWeight: '700' as const },
   }), []);
+
+  const toggles = useMemo<MapToggle[]>(() => [
+    {
+      key: 'metro',
+      icon: 'train-outline',
+      label: 'Metro lines',
+      active: showMetro,
+      onPress: () => { const n = !showMetro; setShowMetro(n); setToggle('metro', n); },
+    },
+    {
+      key: 'stamps',
+      icon: 'pin-outline',
+      label: 'Map stamps',
+      active: showStamps,
+      onPress: () => { const n = !showStamps; setShowStamps(n); setToggle('stamps', n); },
+    },
+  ], [showMetro, showStamps]);
+
+  const sheetInset = useStopSheetInset(selectedStop != null);
 
   // Only the very first load may take the screen. Dimming the whole map on
   // every background refetch made it strobe while walking.
@@ -318,84 +351,27 @@ export default function NearbyMapScreen() {
         )}
       </MapView>
 
-      {/* Stop card */}
+      <MapControls
+        toggles={toggles}
+        accentColor={primaryColor}
+        onRecenter={recenter}
+        bottomOffset={sheetInset}
+      />
+
       {selectedStop && (
-        <View style={s.arrivalCard}>
-          <View style={ms.arrivalHeader}>
-            <Text style={ms.arrivalName} numberOfLines={1}>{selectedStop.name}</Text>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-              <TouchableOpacity onPress={toggleStopSaved} hitSlop={10}>
-                <Ionicons
-                  name={stopSaved ? 'bookmark' : 'bookmark-outline'}
-                  size={16}
-                  color={stopSaved ? primaryColor : colors.textMuted}
-                />
-              </TouchableOpacity>
-              <TouchableOpacity onPress={closeStop} hitSlop={10}>
-                <Ionicons name="close" size={18} color={colors.textMuted} />
-              </TouchableOpacity>
-            </View>
-          </View>
-          {walk.walkMin !== null && (
-            <View style={ms.walkRow}>
-              <Ionicons name="walk" size={14} color="#4285F4" />
-              <Text style={ms.walkText}>{walk.walkMin} min walk</Text>
-            </View>
-          )}
-          {loadingRoutes ? (
-            <ActivityIndicator size="small" color={colors.primaryLight} style={{ marginTop: 6 }} />
-          ) : lines && lines.length > 0 ? (
-            <ScrollView style={s.lineScroll} showsVerticalScrollIndicator={false} nestedScrollEnabled>
-              {lines.map((line) => (
-                <TouchableOpacity key={line.lineCode} style={s.lineRow} activeOpacity={0.7}
-                  onPress={() => {
-                    const info = linesMap.get(line.lineCode);
-                    router.push({ pathname: '/map/[lineCode]', params: {
-                      lineCode: line.lineCode, lineId: line.lineId,
-                      lineDescr: info?.LineDescrEng ?? info?.LineDescr ?? line.lineDescrEng,
-                    }});
-                  }}>
-                  <View style={[s.lineBadge, { backgroundColor: primaryColor }]}>
-                    <Text style={s.lineBadgeText}>{line.lineId}</Text>
-                  </View>
-                  <Text style={s.lineDescr}>{line.lineDescrEng}</Text>
-                  {line.nextMin != null ? (
-                    <View style={[s.lineArrivalBadge, { backgroundColor: line.color }]}>
-                      <Text style={s.lineArrivalMin}>{line.nextMin}'</Text>
-                    </View>
-                  ) : (
-                    <Text style={s.lineNoArrivals}>—</Text>
-                  )}
-                  <Ionicons name="chevron-forward" size={14} color={colors.textMuted} style={{ marginLeft: 4 }} />
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          ) : (
-            <Text style={ms.arrivalEmpty}>No lines found</Text>
-          )}
-        </View>
+        <StopSheet
+          stop={selectedStop}
+          accentColor={primaryColor}
+          onClose={closeStop}
+          walkMin={walk.walkMin}
+          saved={stopSaved}
+          onToggleSaved={toggleStopSaved}
+          lines={lines}
+          linesLoading={loadingRoutes}
+          onPressLine={openLine}
+          alert={alertTarget}
+        />
       )}
-
-      {/* Top right controls */}
-      <View style={ms.topControls}>
-        <TouchableOpacity
-          style={[ms.toggleBtn, showMetro && ms.toggleBtnActive, showMetro && { borderColor: primaryColor }]}
-          onPress={() => { const n = !showMetro; setShowMetro(n); setToggle('metro', n); }}>
-          <Ionicons name="train-outline" size={18} color={showMetro ? primaryColor : colors.textMuted} />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[ms.toggleBtn, showStamps && ms.toggleBtnActive, showStamps && { borderColor: primaryColor }]}
-          onPress={() => { const n = !showStamps; setShowStamps(n); setToggle('stamps', n); }}>
-          <Ionicons name="pin-outline" size={18} color={showStamps ? primaryColor : colors.textMuted} />
-        </TouchableOpacity>
-      </View>
-
-      {/* Bottom right controls */}
-      <View style={ms.bottomControls}>
-        <TouchableOpacity style={ms.locationBtn} onPress={recenter}>
-          <View style={ms.locationIcon}><View style={ms.locationDot} /></View>
-        </TouchableOpacity>
-      </View>
 
       <MapStatus
         blocking={firstLoad}

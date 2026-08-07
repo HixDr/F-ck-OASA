@@ -11,6 +11,9 @@ export const s = StyleSheet.create({
     marginBottom: spacing.sm,
     borderWidth: 1,
     borderColor: colors.border,
+    // Lit from above: bg → surface → card is a 4% fill delta that collapses
+    // into one flat plane on OLED in daylight.
+    borderTopColor: colors.edge,
   },
   header: {
     flexDirection: 'row',
@@ -21,15 +24,17 @@ export const s = StyleSheet.create({
   stopName: {
     flex: 1,
     color: colors.text,
-    fontSize: font.size.md,
+    fontSize: font.size.body,
     fontWeight: '600',
   },
-  /** Header icon buttons (filter, remove, reorder). Full-size targets so they
-   *  need no hitSlop — overlapping hitSlop is what made the bell and the
-   *  timetable button steal each other's taps. */
+  /** Header icon buttons (filter, remove, reorder). 40 rather than 36: the
+   *  shared Pressable tops every target up to HIT_SIZE with hitSlop, and at 36
+   *  in a 4pt-gap row that slop would overlap the neighbour — which is exactly
+   *  what once made the bell and the timetable button steal each other's taps.
+   *  At 40 the slop is 2 a side and lands precisely in the gap. */
   headerBtn: {
-    width: 36,
-    height: 36,
+    width: 40,
+    height: 40,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -55,6 +60,20 @@ export const s = StyleSheet.create({
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: colors.border,
   },
+  /** Cold-start placeholder. Same metrics as `lineRow` so the real rows land
+   *  where the grey ones were rather than shoving the card taller. */
+  skeletonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    minHeight: 62,
+    paddingVertical: spacing.xs,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: colors.border,
+  },
+  skeletonGrow: {
+    flex: 1,
+  },
   lineBadge: {
     borderRadius: radius.sm,
     paddingHorizontal: spacing.sm,
@@ -63,23 +82,27 @@ export const s = StyleSheet.create({
     minWidth: 46,
     alignItems: 'center',
   },
+  /** Color comes from `onAccent(primaryColor)` inline: hardcoded white lands
+   *  near 2:1 on the yellow and green accents the picker offers, on the one
+   *  label that identifies the bus. */
   lineBadgeText: {
-    color: '#FFFFFF',
-    fontSize: font.size.sm,
+    ...font.num,
+    color: colors.text,
+    fontSize: font.size.label,
     fontWeight: '800',
   },
   lineMain: {
     flex: 1,
     marginRight: spacing.sm,
-    gap: 2,
+    gap: spacing.xxs,
   },
   lineDescr: {
     color: colors.text,
-    fontSize: font.size.sm,
+    fontSize: font.size.label,
   },
   lineDescrMuted: {
     color: colors.textMuted,
-    fontSize: font.size.xs,
+    fontSize: font.size.micro,
   },
   /** Timetable affordance. Lives under the description, far from the bell. */
   schedPill: {
@@ -95,10 +118,10 @@ export const s = StyleSheet.create({
     backgroundColor: colors.surface,
   },
   schedPillText: {
+    ...font.num,
     color: colors.textMuted,
-    fontSize: font.size.xs,
+    fontSize: font.size.micro,
     fontWeight: '600',
-    fontVariant: ['tabular-nums'],
   },
 
   /* ── The number the app exists to show ─────────────────────── */
@@ -108,10 +131,10 @@ export const s = StyleSheet.create({
     justifyContent: 'center',
   },
   arrivalMin: {
-    fontSize: font.size.xxxl,
-    lineHeight: font.size.xxxl + 2,
+    ...font.num,
+    fontSize: font.size.figure,
+    lineHeight: font.size.figure + 2,
     fontWeight: '800',
-    fontVariant: ['tabular-nums'],
   },
   arrivalUnit: {
     color: colors.textMuted,
@@ -161,12 +184,13 @@ export const s = StyleSheet.create({
     borderRadius: 3,
   },
   footerText: {
+    ...font.num,
     color: colors.textMuted,
-    fontSize: font.size.xs - 1,
+    fontSize: font.size.micro - 1,
   },
   emptyText: {
     color: colors.textMuted,
-    fontSize: font.size.sm,
+    fontSize: font.size.label,
     textAlign: 'center',
     marginVertical: spacing.sm,
     opacity: 0.7,
@@ -178,7 +202,7 @@ export const s = StyleSheet.create({
   },
   errorText: {
     color: colors.textMuted,
-    fontSize: font.size.sm,
+    fontSize: font.size.label,
     textAlign: 'center',
   },
   retryBtn: {
@@ -191,7 +215,7 @@ export const s = StyleSheet.create({
     borderWidth: 1,
   },
   retryText: {
-    fontSize: font.size.sm,
+    fontSize: font.size.label,
     fontWeight: '700',
   },
   /** Reachable "stop the alert" row for a line the filter has hidden. */
@@ -206,9 +230,10 @@ export const s = StyleSheet.create({
     backgroundColor: 'rgba(245,158,11,0.14)',
   },
   alertBannerText: {
+    ...font.num,
     flex: 1,
     color: colors.warning,
-    fontSize: font.size.xs,
+    fontSize: font.size.micro,
     fontWeight: '700',
   },
   alertBannerBtn: {
@@ -218,7 +243,7 @@ export const s = StyleSheet.create({
   },
   alertBannerBtnText: {
     color: colors.warning,
-    fontSize: font.size.xs,
+    fontSize: font.size.micro,
     fontWeight: '800',
     textTransform: 'uppercase',
   },

@@ -9,20 +9,11 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  View,
-  Text,
-  ActivityIndicator,
-  TouchableOpacity,
-  ScrollView,
-  Alert,
-  Keyboard,
-  Platform,
-} from 'react-native';
+import { View, Text, ActivityIndicator, Alert } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import MapView, { Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, spacing, font } from '../../theme';
+import { colors, font } from '../../theme';
 import {
   useBusLocations, useStops, useRoutes, useSchedule, useArrivals, useRoutesForStop, BUS_POLL_MS,
 } from '../../hooks';
@@ -36,7 +27,6 @@ import {
   isFavoriteStop, addFavoriteStop, removeFavoriteStop,
 } from '../../services/storage';
 import { useNetworkStatus } from '../../services/network';
-import { startAlertWatch, stopAlertWatch, subscribeAlertConfig, type AlertConfig } from '../../services/notifications';
 import { useSettings } from '../settings/SettingsProvider';
 import { GOOGLE_DARK_STYLE, GOOGLE_MAP_ID } from '../../theme/googleMapStyle';
 import { METRO_POLYLINES } from '../../data/metroPolylines';
@@ -46,8 +36,10 @@ import {
 } from './mapUtils';
 import StampModal from '../../components/StampModal';
 import ScheduleGrid from '../../components/ScheduleGrid';
-import AlertPickerModal from '../../components/AlertPickerModal';
 import UserLocationMarker from '../../components/UserLocationMarker';
+import Pressable from '../../ui/Pressable';
+import MapControls, { type MapToggle } from '../../ui/MapControls';
+import StopSheet, { useStopSheetInset, type StopSheetLine } from '../../ui/StopSheet';
 import RefreshTimer from './components/RefreshTimer';
 import MapStatus from './components/MapStatus';
 import BusLayer, { type RawBus } from './components/BusLayer';
@@ -111,22 +103,6 @@ export default function LiveMapScreen() {
   const [stampModal, setStampModal] = useState<{ lat: number; lng: number } | null>(null);
   const [stampName, setStampName] = useState('');
   const [stampEmoji, setStampEmoji] = useState('📍');
-
-  // Arrival alert state — synced with global service
-  const [arrivalAlert, setArrivalAlert] = useState<AlertConfig | null>(null);
-  useEffect(() => subscribeAlertConfig(setArrivalAlert), []);
-  const [showAlertPicker, setShowAlertPicker] = useState(false);
-  const [alertThreshold, setAlertThreshold] = useState('5');
-  const [alertError, setAlertError] = useState<string | null>(null);
-  const [alertBusy, setAlertBusy] = useState(false);
-
-  // Keyboard height tracking — push card above keyboard
-  const [kbHeight, setKbHeight] = useState(0);
-  useEffect(() => {
-    const show = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow', (e) => setKbHeight(e.endCoordinates.height));
-    const hide = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () => setKbHeight(0));
-    return () => { show.remove(); hide.remove(); };
-  }, []);
 
   // Schedule
   const { data: scheduleData, isLoading: loadingSchedule } = useSchedule(lineCode);
@@ -430,13 +406,11 @@ export default function LiveMapScreen() {
     if (!st) return;
     setSelectedStop(st);
     setShowAllLines(false);
-    setShowAlertPicker(false);
   }, []);
 
   const closeStop = useCallback(() => {
     setSelectedStop(null);
     setShowAllLines(false);
-    setShowAlertPicker(false);
   }, []);
 
   // Saved-stop state, mirrored so the bookmark icon can re-render on toggle.
@@ -461,37 +435,11 @@ export default function LiveMapScreen() {
     }
   }, [selectedStop]);
 
-  const confirmAlert = useCallback(async () => {
-    if (!selectedStop) return;
-    const min = parseInt(alertThreshold, 10);
-    if (isNaN(min) || min <= 0) return;
-    setAlertBusy(true);
-    setAlertError(null);
-    const res = await startAlertWatch({
-      stopCode: selectedStop.code,
-      stopName: selectedStop.name,
-      thresholdMin: min,
-      lineId: lineId ?? '',
-      routeCodes: [...lineRouteCodes],
-      color: primaryColor,
-    });
-    setAlertBusy(false);
-    if (!res.ok) {
-      // Keep the dialog open with the reason. Firing and forgetting made a
-      // notifications denial look exactly like success.
-      setAlertError(res.message);
-      return;
-    }
-    setShowAlertPicker(false);
-    // Only one alert can be armed at a time; arming this one cancelled the
-    // other, and saying nothing about it is silent data loss.
-    if (res.replaced) {
-      Alert.alert(
-        'Alert moved',
-        `Your alert for ${res.replaced.lineId} at ${res.replaced.stopName} was cancelled.`,
-      );
-    }
-  }, [selectedStop, alertThreshold, lineId, lineRouteCodes, primaryColor]);
+  // An alert armed here watches every direction of the line being tracked.
+  const alertTarget = useMemo(
+    () => ({ lineId: lineId ?? '', routeCodes: [...lineRouteCodes] }),
+    [lineId, lineRouteCodes],
+  );
 
   // All lines at this stop — cached + offline-tolerant via the shared hook.
   const { data: stopRoutes, isLoading: loadingStopLines } = useRoutesForStop(
@@ -528,6 +476,42 @@ export default function LiveMapScreen() {
     closeStop();
   }, [closeStop]);
 
+  const toggleAllLines = useCallback(() => setShowAllLines((v) => !v), []);
+
+  const openLine = useCallback((line: StopSheetLine) => {
+    const info = linesMap.get(line.lineCode);
+    router.push({ pathname: '/map/[lineCode]', params: {
+      lineCode: line.lineCode, lineId: line.lineId,
+      lineDescr: info?.LineDescrEng ?? info?.LineDescr ?? line.lineDescrEng,
+    }});
+  }, [linesMap, router]);
+
+  const toggles = useMemo<MapToggle[]>(() => [
+    {
+      key: 'schedule',
+      icon: 'time-outline',
+      label: 'Timetable',
+      active: showSchedule,
+      onPress: () => { const n = !showSchedule; setShowSchedule(n); setToggle('schedule', n); },
+    },
+    {
+      key: 'metro',
+      icon: 'train-outline',
+      label: 'Metro lines',
+      active: showMetro,
+      onPress: () => { const n = !showMetro; setShowMetro(n); setToggle('metro', n); },
+    },
+    {
+      key: 'stamps',
+      icon: 'pin-outline',
+      label: 'Map stamps',
+      active: showStamps,
+      onPress: () => { const n = !showStamps; setShowStamps(n); setToggle('stamps', n); },
+    },
+  ], [showSchedule, showMetro, showStamps]);
+
+  const sheetInset = useStopSheetInset(selectedStop != null);
+
   /* ── Header ────────────────────────────────────────────────── */
 
   const activeRouteLabel = useMemo(() => {
@@ -551,22 +535,39 @@ export default function LiveMapScreen() {
   const headerOptions = useMemo(() => ({
     headerStyle: { backgroundColor: colors.bg },
     headerTitle: () => (
-      <TouchableOpacity style={s.headerTitleWrap} disabled={!hasMultipleRoutes}
-        onPress={toggleRouteMenu} activeOpacity={0.7}>
+      // `disabled` is deliberately not used: our Pressable dims a disabled
+      // target, and a single-direction line's header is not "unavailable".
+      <Pressable
+        style={s.headerTitleWrap}
+        onPress={hasMultipleRoutes ? toggleRouteMenu : undefined}
+        pressScale={hasMultipleRoutes ? 0.97 : 1}
+        haptic={hasMultipleRoutes}
+        accessibilityRole={hasMultipleRoutes ? 'button' : 'header'}
+        accessibilityState={hasMultipleRoutes ? { expanded: showRouteMenu } : undefined}
+        accessibilityLabel={hasMultipleRoutes
+          ? `Line ${lineId ?? ''}, ${activeRouteLabel}. Change direction`
+          : `Line ${lineId ?? ''}, ${activeRouteLabel}`}
+      >
         <View style={s.headerTitleRow}>
           <Text style={s.headerLineId}>{lineId ?? ''}</Text>
           {hasMultipleRoutes && (
             <Ionicons name={showRouteMenu ? 'chevron-up' : 'chevron-down'}
-              size={16} color={colors.textMuted} style={{ marginLeft: 4 }} />
+              size={16} color={colors.textMuted} style={s.headerChevron} />
           )}
         </View>
         {activeRouteLabel ? <Text style={s.headerRouteDescr} numberOfLines={1}>{activeRouteLabel}</Text> : null}
-      </TouchableOpacity>
+      </Pressable>
     ),
     headerRight: () => (
-      <TouchableOpacity onPress={toggleFav} hitSlop={12} style={{ marginRight: spacing.sm }}>
+      <Pressable
+        onPress={toggleFav}
+        style={s.headerFavBtn}
+        accessibilityRole="button"
+        accessibilityLabel={fav ? 'Remove this line from favourites' : 'Add this line to favourites'}
+        accessibilityState={{ selected: fav }}
+      >
         <Ionicons name={fav ? 'heart' : 'heart-outline'} size={24} color={fav ? '#B91C1C' : colors.textMuted} />
-      </TouchableOpacity>
+      </Pressable>
     ),
   }), [hasMultipleRoutes, showRouteMenu, activeRouteLabel, lineId, fav, toggleRouteMenu, toggleFav]);
 
@@ -677,172 +678,70 @@ export default function LiveMapScreen() {
         )}
       </MapView>
 
-      {/* Stop arrivals card + alert pill */}
-      <View style={[s.leftStack, kbHeight > 0 && { bottom: kbHeight + spacing.sm }]}>
-        {selectedStop && (
-          <View style={[s.arrivalCard, stopLines && s.arrivalCardExpanded]}>
-          <View style={ms.arrivalHeader}>
-            <Text style={ms.arrivalName} numberOfLines={1}>{selectedStop.name}</Text>
-            <View style={s.arrivalHeaderBtns}>
-              <TouchableOpacity onPress={toggleStopSaved} hitSlop={10}>
-                <Ionicons
-                  name={stopSaved ? 'bookmark' : 'bookmark-outline'}
-                  size={16}
-                  color={stopSaved ? primaryColor : colors.textMuted}
-                />
-              </TouchableOpacity>
-              <TouchableOpacity onPress={() => {
-                if (arrivalAlert?.stopCode === selectedStop.code) {
-                  stopAlertWatch(); setShowAlertPicker(false);
-                } else {
-                  setShowAlertPicker((v) => !v);
-                }
-              }} hitSlop={10}>
-                <Ionicons
-                  name={arrivalAlert?.stopCode === selectedStop.code ? 'notifications' : 'notifications-outline'}
-                  size={16}
-                  color={arrivalAlert?.stopCode === selectedStop.code ? colors.warning : colors.textMuted}
-                />
-              </TouchableOpacity>
-              <TouchableOpacity onPress={closeStop} hitSlop={10}>
-                <Ionicons name="close" size={18} color={colors.textMuted} />
-              </TouchableOpacity>
-            </View>
-          </View>
-          <AlertPickerModal
-              visible={showAlertPicker}
-              subtitle={`${lineId} at ${selectedStop.name}`}
-              threshold={alertThreshold}
-              onChangeThreshold={setAlertThreshold}
-              accentColor={primaryColor}
-              errorMessage={alertError}
-              busy={alertBusy}
-              onCancel={() => { setShowAlertPicker(false); setAlertError(null); }}
-              onConfirm={confirmAlert}
-            />
-          {walk.walkMin !== null && (
-            <View style={ms.walkRow}>
-              <Ionicons name="walk" size={14} color="#4285F4" />
-              <Text style={ms.walkText}>{walk.walkMin} min walk</Text>
-            </View>
-          )}
-          {arrivalsLoading ? (
-            <ActivityIndicator size="small" color={colors.primaryLight} style={{ marginTop: 6 }} />
-          ) : arrivals && arrivals.length > 0 ? (
-            arrivals.map((a, i) => (
-              <View key={i} style={s.arrivalRow}>
-                <View style={[s.arrivalBadge, { backgroundColor: a.color }]}>
-                  <Text style={s.arrivalMin}>{a.min} min</Text>
-                </View>
-              </View>
-            ))
-          ) : (
-            <Text style={ms.arrivalEmpty}>No arrivals right now</Text>
-          )}
-          {nextDeparture && (
-            <View style={[s.nextDepRow, { marginTop: spacing.sm }]}>
-              <Ionicons name="time-outline" size={12} color={colors.textMuted} />
-              <Text style={s.nextDepLabel}> Next: {nextDeparture}</Text>
-            </View>
-          )}
-          <TouchableOpacity style={s.allLinesBtn} activeOpacity={0.7}
-            onPress={() => setShowAllLines((v) => !v)}>
-            {loadingStopLines ? (
-              <ActivityIndicator size="small" color={primaryColor} />
-            ) : (
-              <>
-                <Ionicons name={stopLines ? 'chevron-down' : 'bus-outline'} size={14} color={primaryColor} />
-                <Text style={[s.allLinesBtnText, { color: primaryColor }]}>{stopLines ? 'Hide lines' : 'All lines'}</Text>
-              </>
-            )}
-          </TouchableOpacity>
-          {stopLines && stopLines.length > 0 && (
-            <ScrollView style={s.stopLinesScroll} showsVerticalScrollIndicator={false} nestedScrollEnabled>
-              {stopLines.map((line) => (
-                <TouchableOpacity key={line.lineCode} style={s.stopLineRow} activeOpacity={0.7}
-                  onPress={() => {
-                    const info = linesMap.get(line.lineCode);
-                    router.push({ pathname: '/map/[lineCode]', params: {
-                      lineCode: line.lineCode, lineId: line.lineId,
-                      lineDescr: info?.LineDescrEng ?? info?.LineDescr ?? line.lineDescrEng,
-                    }});
-                  }}>
-                  <View style={[s.stopLineBadge, { backgroundColor: primaryColor }]}>
-                    <Text style={s.stopLineBadgeText}>{line.lineId}</Text>
-                  </View>
-                  <Text style={s.stopLineDescr}>{line.lineDescrEng}</Text>
-                  {line.nextMin != null ? (
-                    <View style={[s.stopLineArrBadge, { backgroundColor: line.color }]}>
-                      <Text style={s.stopLineArrMin}>{line.nextMin}'</Text>
-                    </View>
-                  ) : (
-                    <Text style={s.stopLineNone}>—</Text>
-                  )}
-                  <Ionicons name="chevron-forward" size={14} color={colors.textMuted} style={{ marginLeft: 4 }} />
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          )}
-        </View>
-        )}
-      </View>
-
       {/* Route direction dropdown */}
       {showRouteMenu && allRoutes && allRoutes.length > 1 && (
         <View style={s.routeMenu}>
           {allRoutes.map((r) => (
-            <TouchableOpacity key={r.RouteCode}
+            <Pressable key={r.RouteCode}
               style={[s.routeMenuItem, activeRouteCode === r.RouteCode && s.routeMenuItemActive]}
-              onPress={() => selectRoute(r.RouteCode)}>
+              onPress={() => selectRoute(r.RouteCode)}
+              accessibilityRole="radio"
+              accessibilityState={{ selected: activeRouteCode === r.RouteCode }}
+              accessibilityLabel={r.RouteDescrEng || r.RouteDescr}>
               <Text style={[s.routeMenuText, activeRouteCode === r.RouteCode && s.routeMenuTextActive]} numberOfLines={2}>
                 {r.RouteDescrEng || r.RouteDescr}
               </Text>
               {activeRouteCode === r.RouteCode && <Ionicons name="checkmark" size={16} color={colors.primaryLight} />}
-            </TouchableOpacity>
+            </Pressable>
           ))}
         </View>
       )}
 
-      {/* Top right controls */}
-      <View style={ms.topControls}>
-        <TouchableOpacity
-          style={[ms.toggleBtn, showSchedule && ms.toggleBtnActive, showSchedule && { borderColor: primaryColor }]}
-          onPress={() => { const n = !showSchedule; setShowSchedule(n); setToggle('schedule', n); }}>
-          <Ionicons name="time-outline" size={18} color={showSchedule ? primaryColor : colors.textMuted} />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[ms.toggleBtn, showMetro && ms.toggleBtnActive, showMetro && { borderColor: primaryColor }]}
-          onPress={() => { const n = !showMetro; setShowMetro(n); setToggle('metro', n); }}>
-          <Ionicons name="train-outline" size={18} color={showMetro ? primaryColor : colors.textMuted} />
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[ms.toggleBtn, showStamps && ms.toggleBtnActive, showStamps && { borderColor: primaryColor }]}
-          onPress={() => { const n = !showStamps; setShowStamps(n); setToggle('stamps', n); }}>
-          <Ionicons name="pin-outline" size={18} color={showStamps ? primaryColor : colors.textMuted} />
-        </TouchableOpacity>
-      </View>
-
-      {/* Bottom right controls */}
-      <View style={ms.bottomControls}>
-        <TouchableOpacity style={ms.locationBtn} onPress={recenter}>
-          <View style={ms.locationIcon}><View style={ms.locationDot} /></View>
-        </TouchableOpacity>
+      <MapControls
+        toggles={toggles}
+        accentColor={primaryColor}
+        onRecenter={recenter}
+        bottomOffset={sheetInset}
+      >
         <RefreshTimer
           dataUpdatedAt={busUpdatedAt}
           intervalMs={BUS_POLL_MS}
           fetching={busFetching}
           staleLabel={staleLabel}
         />
-      </View>
+      </MapControls>
+
+      {selectedStop && (
+        <StopSheet
+          stop={selectedStop}
+          accentColor={primaryColor}
+          onClose={closeStop}
+          walkMin={walk.walkMin}
+          saved={stopSaved}
+          onToggleSaved={toggleStopSaved}
+          arrivals={arrivals}
+          arrivalsLoading={arrivalsLoading}
+          nextDeparture={nextDeparture}
+          lines={stopLines}
+          linesLoading={loadingStopLines}
+          onPressLine={openLine}
+          linesExpanded={showAllLines}
+          onToggleLines={toggleAllLines}
+          alert={alertTarget}
+        />
+      )}
 
       {/* Schedule overlay */}
       {showSchedule && (
         <View style={s.scheduleCard}>
           <View style={ms.arrivalHeader}>
-            <Text style={[ms.arrivalName, { fontSize: font.size.xs }]}>Schedule</Text>
-            <TouchableOpacity onPress={() => setShowSchedule(false)} hitSlop={10}>
+            <Text style={[ms.arrivalName, { fontSize: font.size.micro }]} accessibilityRole="header">Schedule</Text>
+            <Pressable
+              onPress={() => setShowSchedule(false)}
+              accessibilityRole="button"
+              accessibilityLabel="Close the timetable">
               <Ionicons name="close" size={16} color={colors.textMuted} />
-            </TouchableOpacity>
+            </Pressable>
           </View>
           {loadingSchedule ? (
             <ActivityIndicator size="small" color={colors.primaryLight} style={{ marginTop: 4 }} />
