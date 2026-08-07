@@ -5,7 +5,13 @@
 import { useQuery } from '@tanstack/react-query';
 import * as api from '../services/api';
 import { getCachedLines, setCachedLines, getCachedSchedule, setCachedSchedule, getCachedStops, setCachedStops, getCachedRoutes, setCachedRoutes, getCachedRoutesForStop, setCachedRoutesForStop, getAllCachedStops, isOfflineDataDownloaded } from '../services/storage';
+import { haversineM } from '../utils/geo';
 import type { OasaLine, OasaMLInfo, OasaDailySchedule, OasaNearbyStop, OasaRoute } from '../types';
+
+/** How often live arrival data is refreshed, everywhere in the app. */
+export const ARRIVALS_POLL_MS = 15_000;
+/** How often live bus positions are refreshed. */
+export const BUS_POLL_MS = 10_000;
 
 /** All bus lines — backed by AsyncStorage cache with 24h TTL. */
 export function useLines() {
@@ -68,36 +74,47 @@ export function useStops(routeCode: string | undefined) {
   });
 }
 
-/** Real-time arrivals at a stop — polls every 15s. */
-export function useArrivals(stopCode: string | undefined) {
+/**
+ * Real-time arrivals at a stop.
+ *
+ * THIS IS THE ONLY SANCTIONED WAY TO POLL ARRIVALS. Do not hand-roll a
+ * `setInterval` — doing so is what produced ~5,800 requests/hour, kept polling
+ * while the app was backgrounded, and made pull-to-refresh impossible to wire
+ * up. React Query gives request dedup across cards showing the same stop,
+ * automatic pause when the screen is unfocused or the app is backgrounded
+ * (via services/appState.ts), and a single `refetchQueries` refresh entry point.
+ *
+ * `dataUpdatedAt` from the returned result is the freshness timestamp the UI
+ * should surface, so a silently failing poll is visible rather than a frozen
+ * number the user trusts.
+ */
+export function useArrivals(stopCode: string | undefined, enabled = true) {
   return useQuery({
     queryKey: ['arrivals', stopCode],
-    queryFn: () => api.getStopArrivals(stopCode!),
-    enabled: !!stopCode,
-    refetchInterval: 15_000,
+    queryFn: ({ signal }) => api.getStopArrivals(stopCode!, { signal }),
+    enabled: !!stopCode && enabled,
+    refetchInterval: ARRIVALS_POLL_MS,
+    // Never poll a backgrounded app.
+    refetchIntervalInBackground: false,
+    staleTime: 5_000,
+    retry: 1,
+    // Keep showing the last known arrivals while a refetch is in flight
+    // instead of flashing a spinner every 15 seconds.
+    placeholderData: (prev) => prev,
   });
 }
 
 /** Live bus positions on a route — polls every 10s. */
-export function useBusLocations(routeCode: string | undefined) {
+export function useBusLocations(routeCode: string | undefined, enabled = true) {
   return useQuery({
     queryKey: ['busLocations', routeCode],
-    queryFn: () => api.getBusLocations(routeCode!),
-    enabled: !!routeCode,
-    refetchInterval: 10_000,
+    queryFn: ({ signal }) => api.getBusLocations(routeCode!, { signal }),
+    enabled: !!routeCode && enabled,
+    refetchInterval: BUS_POLL_MS,
+    refetchIntervalInBackground: false,
     retry: 0,
+    placeholderData: (prev) => prev,
   });
-}
-
-/** Haversine distance in metres between two lat/lng points. */
-function haversineM(lat1: number, lng1: number, lat2: number, lng2: number): number {
-  const toRad = (d: number) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
-  return 6_371_000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
 /** Closest stops to a coordinate.
@@ -172,24 +189,25 @@ export function useSchedule(lineCode: string | undefined) {
       // When offline data has been pre-downloaded, prefer cache unconditionally
       if (isOfflineDataDownloaded()) {
         const cached = await getCachedSchedule(lineCode!);
-        if (cached) {
+        if (api.isUsableSchedule(cached)) {
           // Fire-and-forget refresh for next time (non-blocking)
           api.getDailySchedule(lineCode!).then((fresh) => {
-            if (fresh) setCachedSchedule(lineCode!, fresh);
+            if (api.isUsableSchedule(fresh)) setCachedSchedule(lineCode!, fresh);
           }).catch(() => {});
-          return cached;
+          return cached!;
         }
       }
       try {
         const fresh = await api.getDailySchedule(lineCode!);
-        if (fresh) {
-          setCachedSchedule(lineCode!, fresh);
-        }
+        // Only persist a schedule that actually carries departures. Writing a
+        // blank one poisons the cache: it is truthy, so it wins over the real
+        // data forever and the line silently shows no timetable again.
+        if (api.isUsableSchedule(fresh)) setCachedSchedule(lineCode!, fresh);
         return fresh;
       } catch (err) {
         // Offline fallback
         const cached = await getCachedSchedule(lineCode!);
-        if (cached) return cached;
+        if (api.isUsableSchedule(cached)) return cached!;
         throw err;
       }
     },

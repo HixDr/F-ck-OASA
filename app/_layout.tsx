@@ -12,7 +12,7 @@ import { colors, font, spacing, radius } from '../src/theme';
 import { initStorage, prefetchFavoriteSchedules, warmPlannerCaches } from '../src/services/storage';
 import { initLocation } from '../src/services/location';
 import { setupNetworkListener, useNetworkStatus } from '../src/services/network';
-import { probeApiBase } from '../src/services/api';
+import { setupAppState } from '../src/services/appState';
 import { checkForUpdate, type UpdateProgress } from '../src/services/updater';
 import { subscribeAlertConfig, stopAlertWatch, type AlertConfig } from '../src/services/notifications';
 import { SettingsProvider } from '../src/features/settings/SettingsProvider';
@@ -162,15 +162,31 @@ export default function RootLayout() {
 
   useEffect(() => {
     setupNetworkListener();
-    Promise.all([initStorage(), initLocation(), probeApiBase()]).then(() => {
-      setReady(true);
-      // Silently pre-cache schedules for all favorite lines
-      prefetchFavoriteSchedules();
-      // Eagerly warm dict caches so the planner's first run is fast
-      warmPlannerCaches();
-      // Check for app updates (non-blocking)
-      checkForUpdate(setUpdateProgress);
-    });
+    setupAppState();
+
+    // Only storage gates the first frame. `initLocation()` used to sit here
+    // too, which meant the app hung on a bare spinner behind the OS location
+    // permission dialog — and if any of these rejected (GPS switched off makes
+    // watchPositionAsync reject) `setReady(true)` never ran and the app was
+    // bricked on a black screen. The API base is now resolved lazily, so no
+    // network call blocks startup either.
+    let cancelled = false;
+    initStorage()
+      .catch(() => {
+        // A failed storage init must still let the user into the app; the
+        // screens degrade to empty state rather than an infinite spinner.
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setReady(true);
+
+        // Everything below is best-effort and must never block or throw.
+        initLocation().catch(() => {});
+        prefetchFavoriteSchedules().catch(() => {});
+        checkForUpdate(setUpdateProgress).catch(() => {});
+      });
+
+    return () => { cancelled = true; };
   }, []);
 
   if (!ready) {

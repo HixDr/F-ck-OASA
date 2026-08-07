@@ -21,79 +21,167 @@ import type {
   OasaBulkStop,
 } from '../types';
 
-const BASES = [
-  'https://telematics.oasa.gr/api/',
-  'http://telematics.oasa.gr/api/',
-] as const;
-let _resolvedBase: string = BASES[0]; // default to HTTPS
-const UA = 'OASALive/1.0 (personal telematics client)';
+const HTTPS_BASE = 'https://telematics.oasa.gr/api/';
+const HTTP_BASE = 'http://telematics.oasa.gr/api/';
+
+/** Shared User-Agent. The API returns 403 without one. */
+export const USER_AGENT = 'OASALive/1.0 (personal telematics client)';
+
+/** Default per-request timeout. RN's OkHttp client has an infinite read
+ *  timeout by default, so without this a half-open socket hangs forever. */
+export const DEFAULT_TIMEOUT_MS = 12_000;
 
 /**
- * Probe both HTTP and HTTPS endpoints at startup and lock onto whichever
- * responds successfully first. Prefers HTTPS. Call once at app boot.
+ * HTTPS is the only base we start from. As of 2026-08 the plaintext host
+ * does not respond at all (connect hangs until timeout), so probing it at
+ * boot cost up to 12s of startup for nothing. Instead we fail over lazily:
+ * only if an HTTPS request dies with a transport error do we try HTTP once,
+ * and only then do we latch onto it.
  */
-export async function probeApiBase(): Promise<void> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
-
-  try {
-    const results = await Promise.allSettled(
-      BASES.map(async (base) => {
-        const res = await fetch(`${base}?act=webGetLines`, {
-          method: 'GET',
-          headers: { 'User-Agent': UA },
-          signal: controller.signal,
-        });
-        if (!res.ok) throw new Error(`${res.status}`);
-        return base;
-      }),
-    );
-
-    // Pick HTTPS if it succeeded, else HTTP, else keep default
-    for (const r of results) {
-      if (r.status === 'fulfilled') {
-        _resolvedBase = r.value;
-        break;
-      }
-    }
-  } catch {
-    // Both failed or aborted — keep HTTPS default
-  } finally {
-    clearTimeout(timeout);
-  }
-  console.log(`[api] Using base: ${_resolvedBase}`);
-}
+let _resolvedBase = HTTPS_BASE;
+let _httpFailoverTried = false;
 
 /** Return the currently resolved API base URL. */
 export function getApiBase(): string {
   return _resolvedBase;
 }
 
-async function api<T>(action: string, params: Record<string, string> = {}): Promise<T> {
-  const qs = new URLSearchParams({ act: action, ...params }).toString();
-  const url = `${_resolvedBase}?${qs}`;
+/* ── Errors ──────────────────────────────────────────────────── */
 
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: {
-      'User-Agent': UA,
-    },
-  });
+export class ApiError extends Error {
+  constructor(message: string, readonly action: string, readonly status?: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+/** Request exceeded its timeout or was aborted by the caller. */
+export class ApiTimeoutError extends ApiError {
+  constructor(action: string) {
+    super(`OASA API ${action} timed out`, action);
+    this.name = 'ApiTimeoutError';
+  }
+}
+/** Body was not valid JSON — a captive portal or an upstream error page. */
+export class ApiParseError extends ApiError {
+  constructor(action: string, readonly body: string) {
+    super(`OASA API ${action} returned non-JSON`, action);
+    this.name = 'ApiParseError';
+  }
+}
+/** Body parsed but is not the shape this endpoint promises. */
+export class ApiShapeError extends ApiError {
+  constructor(action: string) {
+    super(`OASA API ${action} returned an unexpected shape`, action);
+    this.name = 'ApiShapeError';
+  }
+}
+/** Server explicitly returned nothing where an object was expected. */
+export class ApiEmptyError extends ApiError {
+  constructor(action: string) {
+    super(`OASA API ${action} returned an empty body`, action);
+    this.name = 'ApiEmptyError';
+  }
+}
+
+/**
+ * `fetch` with a hard timeout, and support for an external abort signal so
+ * callers can cancel in-flight work (screen unmount, superseded request).
+ */
+export async function fetchWithTimeout(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  externalSignal?: AbortSignal,
+): Promise<Response> {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (externalSignal) {
+    if (externalSignal.aborted) controller.abort();
+    else externalSignal.addEventListener('abort', onAbort);
+  }
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    if (externalSignal) externalSignal.removeEventListener('abort', onAbort);
+  }
+}
+
+/**
+ * Core request helper.
+ *
+ * `expect` matters: it decides what an *empty* response means. Array
+ * endpoints legitimately return nothing (no arrivals right now), so `[]` is a
+ * real answer. Object endpoints returning nothing is a failure — and it must
+ * throw, because callers persist successful results to the offline cache.
+ * Returning `[]` here (as this used to) wrote `[]` over good schedule data,
+ * and since `[]` is truthy it was then preferred forever.
+ */
+async function api<T>(
+  action: string,
+  params: Record<string, string> = {},
+  expect: 'array' | 'object' = 'array',
+  opts: { timeoutMs?: number; signal?: AbortSignal } = {},
+): Promise<T> {
+  const qs = new URLSearchParams({ act: action, ...params }).toString();
+
+  const attempt = async (base: string): Promise<Response> =>
+    fetchWithTimeout(
+      `${base}?${qs}`,
+      { method: 'GET', headers: { 'User-Agent': USER_AGENT } },
+      opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      opts.signal,
+    );
+
+  let res: Response;
+  try {
+    res = await attempt(_resolvedBase);
+  } catch (err) {
+    if (opts.signal?.aborted) throw new ApiTimeoutError(action);
+    // Transport failure. Try the plaintext host once, then latch if it works.
+    if (_resolvedBase === HTTPS_BASE && !_httpFailoverTried) {
+      _httpFailoverTried = true;
+      try {
+        res = await attempt(HTTP_BASE);
+        _resolvedBase = HTTP_BASE;
+      } catch {
+        throw new ApiTimeoutError(action);
+      }
+    } else {
+      throw new ApiTimeoutError(action);
+    }
+  }
 
   if (!res.ok) {
-    throw new Error(`OASA API ${action} → ${res.status}`);
+    throw new ApiError(`OASA API ${action} → ${res.status}`, action, res.status);
   }
 
-  const text = await res.text();
+  const text = (await res.text()).trim();
   if (!text || text === '""' || text === 'null') {
-    return [] as unknown as T;
+    if (expect === 'array') return [] as unknown as T;
+    throw new ApiEmptyError(action);
   }
 
+  let parsed: unknown;
   try {
-    return JSON.parse(text) as T;
+    parsed = JSON.parse(text);
   } catch {
-    return [] as unknown as T;
+    throw new ApiParseError(action, text.slice(0, 200));
   }
+
+  if (parsed === null || parsed === undefined) {
+    if (expect === 'array') return [] as unknown as T;
+    throw new ApiEmptyError(action);
+  }
+  // The API signals some failures as {"error": "..."} with HTTP 200.
+  if (typeof parsed === 'object' && !Array.isArray(parsed) && 'error' in (parsed as object)) {
+    throw new ApiError(`OASA API ${action}: ${(parsed as { error: string }).error}`, action);
+  }
+  if (expect === 'array' && !Array.isArray(parsed)) throw new ApiShapeError(action);
+  if (expect === 'object' && typeof parsed !== 'object') throw new ApiShapeError(action);
+
+  return parsed as T;
 }
 
 /* ── Static / Reference Endpoints ────────────────────────────── */
@@ -102,39 +190,116 @@ async function api<T>(action: string, params: Record<string, string> = {}): Prom
 export const getLines = () => api<OasaLine[]>('webGetLines');
 
 /** Routes (directions) for a specific line. */
-export const getRoutes = (lineCode: string) =>
-  api<OasaRoute[]>('webGetRoutes', { p1: lineCode });
+export const getRoutes = (lineCode: string, opts: { signal?: AbortSignal } = {}) =>
+  api<OasaRoute[]>('webGetRoutes', { p1: lineCode }, 'array', opts);
 
 /** Ordered stops for a specific route. */
-export const getStops = (routeCode: string) =>
-  api<OasaStop[]>('webGetStops', { p1: routeCode });
+export const getStops = (routeCode: string, opts: { signal?: AbortSignal } = {}) =>
+  api<OasaStop[]>('webGetStops', { p1: routeCode }, 'array', opts);
 
-/** Detailed route path (road-following polyline points) + stops. */
-export async function getRouteDetails(routeCode: string): Promise<{ lat: number; lng: number }[]> {
-  try {
-    const data = await api<{ details: OasaRouteDetail[] }>('webGetRoutesDetailsAndStops', { p1: routeCode });
-    if (!data || !data.details || data.details.length === 0) return [];
-    return data.details
-      .sort((a, b) => Number(a.routed_order) - Number(b.routed_order))
-      .map((d) => ({ lat: parseFloat(d.routed_y), lng: parseFloat(d.routed_x) }));
-  } catch {
-    return [];
-  }
+/** Detailed route path (road-following polyline points) + stops.
+ *  Throws on failure — callers need to tell "this route has no shape" apart
+ *  from "the request failed", because the map falls back to a stop-to-stop
+ *  line and the bus interpolator must be fed the same source. */
+export async function getRouteDetails(
+  routeCode: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<{ lat: number; lng: number }[]> {
+  const data = await api<{ details: OasaRouteDetail[] }>(
+    'webGetRoutesDetailsAndStops',
+    { p1: routeCode },
+    'object',
+    opts,
+  );
+  if (!data?.details?.length) return [];
+  return data.details
+    .slice()
+    .sort((a, b) => Number(a.routed_order) - Number(b.routed_order))
+    .map((d) => ({ lat: parseFloat(d.routed_y), lng: parseFloat(d.routed_x) }))
+    .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+}
+
+/** Ordered stops for a route, sorted by RouteStopOrder rather than trusting
+ *  the array order the API happens to return. Every downstream assumption
+ *  (board index < alight index, cumulative travel times) depends on this. */
+export async function getRouteStopsOrdered(
+  routeCode: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<OasaStop[]> {
+  const data = await api<{ stops: OasaStop[] }>(
+    'webGetRoutesDetailsAndStops',
+    { p1: routeCode },
+    'object',
+    opts,
+  );
+  if (!data?.stops?.length) return [];
+  return data.stops
+    .slice()
+    .sort((a, b) => Number(a.RouteStopOrder) - Number(b.RouteStopOrder));
 }
 
 /** Routes serving a specific stop. */
-export const getRoutesForStop = (stopCode: string) =>
-  api<OasaRoute[]>('webRoutesForStop', { p1: stopCode });
+export const getRoutesForStop = (stopCode: string, opts: { signal?: AbortSignal } = {}) =>
+  api<OasaRoute[]>('webRoutesForStop', { p1: stopCode }, 'array', opts);
 
 /* ── Real-Time Endpoints ─────────────────────────────────────── */
 
-/** Upcoming arrivals at a stop (route_code, veh_code, btime2 in minutes). */
-export const getStopArrivals = (stopCode: string) =>
-  api<OasaArrival[]>('getStopArrivals', { p1: stopCode });
+/** Upcoming arrivals at a stop (route_code, veh_code, btime2 in minutes).
+ *
+ *  Note: this is a per-vehicle *predicted arrival profile*, not just "what's
+ *  next". The same veh_code appears at every stop further along its route with
+ *  a monotonically increasing btime2, out to a horizon of ~40 minutes. That
+ *  makes live, traffic-aware ride times derivable — see rideTimeFromArrivals. */
+export const getStopArrivals = (stopCode: string, opts: { signal?: AbortSignal } = {}) =>
+  api<OasaArrival[]>('getStopArrivals', { p1: stopCode }, 'array', opts);
+
+/**
+ * Live ride time between two stops on the same route, in minutes.
+ *
+ * Finds a vehicle present in both stops' arrival profiles and subtracts its
+ * predicted arrival times. This is measured and traffic-aware — vastly better
+ * than estimating from straight-line distance. Returns null when no vehicle
+ * currently spans both stops (outside the ~40 min prediction horizon, or no
+ * service running), in which case the caller should fall back to an estimate.
+ *
+ * Picks the soonest-boarding common vehicle, and rejects non-positive spans
+ * (which occur on circular routes where the first and last position share a
+ * StopCode and therefore report identical btime2).
+ */
+export function rideTimeFromArrivals(
+  boardArrivals: OasaArrival[],
+  alightArrivals: OasaArrival[],
+  routeCode: string,
+): { rideMin: number; waitMin: number; vehCode: string } | null {
+  const board = new Map<string, number>();
+  for (const a of boardArrivals) {
+    if (a.route_code !== routeCode) continue;
+    const m = Number(a.btime2);
+    if (!Number.isFinite(m)) continue;
+    const prev = board.get(a.veh_code);
+    if (prev === undefined || m < prev) board.set(a.veh_code, m);
+  }
+  if (board.size === 0) return null;
+
+  let best: { rideMin: number; waitMin: number; vehCode: string } | null = null;
+  for (const a of alightArrivals) {
+    if (a.route_code !== routeCode) continue;
+    const alightMin = Number(a.btime2);
+    if (!Number.isFinite(alightMin)) continue;
+    const boardMin = board.get(a.veh_code);
+    if (boardMin === undefined) continue;
+    const rideMin = alightMin - boardMin;
+    if (rideMin <= 0) continue;
+    if (best === null || boardMin < best.waitMin) {
+      best = { rideMin, waitMin: boardMin, vehCode: a.veh_code };
+    }
+  }
+  return best;
+}
 
 /** Live vehicle positions on a route. */
-export const getBusLocations = (routeCode: string) =>
-  api<OasaBusLocation[]>('getBusLocation', { p1: routeCode });
+export const getBusLocations = (routeCode: string, opts: { signal?: AbortSignal } = {}) =>
+  api<OasaBusLocation[]>('getBusLocation', { p1: routeCode }, 'array', opts);
 
 /* ── Geo Endpoints ───────────────────────────────────────────── */
 
@@ -145,8 +310,10 @@ export const getClosestStops = (lat: number, lng: number) =>
 /* ── Bulk / Offline Endpoints (undocumented) ─────────────────── */
 
 /** All 9,000+ stops in the network — single call, ~2 MB JSON.
- *  Uses the undocumented `getAllStops` action (no params). */
-export const getAllStopsBulk = () => api<OasaBulkStop[]>('getAllStops');
+ *  Uses the undocumented `getAllStops` action (no params).
+ *  Gets a longer timeout: the payload alone takes ~1s on a good connection. */
+export const getAllStopsBulk = (opts: { signal?: AbortSignal } = {}) =>
+  api<OasaBulkStop[]>('getAllStops', {}, 'array', { ...opts, timeoutMs: 45_000 });
 
 /* ── Schedule Endpoints ──────────────────────────────────────── */
 
@@ -155,11 +322,20 @@ export const getMLInfo = () => api<OasaMLInfo[]>('webGetLinesWithMLInfo');
 
 /** Schedule departure times for a line (needs mlCode + sdcCode). */
 export const getSchedLines = (mlCode: string, sdcCode: string, lineCode: string) =>
-  api<OasaSchedLines>('getSchedLines', { p1: mlCode, p2: sdcCode, p3: lineCode });
+  api<OasaSchedLines>('getSchedLines', { p1: mlCode, p2: sdcCode, p3: lineCode }, 'object');
 
-/** Today's schedule for a line — auto-selects weekday/Saturday/Sunday. */
-export const getDailySchedule = (lineCode: string) =>
-  api<OasaDailySchedule>('getDailySchedule', { line_code: lineCode });
+/** Today's schedule for a line — auto-selects weekday/Saturday/Sunday.
+ *  Throws (rather than yielding []) on an empty or malformed body, so callers
+ *  never persist a blank schedule over a good cached one. */
+export const getDailySchedule = (lineCode: string, opts: { signal?: AbortSignal } = {}) =>
+  api<OasaDailySchedule>('getDailySchedule', { line_code: lineCode }, 'object', opts);
+
+/** True when a daily schedule actually carries departures. Guard every cache
+ *  write with this — an object with two empty arrays is not worth persisting. */
+export function isUsableSchedule(s: OasaDailySchedule | null | undefined): boolean {
+  if (!s || typeof s !== 'object') return false;
+  return (s.go?.length ?? 0) > 0 || (s.come?.length ?? 0) > 0;
+}
 
 /* ── Walking Route (Valhalla) ────────────────────────────────── */
 
@@ -183,6 +359,7 @@ export async function getWalkingRoute(
   fromLng: number,
   toLat: number,
   toLng: number,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<WalkingRoute | null> {
   try {
     const body = JSON.stringify({
@@ -194,11 +371,15 @@ export async function getWalkingRoute(
       units: 'km',
       shape_match: 'map_snap',
     });
-    const res = await fetch('https://valhalla1.openstreetmap.de/route', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    });
+    // This is a shared public OSM demo instance with no SLA — callers MUST
+    // debounce and gate by distance, and pass a signal so superseded requests
+    // are actually cancelled rather than racing to overwrite each other.
+    const res = await fetchWithTimeout(
+      'https://valhalla1.openstreetmap.de/route',
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body },
+      8_000,
+      opts.signal,
+    );
     if (!res.ok) return null;
     const data = await res.json();
     if (!data.trip || !data.trip.legs || data.trip.legs.length === 0) return null;
