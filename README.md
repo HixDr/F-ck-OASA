@@ -114,6 +114,23 @@ mitigation is a **key restriction**, not secrecy:
 3. Restrict the key's **API targets** to *Maps SDK for Android* only.
 4. Set a **Cloud Billing budget + quota cap** so a leaked key cannot run up a bill.
 
+> ### ⚠️ Change the signing key and the map goes blank until you update the restriction
+>
+> The restriction matches on **(package name, signing certificate SHA-1)**. Sign with a different
+> key and the package still matches but the certificate does not, so Google silently refuses every
+> tile request.
+>
+> **The symptom is not an error.** The map surface renders normally — Google watermark, the
+> recenter control, and all app overlays are drawn — and only the tiles are missing, leaving a
+> blank beige rectangle. Nothing is logged to logcat on current Play Services. It looks exactly
+> like a broken MapView or a dead network, which is what makes it expensive to diagnose.
+> (Confirmed on-device 2026-08-07 while testing a build signed with a throwaway key.)
+>
+> So when migrating to the real keystore, **add the new SHA-1 to the key restriction before
+> shipping**, and if you ever build locally with a different key, expect a blank map and do not
+> go hunting in the app code. A key may carry several SHA-1s at once, so add the new one
+> alongside the old before cutting over.
+
 ## Release signing
 
 > **The previous release APKs were signed with the public AOSP debug keystore** that ships inside
