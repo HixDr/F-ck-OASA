@@ -14,6 +14,14 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Job-level, not step-level. app.config.ts is evaluated more than once:
+    # by `expo prebuild`, and again by the `:expo-constants:createExpoConfig`
+    # Gradle task during the build. It throws when GOOGLE_MAPS_API_KEY is
+    # missing, so scoping the secret to the prebuild step alone fails the
+    # build minutes later, in a task whose name gives no hint that a missing
+    # secret is the cause. Locally this is masked by .env being on disk.
+    env:
+      GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -45,7 +53,7 @@ jobs:
       # Fail before spending 15 minutes on a build that cannot be signed.
       # A release APK signed with the AOSP debug key is worse than no APK:
       # that key is public, so the signature proves nothing.
-      - name: Check release signing secrets are present
+      - name: Check required secrets are present
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           OASA_KEYSTORE_PASSWORD: ${{ secrets.OASA_KEYSTORE_PASSWORD }}
@@ -53,19 +61,20 @@ jobs:
           OASA_KEY_PASSWORD: ${{ secrets.OASA_KEY_PASSWORD }}
         run: |
           missing=""
-          for name in KEYSTORE_BASE64 OASA_KEYSTORE_PASSWORD OASA_KEY_ALIAS OASA_KEY_PASSWORD; do
+          # GOOGLE_MAPS_API_KEY comes from the job-level env above; it is checked
+          # here so a missing value surfaces now rather than as a Gradle failure
+          # in :expo-constants:createExpoConfig several minutes later.
+          for name in KEYSTORE_BASE64 OASA_KEYSTORE_PASSWORD OASA_KEY_ALIAS OASA_KEY_PASSWORD GOOGLE_MAPS_API_KEY; do
             [ -n "${!name}" ] || missing="$missing $name"
           done
           if [ -n "$missing" ]; then
-            echo "::error::Missing repository secret(s):$missing — see README > 'Release signing'."
+            echo "::error::Missing repository secret(s):$missing — see README > 'Release signing' and 'Google Maps key'."
             exit 1
           fi
 
       # `--clean` wipes android/, so the keystore has to be written afterwards.
       - name: Expo prebuild
         run: npx expo prebuild --platform android --clean
-        env:
-          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
 
       - name: Decode release keystore
         env:
