@@ -36,6 +36,7 @@ import { downloadAllOfflineData, removeAllOfflineData, type OfflineProgress } fr
 import { useLines } from '../../hooks';
 import { USER_MARKER_BASE64 } from '../../data/userMarker';
 import { useSettings } from '../settings/SettingsProvider';
+import { hapticImpact, hapticSelection } from '../../services/haptics';
 import FavoriteStopCard from '../../components/FavoriteStopCard';
 import SettingsModal from '../../components/SettingsModal';
 import { s } from './HomeScreen.styles';
@@ -146,6 +147,9 @@ export default function HomeScreen() {
   );
 
   const handleRemove = useCallback((fav: FavoriteLine) => {
+    // Fires on the gesture, not the confirmation: the user needs to know the
+    // long-press landed before the dialog animates in.
+    hapticImpact();
     Alert.alert('Remove Line', `Remove line ${fav.lineId} from saved lines?`, [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -164,6 +168,7 @@ export default function HomeScreen() {
   }, [router]);
 
   const handleRemoveStop = useCallback((stop: FavoriteStop) => {
+    hapticImpact();
     Alert.alert('Remove Stop', `Remove "${stop.stopName}" from saved stops?`, [
       { text: 'Cancel', style: 'cancel' },
       {
@@ -184,6 +189,7 @@ export default function HomeScreen() {
     next[i] = favoriteStops[j];
     next[j] = favoriteStops[i];
     setFavoriteStops(next);
+    hapticSelection();
     persistStopOrder(next);
   }, [favoriteStops]);
 

@@ -25,6 +25,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, radius, font, withAlpha } from '../theme';
 import { exportUserData, importUserData } from '../services/storage';
+import { hapticSuccess, hapticError } from '../services/haptics';
 import { USER_MARKER_BASE64 } from '../data/userMarker';
 import AccentPicker from './AccentPicker';
 import type { OfflineProgress } from '../services/offlineData';
@@ -71,7 +72,9 @@ export default function SettingsModal({
     try {
       const json = await exportUserData();
       await Share.share({ message: json, title: 'F*ck OASA — favourites backup' });
+      hapticSuccess();
     } catch {
+      hapticError();
       Alert.alert('Export failed', 'Could not produce a backup file.');
     }
   }, []);
@@ -84,11 +87,13 @@ export default function SettingsModal({
     const result = await importUserData(text);
     setBusy(false);
     if (!result.ok) {
+      hapticError();
       Alert.alert('Restore failed', result.error ?? "That doesn't look like a backup.");
       return;
     }
     setPasted('');
     setImporting(false);
+    hapticSuccess();
     onDataRestored();
     const { favorites, stops, stamps } = result.imported;
     Alert.alert(

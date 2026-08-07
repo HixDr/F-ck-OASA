@@ -49,6 +49,7 @@ import {
   subscribeAlertConfig,
   type AlertConfig,
 } from '../services/notifications';
+import { hapticSuccess, hapticError } from '../services/haptics';
 import { parseSchedule, athensNowMin, type LineSchedule } from '../utils/scheduleUtils';
 import ScheduleGrid from './ScheduleGrid';
 import AlertPickerModal from './AlertPickerModal';
@@ -479,9 +480,11 @@ function FavoriteStopCard({
     setArming(false);
 
     if (!result.ok) {
+      hapticError();
       setPickerError(result.message);
       return;
     }
+    hapticSuccess();
     setPickerLine(null);
     if (result.replaced) {
       // Only one watch exists app-wide, so this just cancelled someone else's.

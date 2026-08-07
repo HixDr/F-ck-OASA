@@ -11,6 +11,7 @@ import React, { useCallback, useRef, useState } from 'react';
 import { View, StyleSheet, type GestureResponderEvent } from 'react-native';
 import { spacing, radius } from '../theme';
 import { hslToHex, hexToHue, HUE_COLORS } from '../utils/colorUtils';
+import { hapticSelection } from '../services/haptics';
 
 interface Props {
   /** Committed color. */
@@ -38,20 +39,31 @@ export default function AccentPicker({ value, onCommit }: Props) {
     return hslToHex(hue, 70, 45);
   }, []);
 
+  // Mirrored in a ref so `release` can read the final value without doing
+  // work inside a state updater — updaters must be pure, and React is free to
+  // replay them, which would commit the accent colour twice.
+  const draftRef = useRef<string | null>(null);
+
   const track = useCallback((e: GestureResponderEvent) => {
     const hex = hueAt(e);
-    if (hex) setDraft(hex);
+    if (!hex) return;
+    draftRef.current = hex;
+    setDraft(hex);
   }, [hueAt]);
 
   const release = useCallback(() => {
-    setDraft((current) => {
-      if (current && current !== value) onCommit(current);
-      return null;
-    });
+    const current = draftRef.current;
+    draftRef.current = null;
+    setDraft(null);
+    if (current && current !== value) {
+      hapticSelection();
+      onCommit(current);
+    }
   }, [onCommit, value]);
 
   const nudge = useCallback((delta: number) => {
     const next = (hexToHue(value) + delta + 360) % 360;
+    hapticSelection();
     onCommit(hslToHex(next, 70, 45));
   }, [onCommit, value]);
 

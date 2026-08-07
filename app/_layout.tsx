@@ -21,6 +21,7 @@ import {
   TouchableOpacity,
 } from 'react-native';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import * as SplashScreen from 'expo-splash-screen';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, font, spacing, radius, withAlpha, HIT_SIZE } from '../src/theme';
 import { initStorage, prefetchFavoriteSchedules } from '../src/services/storage';
@@ -59,6 +60,16 @@ const queryClient = new QueryClient({
 });
 
 /* ── Boot ─────────────────────────────────────────────────────── */
+
+/**
+ * Hold the native splash until the JS boot gate has settled.
+ *
+ * Without this the splash tears down the instant RN's root view attaches —
+ * which is before any content exists — so every launch flashed a bare spinner
+ * on black. Called at module scope so it takes effect before the first render.
+ * It rejects harmlessly if the splash is already gone.
+ */
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 /** After this, tell the user something is wrong rather than spinning mutely. */
 const BOOT_SLOW_MS = 4_000;
@@ -498,6 +509,9 @@ export default function RootLayout() {
       if (cancelled || settled) return;
       settled = true;
       setReady(true);
+      // Hand off from the native splash only once there is real content to
+      // show, so there is no blank frame between the two.
+      SplashScreen.hideAsync().catch(() => {});
 
       // Everything below is best-effort and must never block or throw.
       initLocation()
