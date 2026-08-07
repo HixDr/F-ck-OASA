@@ -5,11 +5,15 @@
  * SettingsProvider re-rendered every consumer (i.e. every card on Home) and
  * queued an AsyncStorage write ~60 times a second; a two-second drag cost ~120
  * full re-renders. The value is committed once, on release.
+ *
+ * Everything that follows the finger — the indicator and the preview badge —
+ * therefore reads the local draft, not the provider. Nothing here may reach for
+ * `useSettings()`.
  */
 
 import React, { useCallback, useRef, useState } from 'react';
-import { View, StyleSheet, type GestureResponderEvent } from 'react-native';
-import { spacing, radius } from '../theme';
+import { View, Text, StyleSheet, type GestureResponderEvent } from 'react-native';
+import { spacing, radius, font, onAccent } from '../theme';
 import { hslToHex, hexToHue, HUE_COLORS } from '../utils/colorUtils';
 import { hapticSelection } from '../services/haptics';
 
@@ -22,6 +26,18 @@ interface Props {
 
 /** Keyboard / screen-reader step, in degrees. */
 const HUE_STEP = 15;
+
+/**
+ * Stand-in line number for the preview badge.
+ *
+ * A plain swatch answers "what colour is this?", which was never the question
+ * the user got wrong. The bar emits a fixed 45% lightness across all 360°, so
+ * the accent's luminance swings from near-black purple to near-white yellow
+ * while the thing it actually tints — a line badge — carries the app's most
+ * important label. Showing that badge, in the hue under the finger, is what
+ * makes the choice honest.
+ */
+const SAMPLE_LINE = '550';
 
 export default function AccentPicker({ value, onCommit }: Props) {
   const barRef = useRef<View>(null);
@@ -99,12 +115,26 @@ export default function AccentPicker({ value, onCommit }: Props) {
         ))}
         <View style={[s.indicator, { left: `${(hexToHue(shown) / 360) * 100}%` }]} />
       </View>
-      <View style={[s.preview, { backgroundColor: shown }]} />
+      {/* Reads `shown` — the local draft — so it repaints on every touch-move
+          without a provider write or a re-render outside this component. The
+          text colour is derived, never stored: `onAccent` keeps it above 4.5:1
+          at every hue, which is the whole point of showing it here. */}
+      <View
+        style={[s.preview, { backgroundColor: shown }]}
+        /* Purely a visual contrast check — a screen reader announcing a fake
+           line number here would be noise, and the bar above already carries
+           the label and the adjustable role. */
+        accessibilityElementsHidden
+        importantForAccessibility="no-hide-descendants"
+      >
+        <Text style={[s.previewText, s.num, { color: onAccent(shown) }]}>{SAMPLE_LINE}</Text>
+      </View>
     </View>
   );
 }
 
 const s = StyleSheet.create({
+  num: font.num,
   wrap: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -126,11 +156,18 @@ const s = StyleSheet.create({
     backgroundColor: '#FFF',
     borderRadius: 1.5,
   },
+  /* Deliberately the same geometry as the line badges in Search and on the
+     saved-stop cards. A preview in a different shape is a different test. */
   preview: {
-    width: 36,
+    minWidth: 44,
     height: 36,
-    borderRadius: 18,
-    borderWidth: 2,
-    borderColor: '#FFF',
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.sm + 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  previewText: {
+    fontSize: font.size.label,
+    fontWeight: '700',
   },
 });

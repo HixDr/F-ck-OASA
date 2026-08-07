@@ -20,10 +20,12 @@ import {
   StyleSheet,
   TouchableOpacity,
 } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as SplashScreen from 'expo-splash-screen';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, font, spacing, radius, withAlpha, HIT_SIZE } from '../src/theme';
+import { UndoHost } from '../src/ui/UndoBar';
 import { initStorage, prefetchFavoriteSchedules } from '../src/services/storage';
 import { initLocation, type LocationInit } from '../src/services/location';
 import { setupNetworkListener, useNetworkStatus } from '../src/services/network';
@@ -569,6 +571,11 @@ export default function RootLayout() {
   if (!ready) return <BootScreen slow={bootSlow} />;
 
   return (
+    /* Gesture root. react-native-gesture-handler was already a (transitive)
+       dependency but was never mounted, so any pan/long-press handler outside
+       React Navigation's own gestures silently did nothing on Android — no
+       error, just dead touches. Everything below can now use gestures. */
+    <GestureHandlerRootView style={rootStyles.flex}>
     <SettingsProvider>
     <QueryClientProvider client={queryClient}>
       <StatusBar style="light" backgroundColor={colors.bg} />
@@ -593,7 +600,13 @@ export default function RootLayout() {
       <TopBanner banner={banner} />
       <AlertPill />
       <UpdateOverlay progress={updateProgress} />
+      {/* Undo toasts. Last sibling so it draws above every other overlay, and
+          an overlay itself — it must never take part in layout. */}
+      <UndoHost />
     </QueryClientProvider>
     </SettingsProvider>
+    </GestureHandlerRootView>
   );
 }
+
+const rootStyles = StyleSheet.create({ flex: { flex: 1 } });

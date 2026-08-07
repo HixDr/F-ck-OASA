@@ -5,7 +5,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { View, Text, ScrollView, StyleSheet, type LayoutChangeEvent } from 'react-native';
-import { colors, radius, font } from '../theme';
+import { colors, radius, font, onAccent } from '../theme';
 import { athensNowMin, hhmmToMin } from '../utils/scheduleUtils';
 
 interface Props {
@@ -32,7 +32,17 @@ const TimeCell = React.memo(function TimeCell({
 }) {
   return (
     <View style={[s.time, isNext && { backgroundColor: accentColor }]} onLayout={onLayout}>
-      <Text style={[s.timeText, isPast && s.timePast, isNext && s.timeNext]}>{time}</Text>
+      <Text
+        style={[
+          s.timeText,
+          isPast && s.timePast,
+          /* The next departure is the one cell filled with the user's accent, so
+             it is the one cell whose ink cannot be assumed white. */
+          isNext && [s.timeNext, { color: onAccent(accentColor) }],
+        ]}
+      >
+        {time}
+      </Text>
     </View>
   );
 });
@@ -111,5 +121,6 @@ const s = StyleSheet.create({
     fontVariant: ['tabular-nums'],
   },
   timePast: { color: colors.textMuted, opacity: 0.5 },
-  timeNext: { color: '#FFF', fontWeight: '700' },
+  /** Color comes from `onAccent(accentColor)` inline. */
+  timeNext: { fontWeight: '700' },
 });

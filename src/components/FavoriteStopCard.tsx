@@ -18,14 +18,14 @@ import React, {
 import {
   View,
   Text,
-  TouchableOpacity,
-  ActivityIndicator,
   ScrollView,
   Alert as RNAlert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, spacing } from '../theme';
+import { colors, fontScaleCap, onAccent, radius } from '../theme';
+import Pressable from '../ui/Pressable';
+import { SkeletonBox } from '../ui/Skeleton';
 import { getRoutes, getDailySchedule, isUsableSchedule } from '../services/api';
 import {
   updateFavoriteStop,
@@ -62,6 +62,9 @@ const CLOCK_TICK_MS = 30_000;
 /** Past this age the live numbers stop being trustworthy and are dimmed. */
 const STALE_AFTER_MS = ARRIVALS_POLL_MS * 3;
 
+/** Descending label widths, so the placeholder rows do not read as a bar chart. */
+const SKELETON_WIDTHS = ['62%', '48%', '55%'] as const;
+
 const EMPTY_LABELS: ReadonlyMap<string, string> = new Map();
 const EMPTY_SCHEDULES: ReadonlyMap<string, LineSchedule> = new Map();
 const EMPTY_RAW_SCHEDULES: ReadonlyMap<string, RawSchedule> = new Map();
@@ -84,6 +87,38 @@ interface Props {
   canMoveUp?: boolean;
   canMoveDown?: boolean;
 }
+
+/* ── Cold start ──────────────────────────────────────────────── */
+
+/**
+ * Placeholder arrival rows.
+ *
+ * The stop's name and the card around it are already known on the first frame
+ * — only the arrivals are not. A spinner said "wait" and then let the card jump
+ * to whatever height the answer turned out to be; these say what is coming and
+ * are replaced in place.
+ *
+ * Rows rather than a whole-card placeholder: a placeholder standing in for the
+ * title and chrome would hide a stop name that is already known.
+ */
+const LoadingRows = React.memo(function LoadingRows({ stopName }: { stopName: string }) {
+  return (
+    <View accessible accessibilityLabel={`Loading arrivals for ${stopName}`}>
+      {SKELETON_WIDTHS.map((w, i) => (
+        <View key={i} style={s.skeletonRow}>
+          <SkeletonBox width={46} height={22} radius={radius.sm} />
+          {/* Percentage of the flexible middle, not of the row: measured
+              against the row it would overflow once the badge, the number
+              block and three gaps are subtracted from a 360dp screen. */}
+          <View style={s.skeletonGrow}>
+            <SkeletonBox width={w} height={12} />
+          </View>
+          <SkeletonBox width={40} height={26} radius={radius.sm} />
+        </View>
+      ))}
+    </View>
+  );
+});
 
 /* ── Freshness indicator ─────────────────────────────────────── */
 
@@ -181,24 +216,22 @@ const LineRow = React.memo(function LineRow({
 
   return (
     <View>
-      <TouchableOpacity
+      <Pressable
         style={s.lineRow}
-        activeOpacity={0.7}
         onPress={() => onPress(lineCode)}
         accessibilityRole="button"
         accessibilityLabel={`Line ${lineId}, ${label}, ${spoken}${stale ? ', data may be out of date' : ''}`}
         accessibilityHint="Opens the live map for this line"
       >
         <View style={[s.lineBadge, { backgroundColor: primaryColor }]}>
-          <Text style={s.lineBadgeText}>{lineId}</Text>
+          <Text style={[s.lineBadgeText, { color: onAccent(primaryColor) }]} maxFontSizeMultiplier={fontScaleCap.badge}>{lineId}</Text>
         </View>
 
         <View style={s.lineMain}>
           <Text style={s.lineDescr} numberOfLines={1}>{label}</Text>
           {hasTimetable && (
-            <TouchableOpacity
+            <Pressable
               style={s.schedPill}
-              activeOpacity={0.7}
               onPress={() => onToggleSchedule(lineCode)}
               accessibilityRole="button"
               accessibilityState={{ expanded: scheduleOpen }}
@@ -218,7 +251,7 @@ const LineRow = React.memo(function LineRow({
                   ? nextIsTomorrow ? `${nextDeparture} tomorrow` : nextDeparture
                   : 'Timetable'}
               </Text>
-            </TouchableOpacity>
+            </Pressable>
           )}
         </View>
 
@@ -226,16 +259,16 @@ const LineRow = React.memo(function LineRow({
           {arrivalText == null ? (
             <Text style={s.noArrival}>—</Text>
           ) : arrivalText === 'now' ? (
-            <Text style={[s.arrivalNow, { color }]}>now</Text>
+            <Text style={[s.arrivalNow, { color }]} maxFontSizeMultiplier={fontScaleCap.figure}>now</Text>
           ) : (
             <>
-              <Text style={[s.arrivalMin, { color }]}>{arrivalText}</Text>
+              <Text style={[s.arrivalMin, { color }]} maxFontSizeMultiplier={fontScaleCap.figure}>{arrivalText}</Text>
               <Text style={s.arrivalUnit}>min</Text>
             </>
           )}
         </View>
 
-        <TouchableOpacity
+        <Pressable
           style={s.bellBtn}
           onPress={() => onToggleAlert(lineCode)}
           accessibilityRole="switch"
@@ -248,8 +281,8 @@ const LineRow = React.memo(function LineRow({
             size={22}
             color={alertActive ? colors.warning : colors.textMuted}
           />
-        </TouchableOpacity>
-      </TouchableOpacity>
+        </Pressable>
+      </Pressable>
     </View>
   );
 });
@@ -535,8 +568,11 @@ function FavoriteStopCard({
         <Text style={s.stopName} numberOfLines={1} accessibilityRole="header">{stop.stopName}</Text>
 
         {editing ? (
+          /* The chevrons are not a leftover beside the drag gesture Home now
+             offers — they are the only way to reorder that a screen reader can
+             drive, since a lift-and-move has nothing to announce or activate. */
           <>
-            <TouchableOpacity
+            <Pressable
               style={s.headerBtn}
               disabled={!canMoveUp}
               onPress={() => onMoveUp?.(stop)}
@@ -545,8 +581,8 @@ function FavoriteStopCard({
               accessibilityState={{ disabled: !canMoveUp }}
             >
               <Ionicons name="chevron-up" size={20} color={canMoveUp ? colors.text : colors.border} />
-            </TouchableOpacity>
-            <TouchableOpacity
+            </Pressable>
+            <Pressable
               style={s.headerBtn}
               disabled={!canMoveDown}
               onPress={() => onMoveDown?.(stop)}
@@ -555,18 +591,18 @@ function FavoriteStopCard({
               accessibilityState={{ disabled: !canMoveDown }}
             >
               <Ionicons name="chevron-down" size={20} color={canMoveDown ? colors.text : colors.border} />
-            </TouchableOpacity>
-            <TouchableOpacity
+            </Pressable>
+            <Pressable
               style={s.headerBtn}
               onPress={() => onRemove(stop)}
               accessibilityRole="button"
               accessibilityLabel={`Remove ${stop.stopName} from saved stops`}
             >
               <Ionicons name="remove-circle" size={22} color={colors.danger} />
-            </TouchableOpacity>
+            </Pressable>
           </>
         ) : hasLines ? (
-          <TouchableOpacity
+          <Pressable
             style={s.headerBtn}
             onPress={() => setFiltering((v) => !v)}
             accessibilityRole="button"
@@ -578,7 +614,7 @@ function FavoriteStopCard({
               size={20}
               color={filtering ? primaryColor : colors.textMuted}
             />
-          </TouchableOpacity>
+          </Pressable>
         ) : null}
       </View>
 
@@ -588,10 +624,9 @@ function FavoriteStopCard({
           {allLineGroups!.map((line) => {
             const isVisible = !visibleSet || visibleSet.has(line.lineCode);
             return (
-              <TouchableOpacity
+              <Pressable
                 key={line.lineCode}
                 style={s.editRow}
-                activeOpacity={0.7}
                 onPress={() => toggleLineVisibility(line.lineCode)}
                 accessibilityRole="checkbox"
                 accessibilityState={{ checked: isVisible }}
@@ -603,12 +638,16 @@ function FavoriteStopCard({
                   color={isVisible ? primaryColor : colors.textMuted}
                 />
                 <View style={[s.lineBadge, { backgroundColor: isVisible ? primaryColor : colors.border }]}>
-                  <Text style={s.lineBadgeText}>{line.lineId}</Text>
+                  {/* A hidden line's badge is neutral grey, where the accent's
+                      own legible-text choice does not apply. */}
+                  <Text style={[s.lineBadgeText, { color: isVisible ? onAccent(primaryColor) : colors.text }]}>
+                    {line.lineId}
+                  </Text>
                 </View>
                 <Text style={[s.lineDescrMuted, { flex: 1 }, !isVisible && { opacity: 0.4 }]} numberOfLines={1}>
                   {line.lineDescrEng}
                 </Text>
-              </TouchableOpacity>
+              </Pressable>
             );
           })}
         </ScrollView>
@@ -620,7 +659,7 @@ function FavoriteStopCard({
             <Text style={s.errorText}>
               {isOnline ? "Couldn't load this stop." : 'No connection — arrivals unavailable.'}
             </Text>
-            <TouchableOpacity
+            <Pressable
               style={[s.retryBtn, { borderColor: primaryColor }]}
               onPress={handleRetry}
               accessibilityRole="button"
@@ -628,15 +667,10 @@ function FavoriteStopCard({
             >
               <Ionicons name="refresh" size={16} color={primaryColor} />
               <Text style={[s.retryText, { color: primaryColor }]}>Retry</Text>
-            </TouchableOpacity>
+            </Pressable>
           </View>
         ) : loading ? (
-          <ActivityIndicator
-            size="small"
-            color={primaryColor}
-            style={{ marginVertical: spacing.md }}
-            accessibilityLabel={`Loading arrivals for ${stop.stopName}`}
-          />
+          <LoadingRows stopName={stop.stopName} />
         ) : displayLines && displayLines.length > 0 ? (
           displayLines.map((line) => {
             const sched = schedules.get(line.lineCode);
@@ -694,14 +728,14 @@ function FavoriteStopCard({
           <Text style={s.alertBannerText} numberOfLines={1}>
             Alerting {orphanAlert.lineId} at {orphanAlert.thresholdMin} min
           </Text>
-          <TouchableOpacity
+          <Pressable
             style={s.alertBannerBtn}
             onPress={() => stopAlertWatch()}
             accessibilityRole="button"
             accessibilityLabel={`Stop the arrival alert for line ${orphanAlert.lineId}`}
           >
             <Text style={s.alertBannerBtnText}>Stop</Text>
-          </TouchableOpacity>
+          </Pressable>
         </View>
       )}
 

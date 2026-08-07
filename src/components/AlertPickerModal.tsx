@@ -8,13 +8,13 @@ import {
   View,
   Text,
   Modal,
-  Pressable,
-  TouchableOpacity,
+  Pressable as RNPressable,
   ActivityIndicator,
   StyleSheet,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { colors, spacing, radius, font, withAlpha } from '../theme';
+import { colors, spacing, radius, font, onAccent, withAlpha } from '../theme';
+import Pressable from '../ui/Pressable';
 
 /** Offered thresholds, in minutes. These replaced a free-text number pad:
  *  it accepted "" (→ NaN → the Start button silently did nothing while the
@@ -54,6 +54,10 @@ export default function AlertPickerModal({
 }: Props) {
   const selected = Number.parseInt(threshold, 10);
   const isValid = Number.isFinite(selected) && selected > 0;
+  /* The confirm button is filled with the user's accent, and the accent picker
+     spans every hue at a fixed lightness — a hardcoded white label sits at
+     ~2:1 on the yellows and greens it offers. */
+  const confirmInk = onAccent(accentColor);
 
   return (
     <Modal
@@ -67,7 +71,9 @@ export default function AlertPickerModal({
         {/* Backdrop is a sibling, not a wrapper: wrapping the dialog in a
             touchable made a stray tap inside it dismiss, and made a screen
             reader announce the whole dialog as a button. */}
-        <Pressable
+        {/* Bare RN Pressable: the shared one's press-scale and haptic are wrong
+            on a full-screen dismiss target. */}
+        <RNPressable
           style={StyleSheet.absoluteFill}
           onPress={onCancel}
           accessibilityRole="button"
@@ -82,13 +88,12 @@ export default function AlertPickerModal({
             {THRESHOLD_OPTIONS.map((min) => {
               const active = selected === min;
               return (
-                <TouchableOpacity
+                <Pressable
                   key={min}
                   style={[
                     s.chip,
                     active && { borderColor: accentColor, backgroundColor: withAlpha(accentColor, 0.18) },
                   ]}
-                  activeOpacity={0.7}
                   onPress={() => onChangeThreshold(String(min))}
                   accessibilityRole="radio"
                   accessibilityState={{ selected: active }}
@@ -96,7 +101,7 @@ export default function AlertPickerModal({
                 >
                   <Text style={[s.chipNum, active && { color: colors.text }]}>{min}</Text>
                   <Text style={[s.chipUnit, active && { color: colors.text }]}>min away</Text>
-                </TouchableOpacity>
+                </Pressable>
               );
             })}
           </View>
@@ -109,15 +114,15 @@ export default function AlertPickerModal({
           )}
 
           <View style={s.btns}>
-            <TouchableOpacity
+            <Pressable
               style={s.cancelBtn}
               onPress={onCancel}
               accessibilityRole="button"
               accessibilityLabel="Cancel"
             >
               <Text style={s.cancelText}>Cancel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
+            </Pressable>
+            <Pressable
               style={[s.confirmBtn, { backgroundColor: accentColor }, (!isValid || busy) && s.disabled]}
               disabled={!isValid || busy}
               onPress={onConfirm}
@@ -126,14 +131,16 @@ export default function AlertPickerModal({
               accessibilityLabel={`${confirmLabel} alert`}
             >
               {busy ? (
-                <ActivityIndicator size="small" color="#FFF" />
+                <ActivityIndicator size="small" color={confirmInk} />
               ) : (
                 <>
-                  <Ionicons name="notifications" size={16} color="#FFF" />
-                  <Text style={s.confirmText}>{errorMessage ? 'Try again' : confirmLabel}</Text>
+                  <Ionicons name="notifications" size={16} color={confirmInk} />
+                  <Text style={[s.confirmText, { color: confirmInk }]}>
+                    {errorMessage ? 'Try again' : confirmLabel}
+                  </Text>
                 </>
               )}
-            </TouchableOpacity>
+            </Pressable>
           </View>
         </View>
       </View>
@@ -241,8 +248,8 @@ const s = StyleSheet.create({
     borderRadius: radius.sm,
   },
   disabled: { opacity: 0.4 },
+  /* Color comes from `onAccent(accentColor)` inline. */
   confirmText: {
-    color: '#FFF',
     fontSize: font.size.sm,
     fontWeight: '700',
   },

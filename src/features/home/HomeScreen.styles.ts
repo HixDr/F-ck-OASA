@@ -34,7 +34,7 @@ export const s = StyleSheet.create({
    *  on the cards below are. Color is applied inline from the accent setting. */
   logo: {
     flex: 1,
-    fontSize: font.size.lg,
+    fontSize: font.size.title,
     fontWeight: '800',
     letterSpacing: -0.2,
   },
@@ -47,46 +47,61 @@ export const s = StyleSheet.create({
     marginRight: -spacing.sm,
   },
   editBtnText: {
-    fontSize: font.size.sm,
+    fontSize: font.size.label,
     fontWeight: '700',
+  },
+
+  /* ── Entry points ──────────────────────────────────────────────
+     Search used to share a row with Nearby and Go To on `flex: 1`, which left
+     the app's primary entry point about 130dp on a 360dp screen — and less
+     than that once the system font scale grew the two labels beside it. It
+     owns a full-width row now; the two destinations share the row below. */
+  searchBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    paddingHorizontal: spacing.md,
+    minHeight: HIT_SIZE,
+    marginBottom: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderTopColor: colors.edge,
+    overflow: 'hidden',
+  },
+  searchBtnText: {
+    flex: 1,
+    color: colors.textMuted,
+    fontSize: font.size.body,
+    marginLeft: spacing.sm,
   },
   actionRow: {
     flexDirection: 'row',
     gap: spacing.sm,
   },
-  searchBtn: {
+  /** Nearby / Go To. Equal flex so neither can crowd the other out, and
+   *  vertical padding rather than a fixed height so a wrapped label at a large
+   *  font scale grows the button instead of being clipped by it. */
+  actionBtn: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
+    justifyContent: 'center',
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
-    paddingHorizontal: spacing.md,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: spacing.sm,
     minHeight: HIT_SIZE,
     borderWidth: 1,
     borderColor: colors.border,
-    overflow: 'hidden',
-  },
-  searchBtnText: {
-    color: colors.textMuted,
-    fontSize: font.size.md,
-    marginLeft: spacing.sm,
-    flexShrink: 1,
-  },
-  nearbyBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.surface,
-    borderRadius: radius.lg,
-    paddingHorizontal: spacing.md,
-    minHeight: HIT_SIZE,
-    borderWidth: 1,
-    borderColor: colors.border,
+    borderTopColor: colors.edge,
     gap: spacing.xs,
   },
-  nearbyBtnText: {
+  actionBtnText: {
     color: colors.text,
-    fontSize: font.size.md,
+    fontSize: font.size.body,
     fontWeight: '600',
+    flexShrink: 1,
   },
   /** Download progress stays visible after the settings sheet is dismissed. */
   headerProgress: {
@@ -97,7 +112,7 @@ export const s = StyleSheet.create({
   },
   headerProgressText: {
     color: colors.textMuted,
-    fontSize: font.size.xs,
+    fontSize: font.size.micro,
   },
   headerProgressTrack: {
     flex: 1,
@@ -113,6 +128,12 @@ export const s = StyleSheet.create({
   list: {
     paddingHorizontal: spacing.lg,
   },
+  /** Wrapper the drag gesture transforms. `elevation` is animated from 0, and
+   *  is what keeps a lifted card painted over the cells it travels across —
+   *  sibling FlatList cells otherwise paint in list order. */
+  stopCell: {
+    elevation: 0,
+  },
   lineGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -126,6 +147,7 @@ export const s = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: colors.border,
+    borderTopColor: colors.edge,
     minHeight: HIT_SIZE,
     minWidth: HIT_SIZE,
     paddingHorizontal: spacing.xs,
@@ -138,9 +160,12 @@ export const s = StyleSheet.create({
     minWidth: 44,
     alignItems: 'center',
   },
+  /** Color comes from `onAccent(primaryColor)` inline: a hardcoded white sits
+   *  at ~2:1 on the yellow and green accents the picker offers. */
   lineBadgeText: {
-    color: '#FFFFFF',
-    fontSize: font.size.sm,
+    ...font.num,
+    color: colors.text,
+    fontSize: font.size.label,
     fontWeight: '700',
   },
   /** Remove badge shown on a saved line while Home is in edit mode. */
@@ -159,13 +184,13 @@ export const s = StyleSheet.create({
   },
   emptyTitle: {
     color: colors.text,
-    fontSize: font.size.lg,
+    fontSize: font.size.title,
     fontWeight: '700',
     marginTop: spacing.md,
   },
   emptySubtitle: {
     color: colors.textMuted,
-    fontSize: font.size.sm,
+    fontSize: font.size.label,
     textAlign: 'center',
     marginTop: spacing.xs,
     marginBottom: spacing.lg,
@@ -183,8 +208,7 @@ export const s = StyleSheet.create({
     borderRadius: radius.lg,
   },
   emptyPrimaryText: {
-    color: '#FFF',
-    fontSize: font.size.md,
+    fontSize: font.size.body,
     fontWeight: '700',
   },
   emptySecondaryBtn: {
@@ -196,22 +220,35 @@ export const s = StyleSheet.create({
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
+    borderTopColor: colors.edge,
     backgroundColor: colors.card,
   },
   emptySecondaryText: {
     color: colors.text,
-    fontSize: font.size.md,
+    fontSize: font.size.body,
     fontWeight: '600',
   },
-  stopsSection: {
-    marginBottom: spacing.sm,
+  /** Section title and, beside it, the only hint that a card can be picked up.
+   *  A long press advertises nothing on its own. */
+  sectionRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: spacing.sm,
   },
   sectionLabel: {
     color: colors.textMuted,
-    fontSize: font.size.xs,
+    fontSize: font.size.micro,
     fontWeight: '700',
     textTransform: 'uppercase',
     letterSpacing: 0.5,
+    marginBottom: spacing.xs,
+  },
+  sectionHint: {
+    flex: 1,
+    color: colors.textMuted,
+    fontSize: font.size.micro,
+    textAlign: 'right',
+    opacity: 0.7,
     marginBottom: spacing.xs,
   },
 });
