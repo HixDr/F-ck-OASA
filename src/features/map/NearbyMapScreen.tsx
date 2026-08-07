@@ -26,7 +26,7 @@ import {
   getStamps, addStamp, removeStamp, getToggle, setToggle,
   isFavoriteStop, addFavoriteStop, removeFavoriteStop,
 } from '../../services/storage';
-import { GOOGLE_DARK_STYLE } from '../../theme/googleMapStyle';
+import { GOOGLE_DARK_STYLE, GOOGLE_MAP_ID } from '../../theme/googleMapStyle';
 import { METRO_POLYLINES } from '../../data/metroPolylines';
 import { mapStyles as ms } from '../../theme/mapStyles';
 import { buildLineGroups, coarseGrid, describeApiError } from './mapUtils';
@@ -274,6 +274,7 @@ export default function NearbyMapScreen() {
         style={ms.map}
         initialRegion={initialRegion}
         customMapStyle={GOOGLE_DARK_STYLE}
+        googleMapId={GOOGLE_MAP_ID}
         showsUserLocation={false}
         showsMyLocationButton={false}
         showsCompass={false}

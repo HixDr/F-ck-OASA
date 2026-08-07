@@ -59,6 +59,21 @@ if (!googleMapsApiKey) {
   );
 }
 
+/**
+ * Cloud-based map style ID.
+ *
+ * The new Google Maps renderer (maps_core) ignores the legacy JSON
+ * `customMapStyle` prop, which is why the dark theme silently stopped applying
+ * and the app started drawing a stark white map inside an OLED-black UI. Cloud
+ * styling is the supported replacement: the style lives against this Map ID in
+ * the Cloud Console rather than in the bundle.
+ *
+ * Not a secret — a Map ID is a public identifier and is visible in tile
+ * requests — so it has a committed default and does not gate the build the way
+ * the API key does. Override per-environment with GOOGLE_MAPS_MAP_ID.
+ */
+const googleMapsMapId = process.env.GOOGLE_MAPS_MAP_ID || 'e5d6168c8f0f60a4fe8c9747';
+
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
   name: "F*ck OASA",
@@ -130,6 +145,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   ],
   extra: {
     router: {},
+    googleMapsMapId,
     eas: {
       projectId: "4fab4ff0-2a2e-4acb-ba11-d827c6c0ad26",
     },

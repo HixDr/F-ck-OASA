@@ -38,7 +38,7 @@ import {
 import { useNetworkStatus } from '../../services/network';
 import { startAlertWatch, stopAlertWatch, subscribeAlertConfig, type AlertConfig } from '../../services/notifications';
 import { useSettings } from '../settings/SettingsProvider';
-import { GOOGLE_DARK_STYLE } from '../../theme/googleMapStyle';
+import { GOOGLE_DARK_STYLE, GOOGLE_MAP_ID } from '../../theme/googleMapStyle';
 import { METRO_POLYLINES } from '../../data/metroPolylines';
 import { mapStyles as ms } from '../../theme/mapStyles';
 import {
@@ -613,6 +613,7 @@ export default function LiveMapScreen() {
         style={ms.map}
         initialRegion={initialRegion}
         customMapStyle={GOOGLE_DARK_STYLE}
+        googleMapId={GOOGLE_MAP_ID}
         showsUserLocation={false}
         showsMyLocationButton={false}
         showsCompass={false}

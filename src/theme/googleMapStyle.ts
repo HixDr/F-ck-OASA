@@ -3,6 +3,27 @@
  * Transit POIs hidden (we draw our own markers).
  */
 
+import Constants from 'expo-constants';
+
+/**
+ * Cloud-styling Map ID, or undefined when none is configured.
+ *
+ * Pass this to `<MapView googleMapId={...}>` alongside `customMapStyle`. The
+ * two are not redundant — they cover different renderers:
+ *
+ *  - New renderer (maps_core, current Play Services): ignores `customMapStyle`
+ *    entirely and honours only the cloud style attached to this Map ID.
+ *  - Legacy renderer (older devices): ignores `googleMapId` and honours
+ *    `customMapStyle` below.
+ *
+ * Must be `undefined` rather than `''` when unset — an empty string is still a
+ * Map ID as far as the SDK is concerned, and setting one disables JSON styling
+ * without supplying a cloud style, which would strand old devices on the
+ * default light basemap.
+ */
+export const GOOGLE_MAP_ID: string | undefined =
+  (Constants.expoConfig?.extra?.googleMapsMapId as string | undefined) || undefined;
+
 export const GOOGLE_DARK_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#212121' }] },
   { elementType: 'labels.icon', stylers: [{ visibility: 'on' }] },
