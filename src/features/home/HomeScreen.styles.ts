@@ -1,30 +1,54 @@
 import { StyleSheet } from 'react-native';
-import { colors, spacing, radius, font } from '../../theme';
+import { colors, spacing, radius, font, HIT_SIZE } from '../../theme';
 
 export const s = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: colors.bg,
-    paddingTop: 56,
+    // Top padding comes from useSafeAreaInsets(): a hardcoded 56 put the logo
+    // under the Dynamic Island on any device with a taller inset.
   },
   header: {
     paddingHorizontal: spacing.lg,
-    paddingBottom: spacing.md,
+    paddingBottom: spacing.sm,
   },
   logoRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: spacing.md,
+    marginBottom: spacing.sm,
     gap: spacing.sm,
+  },
+  /** 32×32 artwork inside a 44×44 target. */
+  avatarBtn: {
+    width: HIT_SIZE,
+    height: HIT_SIZE,
+    marginLeft: -spacing.xs,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   logoIcon: {
     width: 32,
     height: 32,
   },
+  /** Deliberately no longer the largest type on screen — the arrival minutes
+   *  on the cards below are. Color is applied inline from the accent setting. */
   logo: {
-    fontSize: font.size.xxl,
+    flex: 1,
+    fontSize: font.size.lg,
     fontWeight: '800',
-    color: colors.primaryLight,
+    letterSpacing: -0.2,
+  },
+  editBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    minHeight: HIT_SIZE,
+    paddingHorizontal: spacing.sm,
+    marginRight: -spacing.sm,
+  },
+  editBtnText: {
+    fontSize: font.size.sm,
+    fontWeight: '700',
   },
   actionRow: {
     flexDirection: 'row',
@@ -37,7 +61,7 @@ export const s = StyleSheet.create({
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 4,
+    minHeight: HIT_SIZE,
     borderWidth: 1,
     borderColor: colors.border,
     overflow: 'hidden',
@@ -54,7 +78,7 @@ export const s = StyleSheet.create({
     backgroundColor: colors.surface,
     borderRadius: radius.lg,
     paddingHorizontal: spacing.md,
-    paddingVertical: spacing.sm + 4,
+    minHeight: HIT_SIZE,
     borderWidth: 1,
     borderColor: colors.border,
     gap: spacing.xs,
@@ -64,17 +88,30 @@ export const s = StyleSheet.create({
     fontSize: font.size.md,
     fontWeight: '600',
   },
+  /** Download progress stays visible after the settings sheet is dismissed. */
+  headerProgress: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    marginTop: spacing.sm,
+  },
+  headerProgressText: {
+    color: colors.textMuted,
+    fontSize: font.size.xs,
+  },
+  headerProgressTrack: {
+    flex: 1,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.border,
+    overflow: 'hidden',
+  },
+  headerProgressFill: {
+    height: '100%',
+    borderRadius: 2,
+  },
   list: {
     paddingHorizontal: spacing.lg,
-    paddingBottom: 120,
-  },
-  card: {
-    backgroundColor: colors.card,
-    borderRadius: radius.lg,
-    padding: spacing.md,
-    marginBottom: spacing.sm,
-    borderWidth: 1,
-    borderColor: colors.border,
   },
   lineGrid: {
     flexDirection: 'row',
@@ -89,10 +126,9 @@ export const s = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: colors.border,
-  },
-  cardHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    minHeight: HIT_SIZE,
+    minWidth: HIT_SIZE,
+    paddingHorizontal: spacing.xs,
   },
   lineBadge: {
     backgroundColor: colors.primary, // overridden inline
@@ -107,11 +143,13 @@ export const s = StyleSheet.create({
     fontSize: font.size.sm,
     fontWeight: '700',
   },
-  cardTitle: {
-    flex: 1,
-    color: colors.text,
-    fontSize: font.size.md,
-    fontWeight: '500',
+  /** Remove badge shown on a saved line while Home is in edit mode. */
+  lineRemove: {
+    position: 'absolute',
+    top: -6,
+    right: -6,
+    borderRadius: 10,
+    backgroundColor: colors.bg,
   },
   empty: {
     flex: 1,
@@ -120,9 +158,9 @@ export const s = StyleSheet.create({
     paddingHorizontal: spacing.xl,
   },
   emptyTitle: {
-    color: colors.textMuted,
+    color: colors.text,
     fontSize: font.size.lg,
-    fontWeight: '600',
+    fontWeight: '700',
     marginTop: spacing.md,
   },
   emptySubtitle: {
@@ -130,7 +168,40 @@ export const s = StyleSheet.create({
     fontSize: font.size.sm,
     textAlign: 'center',
     marginTop: spacing.xs,
-    opacity: 0.7,
+    marginBottom: spacing.lg,
+  },
+  emptyActions: {
+    alignSelf: 'stretch',
+    gap: spacing.sm,
+  },
+  emptyPrimaryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    minHeight: HIT_SIZE + 4,
+    borderRadius: radius.lg,
+  },
+  emptyPrimaryText: {
+    color: '#FFF',
+    fontSize: font.size.md,
+    fontWeight: '700',
+  },
+  emptySecondaryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+    minHeight: HIT_SIZE + 4,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.card,
+  },
+  emptySecondaryText: {
+    color: colors.text,
+    fontSize: font.size.md,
+    fontWeight: '600',
   },
   stopsSection: {
     marginBottom: spacing.sm,
@@ -142,140 +213,5 @@ export const s = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 0.5,
     marginBottom: spacing.xs,
-  },
-  sectionHint: {
-    color: colors.textMuted,
-    fontSize: font.size.xs - 1,
-    opacity: 0.5,
-    marginBottom: spacing.xs,
-  },
-  modalOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  modalCard: {
-    backgroundColor: colors.surface,
-    borderRadius: radius.xl,
-    padding: spacing.lg,
-    width: '80%',
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  modalTitle: {
-    color: colors.text,
-    fontSize: font.size.lg,
-    fontWeight: '700',
-    marginBottom: spacing.md,
-  },
-  modalLabel: {
-    color: colors.textMuted,
-    fontSize: font.size.sm,
-    fontWeight: '600',
-    marginBottom: spacing.sm,
-  },
-  iconRow: {
-    flexDirection: 'row',
-    gap: spacing.md,
-  },
-  iconOption: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: spacing.sm,
-    paddingHorizontal: spacing.md,
-    borderRadius: radius.md,
-    borderWidth: 2,
-    borderColor: colors.border,
-    gap: 4,
-    minWidth: 72,
-  },
-  iconOptionText: {
-    color: colors.textMuted,
-    fontSize: font.size.xs,
-    fontWeight: '600',
-  },
-  hueBarWrap: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-  },
-  hueBar: {
-    flex: 1,
-    height: 32,
-    borderRadius: radius.sm,
-    overflow: 'hidden',
-    flexDirection: 'row',
-  },
-  hueIndicator: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    width: 3,
-    marginLeft: -1.5,
-    backgroundColor: '#FFF',
-    borderRadius: 1.5,
-  },
-  huePreview: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    borderWidth: 2,
-    borderColor: '#FFF',
-  },
-  modalDone: {
-    marginTop: spacing.lg,
-    borderRadius: radius.md,
-    paddingVertical: spacing.sm + 2,
-    alignItems: 'center',
-  },
-  modalDoneText: {
-    color: '#FFF',
-    fontSize: font.size.md,
-    fontWeight: '700',
-  },
-  offlineSection: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: spacing.sm,
-  },
-  offlineStatus: {
-    color: colors.textMuted,
-    fontSize: font.size.xs,
-    flex: 1,
-  },
-  offlineClearBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  offlineClearText: {
-    fontSize: font.size.xs,
-    fontWeight: '600',
-  },
-  offlineDownloadBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: spacing.sm,
-    borderWidth: 1,
-    borderRadius: radius.md,
-    paddingVertical: spacing.sm,
-  },
-  offlineDownloadText: {
-    fontSize: font.size.sm,
-    fontWeight: '600',
-  },
-  progressBarBg: {
-    flex: 1,
-    height: 6,
-    backgroundColor: colors.border,
-    borderRadius: 3,
-    overflow: 'hidden',
-  },
-  progressBarFill: {
-    height: '100%',
-    borderRadius: 3,
   },
 });

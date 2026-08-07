@@ -99,8 +99,13 @@ export function useArrivals(stopCode: string | undefined, enabled = true) {
     staleTime: 5_000,
     retry: 1,
     // Keep showing the last known arrivals while a refetch is in flight
-    // instead of flashing a spinner every 15 seconds.
-    placeholderData: (prev) => prev,
+    // instead of flashing a spinner every 15 seconds — but ONLY for the same
+    // stop. A bare `(prev) => prev` also survives a queryKey change, which
+    // means selecting a new stop briefly renders the PREVIOUS stop's arrival
+    // times under the new stop's name. Wrong numbers presented confidently is
+    // the one failure this app cannot afford.
+    placeholderData: (prev, prevQuery) =>
+      prevQuery?.queryKey?.[1] === stopCode ? prev : undefined,
   });
 }
 
@@ -113,7 +118,10 @@ export function useBusLocations(routeCode: string | undefined, enabled = true) {
     refetchInterval: BUS_POLL_MS,
     refetchIntervalInBackground: false,
     retry: 0,
-    placeholderData: (prev) => prev,
+    // Same-route only — see the note on useArrivals. Showing one route's
+    // vehicles on another route's map is worse than showing none.
+    placeholderData: (prev, prevQuery) =>
+      prevQuery?.queryKey?.[1] === routeCode ? prev : undefined,
   });
 }
 

@@ -3,9 +3,10 @@
  * Shared by LiveMapScreen and FavoriteStopCard.
  */
 
-import React, { useRef } from 'react';
-import { View, Text, ScrollView, StyleSheet } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import { View, Text, ScrollView, StyleSheet, type LayoutChangeEvent } from 'react-native';
 import { colors, radius, font } from '../theme';
+import { athensNowMin, hhmmToMin } from '../utils/scheduleUtils';
 
 interface Props {
   times: string[];
@@ -14,9 +15,59 @@ interface Props {
   maxHeight?: number;
 }
 
-export default function ScheduleGrid({ times, nextDeparture, accentColor, maxHeight = 160 }: Props) {
+/** One departure cell. Memoized: a busy line has 100-150 of these and the
+ *  parent re-renders on every arrival poll. */
+const TimeCell = React.memo(function TimeCell({
+  time,
+  isPast,
+  isNext,
+  accentColor,
+  onLayout,
+}: {
+  time: string;
+  isPast: boolean;
+  isNext: boolean;
+  accentColor: string;
+  onLayout?: (e: LayoutChangeEvent) => void;
+}) {
+  return (
+    <View style={[s.time, isNext && { backgroundColor: accentColor }]} onLayout={onLayout}>
+      <Text style={[s.timeText, isPast && s.timePast, isNext && s.timeNext]}>{time}</Text>
+    </View>
+  );
+});
+
+function ScheduleGrid({ times, nextDeparture, accentColor, maxHeight = 160 }: Props) {
   const scrollRef = useRef<ScrollView>(null);
-  const nextY = useRef(0);
+  /** The auto-scroll is a one-shot. `onLayout` fires on every layout pass, so
+   *  without this the grid yanked itself back to "next" whenever the parent
+   *  re-rendered — which, with a 15s arrival poll, meant mid-scroll. */
+  const hasScrolled = useRef(false);
+
+  // A new timetable (different line, or the day rolled over) earns one more
+  // scroll to the new "next".
+  useEffect(() => {
+    hasScrolled.current = false;
+  }, [times, nextDeparture]);
+
+  const onNextLayout = useCallback((e: LayoutChangeEvent) => {
+    if (hasScrolled.current) return;
+    hasScrolled.current = true;
+    const y = e.nativeEvent.layout.y;
+    scrollRef.current?.scrollTo({ y: Math.max(0, y - 40), animated: false });
+  }, []);
+
+  // "Now" is the same for all 150 cells — it used to be a `new Date()` per cell
+  // inside the map. Recomputed only when the timetable itself changes; a cell
+  // slipping into the past a minute early is not worth a per-second re-render.
+  const cells = useMemo(() => {
+    const nowMin = athensNowMin();
+    return times.map((t) => ({
+      time: t,
+      isPast: (hhmmToMin(t) ?? 0) < nowMin,
+      isNext: t === nextDeparture,
+    }));
+  }, [times, nextDeparture]);
 
   return (
     <ScrollView
@@ -24,31 +75,25 @@ export default function ScheduleGrid({ times, nextDeparture, accentColor, maxHei
       style={[s.scroll, { maxHeight }]}
       showsVerticalScrollIndicator={false}
       nestedScrollEnabled
+      accessibilityLabel={`Timetable, ${times.length} departures`}
     >
       <View style={s.grid}>
-        {times.map((t, i) => {
-          const now = new Date();
-          const nowMin = now.getHours() * 60 + now.getMinutes();
-          const [h, m] = t.split(':').map(Number);
-          const isPast = h * 60 + m < nowMin;
-          const isNext = t === nextDeparture;
-          return (
-            <View
-              key={i}
-              style={[s.time, isNext && { backgroundColor: accentColor }]}
-              onLayout={isNext ? (e) => {
-                nextY.current = e.nativeEvent.layout.y;
-                scrollRef.current?.scrollTo({ y: Math.max(0, nextY.current - 40), animated: false });
-              } : undefined}
-            >
-              <Text style={[s.timeText, isPast && s.timePast, isNext && s.timeNext]}>{t}</Text>
-            </View>
-          );
-        })}
+        {cells.map((c, i) => (
+          <TimeCell
+            key={`${c.time}-${i}`}
+            time={c.time}
+            isPast={c.isPast}
+            isNext={c.isNext}
+            accentColor={accentColor}
+            onLayout={c.isNext ? onNextLayout : undefined}
+          />
+        ))}
       </View>
     </ScrollView>
   );
 }
+
+export default React.memo(ScheduleGrid);
 
 const s = StyleSheet.create({
   scroll: { maxHeight: 160 },
@@ -57,7 +102,7 @@ const s = StyleSheet.create({
     paddingHorizontal: 5,
     paddingVertical: 2,
     borderRadius: radius.sm,
-    backgroundColor: colors.card,
+    backgroundColor: colors.surface,
   },
   timeText: {
     color: colors.text,

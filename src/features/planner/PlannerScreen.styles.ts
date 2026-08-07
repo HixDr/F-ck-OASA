@@ -44,6 +44,30 @@ export const s = StyleSheet.create({
     color: colors.textMuted,
     fontSize: font.size.sm,
   },
+  loadingHint: {
+    color: colors.textMuted,
+    fontSize: font.size.xs,
+    opacity: 0.7,
+  },
+  cancelBtn: {
+    marginTop: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: radius.md,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.xs + 2,
+  },
+  cancelBtnText: {
+    color: colors.textMuted,
+    fontSize: font.size.sm,
+    fontWeight: '600',
+  },
+  emptyTitle: {
+    color: colors.text,
+    fontSize: font.size.md,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
   resultScroll: {
     flex: 1,
     paddingBottom: spacing.xl,
@@ -123,6 +147,45 @@ export const s = StyleSheet.create({
     color: colors.textMuted,
     fontSize: font.size.xs,
     fontWeight: '600',
+  },
+  waitWarnText: {
+    color: colors.warning,
+    fontSize: font.size.xs,
+    fontWeight: '700',
+  },
+  cardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: spacing.xs,
+  },
+  confChip: {
+    borderRadius: radius.sm,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 1,
+    borderWidth: 1,
+  },
+  confChipText: {
+    fontSize: font.size.xs - 1,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  sourceNote: {
+    color: colors.textMuted,
+    fontSize: font.size.xs - 1,
+    fontStyle: 'italic',
+  },
+  cardSpinnerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    marginTop: spacing.xs,
+  },
+  cardErrorText: {
+    color: colors.danger,
+    fontSize: font.size.xs,
+    marginTop: spacing.xs,
   },
   totalRow: {
     flexDirection: 'row',

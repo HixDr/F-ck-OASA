@@ -3,7 +3,7 @@
  * Wraps the app so any screen can read/write these preferences reactively.
  */
 
-import React, { createContext, useContext, useState, useCallback } from 'react';
+import React, { createContext, useContext, useState, useCallback, useMemo } from 'react';
 import { getSetting, setSetting } from '../../services/storage';
 
 /* ── Defaults ────────────────────────────────────────────────── */
@@ -25,6 +25,12 @@ export const COLOR_PRESETS = [
 
 interface SettingsContextValue {
   primaryColor: string;
+  /**
+   * Commit a new accent color. Every consumer of this context re-renders and
+   * the value is serialized to storage, so this is a *commit*, not a preview —
+   * continuous gestures (the hue slider) must keep their in-flight value in
+   * local state and call this once, on release.
+   */
   setPrimaryColor: (hex: string) => void;
   iconStyle: string; // 'cat' | 'pin'
   setIconStyle: (style: string) => void;
@@ -42,20 +48,25 @@ export function SettingsProvider({ children }: { children: React.ReactNode }) {
   const [iconStyle, _setIcon] = useState(() => getSetting('iconStyle', DEFAULT_ICON));
 
   const setPrimaryColor = useCallback((hex: string) => {
-    _setPrimary(hex);
+    // Cheap guard: the color picker can land on the value we already hold, and
+    // an identical write would still re-render every consumer.
+    _setPrimary((prev) => (prev === hex ? prev : hex));
     setSetting('primaryColor', hex);
   }, []);
 
   const setIconStyle = useCallback((style: string) => {
-    _setIcon(style);
+    _setIcon((prev) => (prev === style ? prev : style));
     setSetting('iconStyle', style);
   }, []);
 
-  return (
-    <SettingsContext.Provider value={{ primaryColor, setPrimaryColor, iconStyle, setIconStyle }}>
-      {children}
-    </SettingsContext.Provider>
+  // Without this the context value is a fresh object on every provider render,
+  // which re-renders every consumer (i.e. every card on Home) for nothing.
+  const value = useMemo(
+    () => ({ primaryColor, setPrimaryColor, iconStyle, setIconStyle }),
+    [primaryColor, setPrimaryColor, iconStyle, setIconStyle],
   );
+
+  return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>;
 }
 
 export function useSettings() {

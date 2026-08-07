@@ -16,5 +16,5 @@ export function useInitialRegion(delta = 0.05) {
       latitudeDelta: delta,
       longitudeDelta: delta,
     };
-  }, []);
+  }, [delta]);
 }

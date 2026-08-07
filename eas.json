@@ -1,18 +1,22 @@
 {
+  "//": "EAS is not used by CI — .github/workflows/build-release.yml prebuilds and runs gradle directly. This file only exists so an ad-hoc `eas build` produces the same artifact. appVersionSource is 'local' because app.config.ts derives versionCode from package.json; 'remote' + autoIncrement silently fought that and shipped a different code than the one in the repo.",
   "cli": {
     "version": ">= 18.0.1",
-    "appVersionSource": "remote"
+    "appVersionSource": "local"
   },
   "build": {
     "development": {
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "android": { "buildType": "apk" }
     },
     "preview": {
-      "distribution": "internal"
+      "distribution": "internal",
+      "android": { "buildType": "apk" }
     },
     "production": {
-      "autoIncrement": true
+      "distribution": "internal",
+      "android": { "buildType": "apk" }
     }
   },
   "submit": {

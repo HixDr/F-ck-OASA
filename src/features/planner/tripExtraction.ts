@@ -1,115 +1,131 @@
 /**
  * Trip Extraction — traces RAPTOR connections backward to build TripOption[].
  *
- * Pass 1: Standard RAPTOR extraction — traces the single best connection per stop.
- * Pass 2: Route enumeration — tries ALL routes serving each dest stop as the
- *         final leg, catching near-optimal alternatives that RAPTOR pruned.
- * Pass 3: Direct 2-leg feeder enumeration — bypasses RAPTOR connections entirely.
+ * Pass 1: Standard RAPTOR extraction — the single best connection per dest stop.
+ * Pass 2: Route enumeration — tries every route serving each dest stop as the
+ *         final leg, catching near-optimal alternatives RAPTOR pruned.
+ *
+ * There used to be a Pass 3 ("direct 2-leg feeder enumeration"). It was
+ * 80-95% of the planner's runtime: a five-deep loop nest over 0.5-2M tuples,
+ * with its memoisation placed *after* the cutoff `continue` so every tuple that
+ * failed the cutoff re-ran the whole evaluation — including a linear
+ * `originStops.find()` up to 25 times per tuple. It also duplicated Pass 2,
+ * whose dedup was broken (Pass 1 poisoned the shared key set). Pass 2 is fixed
+ * below and Pass 3 is gone; its coverage is subsumed.
  */
 
-import { haversine } from '../map/busInterpolation';
+import { haversineM } from '../../utils/geo';
 import type { OasaLine } from '../../types';
 import type {
   RaptorIndex,
   RaptorResult,
   RawLeg,
-  TripOption,
   TripLeg,
+  TripOption,
+  WalkStop,
 } from './types';
-import { WALK_SPEED_M_PER_MIN, INF, UNKNOWN_WAIT_MIN } from './constants';
+import {
+  WALK_SPEED_M_PER_MIN,
+  TRANSFER_FLAT_PENALTY_MIN,
+  INF,
+} from './constants';
+
+export interface Pin {
+  lat: number;
+  lng: number;
+}
 
 /**
  * Trace backward from a stop through kConnections to recover prior legs.
- * Returns the legs and accumulated transfer walk times, or null on failure.
+ *
+ * Transfer hops are dropped here rather than accumulated: every walk in the
+ * finished trip is re-derived from the actual stop coordinates in
+ * `buildTripOption`, so the card's segments always add up to its own total.
  */
 function traceLegsBack(
   startStop: string,
   startRound: number,
   result: RaptorResult,
   idx: RaptorIndex,
-): { legs: RawLeg[]; transferWalks: number[] } | null {
+): RawLeg[] | null {
   const legs: RawLeg[] = [];
-  const transferWalks: number[] = [];
   let curStop = startStop;
   let curRound = startRound;
+  let guard = 0;
 
-  while (curRound >= 1) {
+  while (curRound >= 1 && guard++ < 16) {
     const conn = result.kConnections[curRound].get(curStop);
     if (!conn) break;
 
     if (conn.type === 'transfer') {
-      transferWalks.push(conn.walkMin);
+      // Stay in the same round — the ride that reached fromStop is also here.
       curStop = conn.fromStop;
-      // Stay in same round — the ride that got us to fromStop is also in this round
       continue;
     }
 
-    // It's a ride
     const path = idx.routePaths.get(conn.routeCode);
     const times = idx.travelTimesMin.get(conn.routeCode);
     if (!path || !times) return null;
 
-    const rideMin = times[conn.alightIdx] - times[conn.boardIdx];
     legs.unshift({
       routeCode: conn.routeCode,
       boardStop: conn.boardStop,
       boardIdx: conn.boardIdx,
       alightStop: path[conn.alightIdx],
       alightIdx: conn.alightIdx,
-      rideMin,
+      rideMin: times[conn.alightIdx] - times[conn.boardIdx],
     });
 
     curStop = conn.boardStop;
     curRound -= 1;
   }
 
-  return legs.length > 0 ? { legs, transferWalks } : null;
+  return legs.length > 0 ? legs : null;
+}
+
+function walkMinBetween(aLat: number, aLng: number, bLat: number, bLng: number): number {
+  return Math.round(haversineM(aLat, aLng, bLat, bLng) / WALK_SPEED_M_PER_MIN);
 }
 
 /**
- * Build a TripOption from raw legs, transfer walks, and origin/dest context.
+ * Build a TripOption from raw legs.
+ *
+ * Every walk is measured from the thing the user actually stands at — the pins
+ * and the real stop coordinates. The old code measured the first walk from the
+ * nearest *origin stop* to the board stop, dropping the pin→origin-stop leg
+ * entirely (routinely ~13 minutes) and then ranked the trip as if it were free.
+ *
+ * Times are left unset here: the single forward clock in scoring.ts owns them.
  */
 function buildTripOption(
   rawLegs: RawLeg[],
-  transferWalks: number[],
-  dest: { code: string; walkMin: number },
-  originStops: Array<{ code: string; walkMin: number; distM: number }>,
+  originPin: Pin,
+  destPin: Pin,
   idx: RaptorIndex,
   linesMap: Map<string, OasaLine>,
 ): TripOption | null {
   if (rawLegs.length === 0) return null;
 
-  // Find which origin stop was used (the boardStop of the first leg)
-  const firstBoardCode = rawLegs[0].boardStop;
-  const originMatch = originStops.find((o) => o.code === firstBoardCode);
-  // If firstBoardCode isn't directly an origin stop, it might be reachable
-  // via walk from an origin stop. Find the closest origin.
-  const walkToOriginMin = originMatch
-    ? originMatch.walkMin
-    : (() => {
-        const info = idx.stopInfo.get(firstBoardCode);
-        if (!info) return 15; // fallback
-        let best = INF;
-        for (const o of originStops) {
-          const oInfo = idx.stopInfo.get(o.code);
-          if (!oInfo) continue;
-          const d = haversine({ lat: oInfo.lat, lng: oInfo.lng }, { lat: info.lat, lng: info.lng });
-          const wk = d / WALK_SPEED_M_PER_MIN;
-          if (wk < best) best = wk;
-        }
-        return best < INF ? best : 15;
-      })();
-
-  // Build TripLeg objects
   const tripLegs: TripLeg[] = [];
+  let prevAlight: { lat: number; lng: number } | null = null;
+  let transferTotal = 0;
+
   for (const leg of rawLegs) {
     const meta = idx.routeMeta.get(leg.routeCode);
     const lineCode = meta?.LineCode ?? '';
     const lineInfo = linesMap.get(lineCode);
     const boardInfo = idx.stopInfo.get(leg.boardStop);
     const alightInfo = idx.stopInfo.get(leg.alightStop);
+    if (!boardInfo || !alightInfo) return null;
     const times = idx.travelTimesMin.get(leg.routeCode);
-    const boardOffset = times ? times[leg.boardIdx] - times[0] : 0;
+
+    const transferWalkMin = prevAlight
+      ? Math.max(
+          TRANSFER_FLAT_PENALTY_MIN,
+          walkMinBetween(prevAlight.lat, prevAlight.lng, boardInfo.lat, boardInfo.lng),
+        )
+      : 0;
+    transferTotal += transferWalkMin;
 
     tripLegs.push({
       lineCode,
@@ -118,51 +134,85 @@ function buildTripOption(
       routeCode: leg.routeCode,
       boardStop: {
         code: leg.boardStop,
-        name: boardInfo?.name ?? leg.boardStop,
-        lat: boardInfo?.lat ?? 0,
-        lng: boardInfo?.lng ?? 0,
+        name: boardInfo.name,
+        lat: boardInfo.lat,
+        lng: boardInfo.lng,
         orderInRoute: leg.boardIdx,
       },
       alightStop: {
         code: leg.alightStop,
-        name: alightInfo?.name ?? leg.alightStop,
-        lat: alightInfo?.lat ?? 0,
-        lng: alightInfo?.lng ?? 0,
+        name: alightInfo.name,
+        lat: alightInfo.lat,
+        lng: alightInfo.lng,
         orderInRoute: leg.alightIdx,
       },
       stopCount: leg.alightIdx - leg.boardIdx,
+      rawRideMin: Math.max(1, leg.rideMin),
+      liveRideMin: null,
       rideTimeMin: Math.max(1, Math.round(leg.rideMin)),
+      rideSource: 'estimate',
+      rideLowMin: Math.max(1, Math.round(leg.rideMin)),
+      rideHighMin: Math.max(1, Math.round(leg.rideMin)),
       waitTimeMin: null,
       waitSource: null,
       scheduledTime: null,
+      noServiceToday: false,
+      transferWalkMin,
+      terminusOffsetMin: times ? Math.round(times[leg.boardIdx] - times[0]) : 0,
+      boardMin: null,
+      alightMin: null,
       boardTimeStr: null,
       alightTimeStr: null,
-      boardOffsetMin: Math.round(boardOffset),
     });
+
+    prevAlight = { lat: alightInfo.lat, lng: alightInfo.lng };
   }
 
-  const totalTransferWalk = transferWalks.reduce((a, b) => a + b, 0);
-  const walkFromDestMin = dest.walkMin;
-  const totalRideMin = tripLegs.reduce((sum, l) => sum + l.rideTimeMin, 0);
-  const totalWaitEstimate = tripLegs.length * UNKNOWN_WAIT_MIN;
-
-  const total = Math.round(
-    walkToOriginMin + totalWaitEstimate + totalRideMin + totalTransferWalk + walkFromDestMin,
-  );
-
-  const firstBoard = tripLegs[0].boardStop;
-  const lastAlight = tripLegs[tripLegs.length - 1].alightStop;
+  const first = tripLegs[0];
+  const last = tripLegs[tripLegs.length - 1];
 
   return {
     legs: tripLegs,
-    walkToOriginMin: Math.round(walkToOriginMin),
-    walkFromDestMin: Math.round(walkFromDestMin),
-    transferWalkMin: Math.round(totalTransferWalk),
-    totalTimeMin: total,
+    walkToOriginMin: walkMinBetween(
+      originPin.lat, originPin.lng, first.boardStop.lat, first.boardStop.lng,
+    ),
+    walkFromDestMin: walkMinBetween(
+      last.alightStop.lat, last.alightStop.lng, destPin.lat, destPin.lng,
+    ),
+    transferWalkMin: transferTotal,
+    departMin: 0,
+    arriveMin: 0,
+    arriveLowMin: 0,
+    arriveHighMin: 0,
+    totalTimeMin: 0,
+    totalLowMin: 0,
+    totalHighMin: 0,
     arrivalTimeStr: null,
-    originStop: { code: firstBoard.code, name: firstBoard.name, lat: firstBoard.lat, lng: firstBoard.lng },
-    destStop: { code: lastAlight.code, name: lastAlight.name, lat: lastAlight.lat, lng: lastAlight.lng },
+    confidence: 'estimated',
+    noService: false,
+    maxWaitMin: 0,
+    originStop: {
+      code: first.boardStop.code, name: first.boardStop.name,
+      lat: first.boardStop.lat, lng: first.boardStop.lng,
+    },
+    destStop: {
+      code: last.alightStop.code, name: last.alightStop.name,
+      lat: last.alightStop.lat, lng: last.alightStop.lng,
+    },
+    id: tripKey(tripLegs),
   };
+}
+
+/**
+ * Identity of an itinerary. Route codes alone collapsed two materially
+ * different trips — different board stops, or a route that passes the
+ * destination area twice — into one, and then kept whichever the stale
+ * pre-multiplier total happened to favour.
+ */
+function tripKey(legs: TripLeg[]): string {
+  let k = '';
+  for (const l of legs) k += `${l.routeCode}@${l.boardStop.code}>${l.alightStop.code}|`;
+  return k;
 }
 
 /**
@@ -170,174 +220,91 @@ function buildTripOption(
  */
 export function extractTrips(
   result: RaptorResult,
-  destStops: Array<{ code: string; walkMin: number; distM: number }>,
-  originStops: Array<{ code: string; walkMin: number; distM: number }>,
+  destStops: WalkStop[],
+  originPin: Pin,
+  destPin: Pin,
   idx: RaptorIndex,
   linesMap: Map<string, OasaLine>,
 ): TripOption[] {
   const trips: TripOption[] = [];
-  const seenKeys = new Set<string>();
+  const seen = new Set<string>();
+
+  const emit = (legs: RawLeg[]): void => {
+    const trip = buildTripOption(legs, originPin, destPin, idx, linesMap);
+    if (!trip) return;
+    if (seen.has(trip.id)) return;
+    seen.add(trip.id);
+    trips.push(trip);
+  };
 
   // === Pass 1: Standard RAPTOR extraction ===
   for (const dest of destStops) {
     for (let k = 1; k < result.kArrivals.length; k++) {
-      const arrTime = result.kArrivals[k].get(dest.code);
-      if (arrTime === undefined || arrTime >= INF) continue;
-
-      const traced = traceLegsBack(dest.code, k, result, idx);
-      if (!traced) continue;
-
-      const key = traced.legs.map((l) => l.routeCode).join('|');
-      seenKeys.add(key);
-
-      const trip = buildTripOption(traced.legs, traced.transferWalks, dest, originStops, idx, linesMap);
-      if (trip) trips.push(trip);
+      if (result.kArrivals[k].get(dest.code) === undefined) continue;
+      const legs = traceLegsBack(dest.code, k, result, idx);
+      if (legs) emit(legs);
     }
   }
 
   // === Pass 2: Route enumeration at dest stops ===
+  //
+  // The dedup key now includes board and alight stops, so Pass 1 no longer
+  // blanket-disables Pass 2 by claiming every route code it emitted — which was
+  // exactly where the alternatives lived.
   const ENUM_RELAX_MIN = 20;
 
   for (const dest of destStops) {
     const routesHere = idx.routesAtStop.get(dest.code);
     if (!routesHere) continue;
+    const bestAtDest = result.bestArrivals.get(dest.code) ?? INF;
 
     for (const routeCode of routesHere) {
       const path = idx.routePaths.get(routeCode);
       const times = idx.travelTimesMin.get(routeCode);
-      const destIdxInRoute = idx.routeStopIndex.get(routeCode)?.get(dest.code);
-      if (!path || !times || destIdxInRoute === undefined || destIdxInRoute === 0) continue;
+      if (!path || !times) continue;
 
-      for (let k = 1; k < result.kArrivals.length; k++) {
-        const prevRoundArrivals = result.kArrivals[k - 1];
-        if (!prevRoundArrivals) continue;
+      // Every position at which this route reaches the destination stop, not
+      // only the first — a route that loops past the destination twice offers
+      // two genuinely different itineraries.
+      for (let destIdx = 1; destIdx < path.length; destIdx++) {
+        if (path[destIdx] !== dest.code) continue;
 
-        let bestBoardStop: string | null = null;
-        let bestBoardIdx = -1;
-        let bestDepartTime = INF;
+        for (let k = 1; k < result.kArrivals.length; k++) {
+          const prevRound = result.kArrivals[k - 1];
+          if (!prevRound || prevRound.size === 0) continue;
 
-        for (let si = 0; si < destIdxInRoute; si++) {
-          const stopCode = path[si];
-          const prevArr = prevRoundArrivals.get(stopCode);
-          if (prevArr !== undefined && prevArr < INF && prevArr < bestDepartTime) {
-            bestDepartTime = prevArr;
-            bestBoardStop = stopCode;
-            bestBoardIdx = si;
-          }
-        }
-
-        if (bestBoardStop === null) continue;
-
-        const rideMin = times[destIdxInRoute] - times[bestBoardIdx];
-        const arriveAtDest = bestDepartTime + rideMin;
-
-        const bestAtDest = result.bestArrivals.get(dest.code) ?? INF;
-        if (arriveAtDest > bestAtDest + ENUM_RELAX_MIN) continue;
-
-        const lastLeg: RawLeg = {
-          routeCode,
-          boardStop: bestBoardStop,
-          boardIdx: bestBoardIdx,
-          alightStop: dest.code,
-          alightIdx: destIdxInRoute,
-          rideMin,
-        };
-
-        let allLegs: RawLeg[];
-        let transferWalks: number[] = [];
-
-        if (k === 1) {
-          allLegs = [lastLeg];
-        } else {
-          const traced = traceLegsBack(bestBoardStop, k - 1, result, idx);
-          if (!traced) continue;
-          allLegs = [...traced.legs, lastLeg];
-          transferWalks = traced.transferWalks;
-        }
-
-        const key = allLegs.map((l) => l.routeCode).join('|');
-        if (seenKeys.has(key)) continue;
-        seenKeys.add(key);
-
-        const trip = buildTripOption(allLegs, transferWalks, dest, originStops, idx, linesMap);
-        if (trip) trips.push(trip);
-      }
-    }
-  }
-
-  // === Pass 3: Direct 2-leg feeder enumeration ===
-  const bestTotalSoFar = trips.length > 0 ? Math.min(...trips.map((t) => t.totalTimeMin)) : INF;
-  const pass3Cutoff = Math.max(bestTotalSoFar * 1.8, bestTotalSoFar + 30);
-
-  for (const dest of destStops) {
-    const routesHere = idx.routesAtStop.get(dest.code);
-    if (!routesHere) continue;
-
-    for (const r2Code of routesHere) {
-      const r2Path = idx.routePaths.get(r2Code);
-      const r2Times = idx.travelTimesMin.get(r2Code);
-      const destIdx2 = idx.routeStopIndex.get(r2Code)?.get(dest.code);
-      if (!r2Path || !r2Times || destIdx2 === undefined || destIdx2 === 0) continue;
-
-      for (let bi = 0; bi < destIdx2; bi++) {
-        const r2BoardStop = r2Path[bi];
-
-        const feedSources = new Map<string, number>();
-        feedSources.set(r2BoardStop, 0);
-        const xfers = idx.transfers.get(r2BoardStop);
-        if (xfers) {
-          for (const { target, walkMin: xw } of xfers) feedSources.set(target, xw);
-        }
-
-        for (const [alightStop1, xferWalk] of feedSources) {
-          const r1Codes = idx.routesAtStop.get(alightStop1);
-          if (!r1Codes) continue;
-
-          for (const r1Code of r1Codes) {
-            if (r1Code === r2Code) continue;
-
-            const combo = r1Code + '|' + r2Code;
-            if (seenKeys.has(combo)) continue;
-
-            const r1Path = idx.routePaths.get(r1Code);
-            const r1Times = idx.travelTimesMin.get(r1Code);
-            const alightIdx1 = idx.routeStopIndex.get(r1Code)?.get(alightStop1);
-            if (!r1Path || !r1Times || alightIdx1 === undefined || alightIdx1 === 0) continue;
-
-            let bestOrigIdx = -1;
-            let bestOrigStop: string | null = null;
-            let bestOrigWalk = INF;
-            for (let oi = 0; oi < alightIdx1; oi++) {
-              const oMatch = originStops.find((o) => o.code === r1Path[oi]);
-              if (oMatch && oMatch.walkMin < bestOrigWalk) {
-                bestOrigWalk = oMatch.walkMin;
-                bestOrigStop = r1Path[oi];
-                bestOrigIdx = oi;
-              }
+          // Same boarding rule as the scan: minimise prevArrival − times[si].
+          let boardStop: string | null = null;
+          let boardIdx = -1;
+          let bestOffset = INF;
+          for (let si = 0; si < destIdx; si++) {
+            const prevArr = prevRound.get(path[si]);
+            if (prevArr === undefined || prevArr >= INF) continue;
+            const offset = prevArr - times[si];
+            if (boardStop === null || offset < bestOffset) {
+              bestOffset = offset;
+              boardStop = path[si];
+              boardIdx = si;
             }
-            if (!bestOrigStop) continue;
+          }
+          if (boardStop === null) continue;
 
-            const ride1 = r1Times[alightIdx1] - r1Times[bestOrigIdx];
-            const ride2 = r2Times[destIdx2] - r2Times[bi];
-            const totalEst = Math.round(
-              bestOrigWalk + UNKNOWN_WAIT_MIN + ride1 + xferWalk +
-              UNKNOWN_WAIT_MIN + ride2 + dest.walkMin,
-            );
+          if (bestOffset + times[destIdx] > bestAtDest + ENUM_RELAX_MIN) continue;
 
-            if (totalEst > pass3Cutoff) continue;
+          const lastLeg: RawLeg = {
+            routeCode,
+            boardStop,
+            boardIdx,
+            alightStop: dest.code,
+            alightIdx: destIdx,
+            rideMin: times[destIdx] - times[boardIdx],
+          };
 
-            seenKeys.add(combo);
-
-            const legs: RawLeg[] = [
-              { routeCode: r1Code, boardStop: bestOrigStop, boardIdx: bestOrigIdx,
-                alightStop: alightStop1, alightIdx: alightIdx1, rideMin: ride1 },
-              { routeCode: r2Code, boardStop: r2BoardStop, boardIdx: bi,
-                alightStop: dest.code, alightIdx: destIdx2, rideMin: ride2 },
-            ];
-            const xferWalks = xferWalk > 0 ? [xferWalk] : [];
-
-            const trip = buildTripOption(legs, xferWalks, dest, originStops, idx, linesMap);
-            if (trip) trips.push(trip);
+          if (k === 1) {
+            emit([lastLeg]);
+          } else {
+            const prior = traceLegsBack(boardStop, k - 1, result, idx);
+            if (prior) emit([...prior, lastLeg]);
           }
         }
       }

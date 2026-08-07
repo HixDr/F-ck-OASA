@@ -31,6 +31,12 @@ export const USER_AGENT = 'OASALive/1.0 (personal telematics client)';
  *  timeout by default, so without this a half-open socket hangs forever. */
 export const DEFAULT_TIMEOUT_MS = 12_000;
 
+/** Per-request options accepted by every endpoint wrapper. */
+export interface RequestOpts {
+  signal?: AbortSignal;
+  timeoutMs?: number;
+}
+
 /**
  * HTTPS is the only base we start from. As of 2026-08 the plaintext host
  * does not respond at all (connect hangs until timeout), so probing it at
@@ -187,14 +193,15 @@ async function api<T>(
 /* ── Static / Reference Endpoints ────────────────────────────── */
 
 /** All 464 bus/trolley lines (~150 KB). */
-export const getLines = () => api<OasaLine[]>('webGetLines');
+export const getLines = (opts: RequestOpts = {}) =>
+  api<OasaLine[]>('webGetLines', {}, 'array', opts);
 
 /** Routes (directions) for a specific line. */
-export const getRoutes = (lineCode: string, opts: { signal?: AbortSignal } = {}) =>
+export const getRoutes = (lineCode: string, opts: RequestOpts = {}) =>
   api<OasaRoute[]>('webGetRoutes', { p1: lineCode }, 'array', opts);
 
 /** Ordered stops for a specific route. */
-export const getStops = (routeCode: string, opts: { signal?: AbortSignal } = {}) =>
+export const getStops = (routeCode: string, opts: RequestOpts = {}) =>
   api<OasaStop[]>('webGetStops', { p1: routeCode }, 'array', opts);
 
 /** Detailed route path (road-following polyline points) + stops.
@@ -203,7 +210,7 @@ export const getStops = (routeCode: string, opts: { signal?: AbortSignal } = {})
  *  line and the bus interpolator must be fed the same source. */
 export async function getRouteDetails(
   routeCode: string,
-  opts: { signal?: AbortSignal } = {},
+  opts: RequestOpts = {},
 ): Promise<{ lat: number; lng: number }[]> {
   const data = await api<{ details: OasaRouteDetail[] }>(
     'webGetRoutesDetailsAndStops',
@@ -224,7 +231,7 @@ export async function getRouteDetails(
  *  (board index < alight index, cumulative travel times) depends on this. */
 export async function getRouteStopsOrdered(
   routeCode: string,
-  opts: { signal?: AbortSignal } = {},
+  opts: RequestOpts = {},
 ): Promise<OasaStop[]> {
   const data = await api<{ stops: OasaStop[] }>(
     'webGetRoutesDetailsAndStops',
@@ -239,7 +246,7 @@ export async function getRouteStopsOrdered(
 }
 
 /** Routes serving a specific stop. */
-export const getRoutesForStop = (stopCode: string, opts: { signal?: AbortSignal } = {}) =>
+export const getRoutesForStop = (stopCode: string, opts: RequestOpts = {}) =>
   api<OasaRoute[]>('webRoutesForStop', { p1: stopCode }, 'array', opts);
 
 /* ── Real-Time Endpoints ─────────────────────────────────────── */
@@ -250,7 +257,7 @@ export const getRoutesForStop = (stopCode: string, opts: { signal?: AbortSignal 
  *  next". The same veh_code appears at every stop further along its route with
  *  a monotonically increasing btime2, out to a horizon of ~40 minutes. That
  *  makes live, traffic-aware ride times derivable — see rideTimeFromArrivals. */
-export const getStopArrivals = (stopCode: string, opts: { signal?: AbortSignal } = {}) =>
+export const getStopArrivals = (stopCode: string, opts: RequestOpts = {}) =>
   api<OasaArrival[]>('getStopArrivals', { p1: stopCode }, 'array', opts);
 
 /**
@@ -298,27 +305,28 @@ export function rideTimeFromArrivals(
 }
 
 /** Live vehicle positions on a route. */
-export const getBusLocations = (routeCode: string, opts: { signal?: AbortSignal } = {}) =>
+export const getBusLocations = (routeCode: string, opts: RequestOpts = {}) =>
   api<OasaBusLocation[]>('getBusLocation', { p1: routeCode }, 'array', opts);
 
 /* ── Geo Endpoints ───────────────────────────────────────────── */
 
 /** Closest stops to a lat/lng coordinate. */
-export const getClosestStops = (lat: number, lng: number) =>
-  api<OasaNearbyStop[]>('getClosestStops', { p1: String(lat), p2: String(lng) });
+export const getClosestStops = (lat: number, lng: number, opts: RequestOpts = {}) =>
+  api<OasaNearbyStop[]>('getClosestStops', { p1: String(lat), p2: String(lng) }, 'array', opts);
 
 /* ── Bulk / Offline Endpoints (undocumented) ─────────────────── */
 
 /** All 9,000+ stops in the network — single call, ~2 MB JSON.
  *  Uses the undocumented `getAllStops` action (no params).
  *  Gets a longer timeout: the payload alone takes ~1s on a good connection. */
-export const getAllStopsBulk = (opts: { signal?: AbortSignal } = {}) =>
+export const getAllStopsBulk = (opts: RequestOpts = {}) =>
   api<OasaBulkStop[]>('getAllStops', {}, 'array', { ...opts, timeoutMs: 45_000 });
 
 /* ── Schedule Endpoints ──────────────────────────────────────── */
 
 /** All lines with MasterLine info (ml_code, sdc_code mapping). */
-export const getMLInfo = () => api<OasaMLInfo[]>('webGetLinesWithMLInfo');
+export const getMLInfo = (opts: RequestOpts = {}) =>
+  api<OasaMLInfo[]>('webGetLinesWithMLInfo', {}, 'array', opts);
 
 /** Schedule departure times for a line (needs mlCode + sdcCode). */
 export const getSchedLines = (mlCode: string, sdcCode: string, lineCode: string) =>
@@ -327,7 +335,7 @@ export const getSchedLines = (mlCode: string, sdcCode: string, lineCode: string)
 /** Today's schedule for a line — auto-selects weekday/Saturday/Sunday.
  *  Throws (rather than yielding []) on an empty or malformed body, so callers
  *  never persist a blank schedule over a good cached one. */
-export const getDailySchedule = (lineCode: string, opts: { signal?: AbortSignal } = {}) =>
+export const getDailySchedule = (lineCode: string, opts: RequestOpts = {}) =>
   api<OasaDailySchedule>('getDailySchedule', { line_code: lineCode }, 'object', opts);
 
 /** True when a daily schedule actually carries departures. Guard every cache
@@ -359,7 +367,7 @@ export async function getWalkingRoute(
   fromLng: number,
   toLat: number,
   toLng: number,
-  opts: { signal?: AbortSignal } = {},
+  opts: RequestOpts = {},
 ): Promise<WalkingRoute | null> {
   try {
     const body = JSON.stringify({

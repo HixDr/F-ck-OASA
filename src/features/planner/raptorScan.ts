@@ -6,10 +6,20 @@ import type { RaptorIndex, RaptorResult, Connection } from './types';
 import { MAX_ROUNDS, INF } from './constants';
 
 /**
- * Run the RAPTOR scan.
- * @param originStops - stops near origin with walk times
- * @param nowMin - current time in minutes since midnight
- * @param idx - the pre-built RAPTOR index
+ * Best boarding position on a route, given how early we can be at each stop.
+ *
+ * Arrival at stop `si` when boarding at `bi` is
+ *     prevArrival(bi) + times[si] − times[bi]
+ * so the quantity to minimise is `prevArrival(bi) − times[bi]`, NOT
+ * `prevArrival(bi)` on its own. Minimising the arrival alone always boards at
+ * whichever stop the walk reaches first, which on any route that passes the
+ * origin twice — every circular line, and every line whose outbound and inbound
+ * halves both pass the user — means boarding at the *upstream* position and
+ * riding the entire loop. Worked case: origin 240 m from stop P (walk 3,
+ * times[3]=6) and 800 m from stop Q (walk 10, times[20]=42), destination at
+ * times[30]=60. Boarding P arrives at 57; boarding Q arrives at 28. The old
+ * rule chose P because 3 < 10 — 29 minutes wrong, and it sent the user to the
+ * wrong stop.
  */
 export function raptorScan(
   originStops: Array<{ code: string; walkMin: number }>,
@@ -20,7 +30,8 @@ export function raptorScan(
   const kArrivals: Array<Map<string, number>> = [];
   const kConnections: Array<Map<string, Connection>> = [];
 
-  // Initialize round 0 with walking from origin to nearby stops
+  // Round 0 — walk from the origin pin to nearby stops, then propagate one
+  // walking transfer so stops just outside the candidate radius are reachable.
   const round0 = new Map<string, number>();
   const conn0 = new Map<string, Connection>();
   let markedStops = new Set<string>();
@@ -31,17 +42,14 @@ export function raptorScan(
     bestArrivals.set(code, arrTime);
     markedStops.add(code);
 
-    // Also propagate walking transfers from origin stops
     const xfers = idx.transfers.get(code);
-    if (xfers) {
-      for (const { target, walkMin: xWalk } of xfers) {
-        const xTime = nowMin + walkMin + xWalk;
-        const prev = round0.get(target) ?? INF;
-        if (xTime < prev) {
-          round0.set(target, xTime);
-          bestArrivals.set(target, Math.min(bestArrivals.get(target) ?? INF, xTime));
-          markedStops.add(target);
-        }
+    if (!xfers) continue;
+    for (const { target, walkMin: xWalk } of xfers) {
+      const xTime = arrTime + xWalk;
+      if (xTime < (round0.get(target) ?? INF)) {
+        round0.set(target, xTime);
+        bestArrivals.set(target, Math.min(bestArrivals.get(target) ?? INF, xTime));
+        markedStops.add(target);
       }
     }
   }
@@ -49,13 +57,14 @@ export function raptorScan(
   kArrivals.push(round0);
   kConnections.push(conn0);
 
-  // RAPTOR rounds
   for (let k = 1; k <= MAX_ROUNDS; k++) {
     const arrivals = new Map<string, number>();
     const connections = new Map<string, Connection>();
+    const prevArrivals = kArrivals[k - 1];
 
-    // Get queue: routes passing through marked stops → earliest marked stop
-    const queue = new Map<string, { routeCode: string; fromIdx: number }>();
+    // Queue: every route through a marked stop, entered at its earliest
+    // marked position.
+    const queue = new Map<string, number>();
     for (const stopCode of markedStops) {
       const routes = idx.routesAtStop.get(stopCode);
       if (!routes) continue;
@@ -63,81 +72,64 @@ export function raptorScan(
         const stopIdx = idx.routeStopIndex.get(routeCode)?.get(stopCode);
         if (stopIdx === undefined) continue;
         const existing = queue.get(routeCode);
-        if (!existing || stopIdx < existing.fromIdx) {
-          queue.set(routeCode, { routeCode, fromIdx: stopIdx });
-        }
+        if (existing === undefined || stopIdx < existing) queue.set(routeCode, stopIdx);
       }
     }
 
-    // Scan each queued route
-    for (const [routeCode, { fromIdx }] of queue) {
+    for (const [routeCode, fromIdx] of queue) {
       const path = idx.routePaths.get(routeCode);
       const times = idx.travelTimesMin.get(routeCode);
       if (!path || !times) continue;
 
-      // Walk the route forward from the earliest marked stop.
-      // At each stop, check if we can board (have a previous arrival),
-      // then propagate to subsequent stops using travel times.
       let boardStop: string | null = null;
       let boardIdx = -1;
-      let boardTime = INF; // time we depart from boardStop
+      // prevArrival(boardIdx) − times[boardIdx]; adding times[si] gives the
+      // arrival at si, so a smaller offset dominates at *every* later stop.
+      let bestOffset = INF;
 
       for (let si = fromIdx; si < path.length; si++) {
         const stopCode = path[si];
 
-        // Can we board here? Check if previous round has an arrival.
-        const prevArrival = kArrivals[k - 1].get(stopCode) ?? INF;
-        if (prevArrival < INF) {
-          // Board here if it gives an earlier departure
-          const departTime = prevArrival; // board immediately on arrival
-          if (boardStop === null || departTime < boardTime) {
+        const prevArrival = prevArrivals.get(stopCode);
+        if (prevArrival !== undefined && prevArrival < INF) {
+          const offset = prevArrival - times[si];
+          if (boardStop === null || offset < bestOffset) {
             boardStop = stopCode;
             boardIdx = si;
-            boardTime = departTime;
+            bestOffset = offset;
           }
         }
 
-        // If we're on a bus, check if alighting here improves arrival
-        if (boardStop !== null) {
-          const rideMin = times[si] - times[boardIdx];
-          const arriveTime = boardTime + rideMin;
+        if (boardStop === null || si === boardIdx) continue;
 
-          const prevBest = bestArrivals.get(stopCode) ?? INF;
-          if (arriveTime < prevBest && si !== boardIdx) {
-            arrivals.set(stopCode, arriveTime);
-            bestArrivals.set(stopCode, arriveTime);
-            connections.set(stopCode, {
-              type: 'ride',
-              routeCode,
-              boardStop: boardStop,
-              boardIdx,
-              alightIdx: si,
-            });
-          }
+        const arriveTime = bestOffset + times[si];
+        if (arriveTime < (bestArrivals.get(stopCode) ?? INF)) {
+          arrivals.set(stopCode, arriveTime);
+          bestArrivals.set(stopCode, arriveTime);
+          connections.set(stopCode, {
+            type: 'ride',
+            routeCode,
+            boardStop,
+            boardIdx,
+            alightIdx: si,
+          });
         }
       }
     }
 
-    // Scan transfers: walk from newly improved stops to nearby stops
+    // Walking transfers out of everything improved this round.
     const newMarked = new Set<string>();
-    const stopsToTransfer = [...arrivals.keys()];
-    for (const stopCode of stopsToTransfer) {
+    for (const stopCode of [...arrivals.keys()]) {
       const arrTime = arrivals.get(stopCode) ?? INF;
       const xfers = idx.transfers.get(stopCode);
       if (!xfers) continue;
 
       for (const { target, walkMin } of xfers) {
         const xTime = arrTime + walkMin;
-        const prevBest = bestArrivals.get(target) ?? INF;
-        const prevRound = arrivals.get(target) ?? INF;
-        if (xTime < prevBest && xTime < prevRound) {
+        if (xTime < (bestArrivals.get(target) ?? INF) && xTime < (arrivals.get(target) ?? INF)) {
           arrivals.set(target, xTime);
           bestArrivals.set(target, xTime);
-          connections.set(target, {
-            type: 'transfer',
-            fromStop: stopCode,
-            walkMin,
-          });
+          connections.set(target, { type: 'transfer', fromStop: stopCode, walkMin });
           newMarked.add(target);
         }
       }
@@ -146,9 +138,8 @@ export function raptorScan(
     kArrivals.push(arrivals);
     kConnections.push(connections);
 
-    // Marked stops for next round = stops improved in this round
     markedStops = new Set([...arrivals.keys(), ...newMarked]);
-    if (markedStops.size === 0) break; // no improvement, done
+    if (markedStops.size === 0) break;
   }
 
   return { bestArrivals, kArrivals, kConnections };

@@ -1,7 +1,11 @@
 /**
  * Live Map screen — real-time bus positions on a dark-themed Google Map.
  * Uses react-native-maps (Google Maps provider) for native performance.
- * Polls getBusLocation every 10 seconds.
+ *
+ * Polling is React Query's job (useBusLocations / useArrivals) and bus motion
+ * is Animated's job (components/BusLayer). This component re-renders when its
+ * own state changes and not otherwise — no requestAnimationFrame loop, no
+ * setInterval, no per-frame `setOptions` on the native header.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -16,35 +20,63 @@ import {
   Platform,
 } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import MapView, { Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing, font } from '../../theme';
-import { useBusLocations, useStops, useRoutes, useSchedule } from '../../hooks';
+import {
+  useBusLocations, useStops, useRoutes, useSchedule, useArrivals, useRoutesForStop, BUS_POLL_MS,
+} from '../../hooks';
 import { useLinesMap } from '../../hooks/useLinesMap';
 import { useInitialRegion } from '../../hooks/useInitialRegion';
 import { useUserLocation } from '../../hooks/useUserLocation';
-import { useMarkerTracking } from '../../hooks/useMarkerTracking';
-import { getStopArrivals, getWalkingRoute, getRoutesForStop, getRouteDetails } from '../../services/api';
-import { isFavorite, addFavorite, removeFavorite, getStamps, addStamp, removeStamp, getToggle, setToggle, getCachedBusPositions, setCachedBusPositions, isFavoriteStop, addFavoriteStop, removeFavoriteStop, getCachedRoutesForStop, setCachedRoutesForStop } from '../../services/storage';
+import { getRouteDetails } from '../../services/api';
+import {
+  isFavorite, addFavorite, removeFavorite, getStamps, addStamp, removeStamp,
+  getToggle, setToggle, getCachedBusPositions, setCachedBusPositions,
+  isFavoriteStop, addFavoriteStop, removeFavoriteStop,
+} from '../../services/storage';
 import { useNetworkStatus } from '../../services/network';
 import { startAlertWatch, stopAlertWatch, subscribeAlertConfig, type AlertConfig } from '../../services/notifications';
 import { useSettings } from '../settings/SettingsProvider';
 import { GOOGLE_DARK_STYLE } from '../../theme/googleMapStyle';
 import { METRO_POLYLINES } from '../../data/metroPolylines';
 import { mapStyles as ms } from '../../theme/mapStyles';
-import { buildLineGroups, getArrivalColor, type LineGroup } from './mapUtils';
+import {
+  buildLineGroups, describeApiError, getArrivalColor, isInRegion, simplifyPath, type LineGroup,
+} from './mapUtils';
 import StampModal from '../../components/StampModal';
 import ScheduleGrid from '../../components/ScheduleGrid';
 import AlertPickerModal from '../../components/AlertPickerModal';
 import UserLocationMarker from '../../components/UserLocationMarker';
 import RefreshTimer from './components/RefreshTimer';
-import { BusMarkerRenderer, BUS_MARKER_ANCHOR_Y } from '../../components/BusMarkerSvg';
-import { BusInterpolator } from './busInterpolation';
+import MapStatus from './components/MapStatus';
+import BusLayer, { type RawBus } from './components/BusLayer';
+import StampLayer from './components/StampLayer';
+import { RouteStopMarker } from './components/StopMarkers';
+import { useMinuteTick, useScreenFocused, useVisibleRegion, useWalkingRoute } from './components/mapHooks';
+import { BusMarkerRenderer } from '../../components/BusMarkerSvg';
 import { bearingBetween } from '../../utils/geo';
 import { s } from './LiveMapScreen.styles';
 import type { MapStamp } from '../../types';
 
-const POLL_INTERVAL = 10;
+/** Douglas-Peucker tolerance for the route shape, metres. `getRouteDetails`
+ *  hands back 300-1500 raw points; below ~8m nothing is visible at city zoom. */
+const ROUTE_SIMPLIFY_M = 8;
+/** Above this latitude span (~28 km) stop markers are hidden outright. That is
+ *  wider than any Athens line, so the default fitted view still shows them;
+ *  it only kicks in when the user has zoomed past the point of usefulness. */
+const STOP_HIDE_DELTA = 0.25;
+/** Retries for the off-screen SVG → PNG capture before we give up and use the
+ *  vector fallback marker. */
+const CAPTURE_MAX_ATTEMPTS = 8;
+
+const EMPTY_BUSES: RawBus[] = [];
+const EMPTY_TIMES: string[] = [];
+const EMPTY_STOPS: StopWithBearing[] = [];
+const FIT_PADDING = { top: 60, right: 60, bottom: 60, left: 60 };
+
+interface ParsedStop { lat: number; lng: number; name: string; code: string }
+interface StopWithBearing extends ParsedStop { bearing: number }
 
 /* ── Live Map Component ──────────────────────────────────────── */
 
@@ -56,7 +88,12 @@ export default function LiveMapScreen() {
     lineDescr: string;
   }>();
 
-  const { data: allRoutes } = useRoutes(lineCode);
+  // expo-router's native stack keeps pushed-behind screens mounted. Everything
+  // that polls or animates is gated on this.
+  const focused = useScreenFocused();
+  const minuteTick = useMinuteTick();
+
+  const { data: allRoutes, error: routesError, refetch: refetchRoutes } = useRoutes(lineCode);
   const { linesMap } = useLinesMap();
   const [activeRouteCode, setActiveRouteCode] = useState<string | undefined>(undefined);
   const [fav, setFav] = useState(() => isFavorite(lineCode));
@@ -67,8 +104,7 @@ export default function LiveMapScreen() {
   const { primaryColor, iconStyle } = useSettings();
 
   // Stop all-lines expansion state
-  const [stopLines, setStopLines] = useState<LineGroup[] | null>(null);
-  const [loadingStopLines, setLoadingStopLines] = useState(false);
+  const [showAllLines, setShowAllLines] = useState(false);
 
   // Stamp state
   const [stamps, setStamps] = useState<MapStamp[]>(() => getStamps());
@@ -81,6 +117,8 @@ export default function LiveMapScreen() {
   useEffect(() => subscribeAlertConfig(setArrivalAlert), []);
   const [showAlertPicker, setShowAlertPicker] = useState(false);
   const [alertThreshold, setAlertThreshold] = useState('5');
+  const [alertError, setAlertError] = useState<string | null>(null);
+  const [alertBusy, setAlertBusy] = useState(false);
 
   // Keyboard height tracking — push card above keyboard
   const [kbHeight, setKbHeight] = useState(0);
@@ -96,12 +134,15 @@ export default function LiveMapScreen() {
   // GO: sde_start1 from go entries (departure from terminus A)
   // COME: sde_start2 from come entries (departure from terminus B)
   const scheduleTimes = useMemo(() => {
-    if (!scheduleData) return [];
-    const routeIdx = allRoutes?.findIndex((r) => r.RouteCode === activeRouteCode) ?? 0;
-    // OASA convention: route[0] = come (B→A), route[1] = go (A→B)
+    if (!scheduleData) return EMPTY_TIMES;
     // Circular routes: come is empty, all entries live in go with sde_start1
     const isCircular = (scheduleData.come ?? []).length === 0;
-    let isGo = isCircular || routeIdx > 0;
+    const routeIdx = allRoutes?.findIndex((r) => r.RouteCode === activeRouteCode) ?? -1;
+    // findIndex returns -1, which is not null — `?? 0` never caught it, so an
+    // unrecognised route silently displayed the opposite direction's timetable.
+    if (routeIdx < 0 && !isCircular) return EMPTY_TIMES;
+    // OASA convention: route[0] = come (B→A), route[1] = go (A→B)
+    const isGo = isCircular || routeIdx > 0;
     const entries = isGo ? (scheduleData.go ?? []) : (scheduleData.come ?? []);
     const times = new Set<string>();
     for (const e of entries) {
@@ -111,6 +152,7 @@ export default function LiveMapScreen() {
     }
     return [...times].sort();
   }, [scheduleData, activeRouteCode, allRoutes]);
+
   const nextDeparture = useMemo(() => {
     if (scheduleTimes.length === 0) return null;
     const now = new Date();
@@ -120,7 +162,8 @@ export default function LiveMapScreen() {
       if (h * 60 + m >= nowMin) return t;
     }
     return scheduleTimes[0];
-  }, [scheduleTimes]);
+    // minuteTick: without it "Next: 14:05" stays on screen long after 14:05.
+  }, [scheduleTimes, minuteTick]);
 
   // Auto-select first route
   useEffect(() => {
@@ -129,84 +172,121 @@ export default function LiveMapScreen() {
     }
   }, [allRoutes, activeRouteCode]);
 
-  // Road-following path
-  const [routePath, setRoutePath] = useState<Array<{ lat: number; lng: number }>>([]);
-  useEffect(() => {
-    if (!activeRouteCode) { setRoutePath([]); return; }
-    setRoutePath([]);
-    getRouteDetails(activeRouteCode).then(setRoutePath).catch(() => setRoutePath([]));
-  }, [activeRouteCode]);
+  /* ── Route shape ───────────────────────────────────────────── */
 
-  const { data: buses } = useBusLocations(activeRouteCode);
-  const { data: stops } = useStops(activeRouteCode);
+  const [routePath, setRoutePath] = useState<Array<{ lat: number; lng: number }>>([]);
+  const [shapeError, setShapeError] = useState<unknown>(null);
+  const [shapeLoading, setShapeLoading] = useState(false);
+  const [retryNonce, setRetryNonce] = useState(0);
+
+  useEffect(() => {
+    if (!activeRouteCode) { setRoutePath([]); setShapeError(null); setShapeLoading(false); return; }
+    // Toggling direction A→B→A could land B's polyline last, and every A bus
+    // then snapped onto B's geometry. The abort signal is the stale guard.
+    const ac = new AbortController();
+    setRoutePath([]);
+    setShapeError(null);
+    setShapeLoading(true);
+    getRouteDetails(activeRouteCode, { signal: ac.signal })
+      .then((pts) => {
+        if (ac.signal.aborted) return;
+        setRoutePath(pts);
+        setShapeLoading(false);
+      })
+      .catch((err) => {
+        if (ac.signal.aborted) return;
+        // getRouteDetails throws now, so [] genuinely means "no shape on file"
+        // and this branch genuinely means "the request failed".
+        setRoutePath([]);
+        setShapeError(err);
+        setShapeLoading(false);
+      });
+    return () => ac.abort();
+  }, [activeRouteCode, retryNonce]);
+
+  const {
+    data: buses, dataUpdatedAt: busUpdatedAt, isFetching: busFetching,
+    error: busError, refetch: refetchBuses,
+  } = useBusLocations(activeRouteCode, focused);
+  const { data: stops, error: stopsError, refetch: refetchStops } = useStops(activeRouteCode);
   const isOnline = useNetworkStatus();
   const mapRef = useRef<MapView>(null);
+  const [mapReady, setMapReady] = useState(false);
 
-  // User location + heading via shared hook
-  const onLocationUpdate = useCallback(async (loc: { lat: number; lng: number }) => {
-    const target = selectedStopRef.current;
-    if (target) {
-      const walk = await getWalkingRoute(loc.lat, loc.lng, target.lat, target.lng);
-      if (walk && walk.coords.length > 1 && selectedStopRef.current) {
-        const walkMin = Math.round(walk.durationSec / 60);
-        setWalkCoords(walk.coords.map((c: [number, number]) => ({ latitude: c[1], longitude: c[0] })));
-        setSelectedStop((prev) => prev ? { ...prev, walkMin } : prev);
-      }
-    }
-  }, []);
-  const { userLocationRef, userLoc, userHeading } = useUserLocation(onLocationUpdate);
+  // 1 Hz GPS only while this screen is actually on top of the stack.
+  const { userLocationRef, userLoc, userHeading } = useUserLocation({ highAccuracy: focused });
 
-  // Bus marker image — rendered off-screen as SVG, captured as PNG
+  /* ── Bus marker bitmap ─────────────────────────────────────── */
+
   const busSvgRef = useRef<any>(null);
   const [busMarkerUri, setBusMarkerUri] = useState<string | null>(null);
   useEffect(() => {
-    const id = setTimeout(() => {
-      if (busSvgRef.current) {
-        busSvgRef.current.toDataURL((base64: string) => {
-          setBusMarkerUri('data:image/png;base64,' + base64);
+    let cancelled = false;
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout>;
+    const capture = () => {
+      if (cancelled) return;
+      const svg = busSvgRef.current;
+      if (svg && typeof svg.toDataURL === 'function') {
+        svg.toDataURL((base64: string) => {
+          if (!cancelled && base64) setBusMarkerUri('data:image/png;base64,' + base64);
         });
+        return;
       }
-    }, 100);
-    return () => clearTimeout(id);
+      // The ref can still be null well past 100ms on a cold start or a low-end
+      // device. There used to be no retry, and every bus marker was gated on
+      // this URI — so a slow first frame meant no buses for the whole session.
+      // BusLayer falls back to a vector pin if we never succeed.
+      if (++attempts <= CAPTURE_MAX_ATTEMPTS) timer = setTimeout(capture, 100 * attempts);
+    };
+    timer = setTimeout(capture, 60);
+    return () => { cancelled = true; clearTimeout(timer); };
   }, [primaryColor]);
 
-  // Stale bus positions
+  /* ── Buses ─────────────────────────────────────────────────── */
+
   const [staleBusTs, setStaleBusTs] = useState<number | null>(null);
-  const staleLoadedRef = useRef(false);
-  const [staleBuses, setStaleBuses] = useState<Array<{ lat: number; lng: number; id: string }>>([]);
+  const [staleBuses, setStaleBuses] = useState<RawBus[]>(EMPTY_BUSES);
+  const staleLoadedFor = useRef<string | null>(null);
 
-  // Walking route
-  const [walkCoords, setWalkCoords] = useState<Array<{ latitude: number; longitude: number }>>([]);
-
-  const parsedBuses = useMemo(() => {
-    if (!buses || buses.length === 0) return [];
-    return buses
-      .filter((b) => b.ROUTE_CODE === activeRouteCode)
-      .map((b) => ({ lat: parseFloat(b.CS_LAT), lng: parseFloat(b.CS_LNG), id: b.VEH_NO }));
+  const parsedBuses = useMemo<RawBus[]>(() => {
+    if (!buses || buses.length === 0) return EMPTY_BUSES;
+    // OASA occasionally reports the same VEH_NO twice on one route. Duplicate
+    // React keys silently drop a marker, so collapse on the vehicle number.
+    const byId = new Map<string, RawBus>();
+    for (const b of buses) {
+      if (b.ROUTE_CODE !== activeRouteCode) continue;
+      const lat = parseFloat(b.CS_LAT);
+      const lng = parseFloat(b.CS_LNG);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      byId.set(b.VEH_NO, { id: b.VEH_NO, lat, lng });
+    }
+    return byId.size > 0 ? [...byId.values()] : EMPTY_BUSES;
   }, [buses, activeRouteCode]);
 
   useEffect(() => {
     if (parsedBuses.length > 0 && activeRouteCode) {
       setCachedBusPositions(activeRouteCode, parsedBuses);
       setStaleBusTs(null);
-      setStaleBuses([]);
+      setStaleBuses(EMPTY_BUSES);
     }
   }, [parsedBuses, activeRouteCode]);
 
   useEffect(() => {
-    if (!activeRouteCode || staleLoadedRef.current) return;
-    if (!isOnline && (!buses || buses.length === 0)) {
-      staleLoadedRef.current = true;
-      getCachedBusPositions(activeRouteCode).then((cached) => {
-        if (cached && cached.buses.length > 0) {
-          // Discard stale positions older than 1 hour
-          const ageMin = (Date.now() - cached.ts) / 60000;
-          if (ageMin > 60) return;
-          setStaleBuses(cached.buses);
-          setStaleBusTs(cached.ts);
-        }
-      });
-    }
+    // The cached lookup is per route, so the "already tried" latch has to be
+    // too — otherwise switching direction while offline never loads again.
+    if (!activeRouteCode || staleLoadedFor.current === activeRouteCode) return;
+    if (isOnline || (buses && buses.length > 0)) return;
+    staleLoadedFor.current = activeRouteCode;
+    let cancelled = false;
+    getCachedBusPositions(activeRouteCode).then((cached) => {
+      if (cancelled || !cached || cached.buses.length === 0) return;
+      // Discard stale positions older than 1 hour
+      if ((Date.now() - cached.ts) / 60000 > 60) return;
+      setStaleBuses(cached.buses);
+      setStaleBusTs(cached.ts);
+    });
+    return () => { cancelled = true; };
   }, [activeRouteCode, isOnline, buses]);
 
   const staleLabel = useMemo(() => {
@@ -216,9 +296,16 @@ export default function LiveMapScreen() {
     if (diffMin < 60) return `last seen ${diffMin} min ago`;
     const h = Math.floor(diffMin / 60);
     return `last seen ${h}h ago`;
-  }, [staleBusTs]);
+    // minuteTick: this used to be pinned at "<1 min ago" for as long as the
+    // pill was on screen, because Date.now() was not a dependency of anything.
+  }, [staleBusTs, minuteTick]);
 
-  const parsedStops = useMemo(() => {
+  const busMarkers = parsedBuses.length > 0 ? parsedBuses : staleBuses;
+  const busStale = staleBuses.length > 0 && parsedBuses.length === 0;
+
+  /* ── Stops & geometry ──────────────────────────────────────── */
+
+  const parsedStops = useMemo<ParsedStop[]>(() => {
     if (!stops) return [];
     return stops.map((st) => ({
       lat: parseFloat(st.StopLat), lng: parseFloat(st.StopLng),
@@ -227,7 +314,7 @@ export default function LiveMapScreen() {
   }, [stops]);
 
   // Bearings for directional stop markers
-  const stopsWithBearings = useMemo(() => {
+  const stopsWithBearings = useMemo<StopWithBearing[]>(() => {
     if (parsedStops.length < 2) return parsedStops.map((st) => ({ ...st, bearing: 0 }));
     return parsedStops.map((st, i) => {
       const next = parsedStops[Math.min(i + 1, parsedStops.length - 1)];
@@ -237,190 +324,288 @@ export default function LiveMapScreen() {
     });
   }, [parsedStops]);
 
-  // Route polyline coordinates
-  const routePolyline = useMemo(() => {
-    const source = routePath.length > 1 ? routePath : parsedStops;
-    return source.map((p) => ({ latitude: p.lat, longitude: p.lng }));
-  }, [routePath, parsedStops]);
+  const routeShape = useMemo(() => simplifyPath(routePath, ROUTE_SIMPLIFY_M), [routePath]);
 
-  // Fit map to route bounds on stops load
-  const hasFitted = useRef(false);
+  // One source of truth for the drawn line AND the interpolator. They used to
+  // disagree: the polyline fell back to stops while the interpolator got an
+  // empty route and bailed, so buses teleported every poll with bearing 0.
+  const routeGeometry = useMemo(() => (
+    routeShape.length > 1
+      ? routeShape
+      : parsedStops.map((p) => ({ lat: p.lat, lng: p.lng }))
+  ), [routeShape, parsedStops]);
+
+  const routePolyline = useMemo(
+    () => routeGeometry.map((p) => ({ latitude: p.lat, longitude: p.lng })),
+    [routeGeometry],
+  );
+
+  /* ── Viewport culling ──────────────────────────────────────── */
+
+  const initialRegion = useInitialRegion(0.05);
+  const { region, onRegionChangeStart, onRegionChangeComplete } = useVisibleRegion();
+
+  const stopsHidden = region != null && region.latitudeDelta > STOP_HIDE_DELTA;
+  const visibleStops = useMemo(() => {
+    // Before the map has reported a region we cannot cull safely — a missed
+    // first event would otherwise leave the route drawn with no stops on it.
+    if (!region) return stopsWithBearings;
+    if (region.latitudeDelta > STOP_HIDE_DELTA) return EMPTY_STOPS;
+    return stopsWithBearings.filter((st) => isInRegion(st.lat, st.lng, region));
+  }, [stopsWithBearings, region]);
+
+  // Fit map to route bounds — after the map is ready, and again per direction.
+  const fittedRoute = useRef<string | null>(null);
   useEffect(() => {
-    if (parsedStops.length < 2 || !mapRef.current || hasFitted.current) return;
-    hasFitted.current = true;
-    mapRef.current.fitToCoordinates(
+    if (!mapReady || !activeRouteCode || parsedStops.length < 2) return;
+    if (fittedRoute.current === activeRouteCode) return;
+    const map = mapRef.current;
+    // On Android fitToCoordinates is a no-op before the map is ready, and the
+    // old code latched `hasFitted` *before* calling it — so a fast cached load
+    // left the camera at initialRegion with the route off-screen, forever.
+    if (!map) return;
+    map.fitToCoordinates(
       parsedStops.map((p) => ({ latitude: p.lat, longitude: p.lng })),
-      { edgePadding: { top: 60, right: 60, bottom: 60, left: 60 }, animated: true },
+      { edgePadding: FIT_PADDING, animated: true },
     );
-  }, [parsedStops]);
+    fittedRoute.current = activeRouteCode;
+  }, [mapReady, activeRouteCode, parsedStops]);
 
   // Metro polyline data (pre-computed constant)
-  const metroData = METRO_POLYLINES;
-
-  // Bus markers — live or stale
-  const rawBusMarkers = parsedBuses.length > 0 ? parsedBuses : staleBuses;
-  const busStale = staleBuses.length > 0 && parsedBuses.length === 0;
-
-  // Route-snapped interpolation for smooth bus movement
-  const interpolatorRef = useRef(new BusInterpolator());
-  const [interpolatedBuses, setInterpolatedBuses] = useState<Array<{ id: string; lat: number; lng: number; bearing: number }>>([]);
-  const rafRef = useRef<number | null>(null);
-
-  // Feed route to interpolator when it changes
-  useEffect(() => {
-    interpolatorRef.current.setRoute(routePath);
-  }, [routePath]);
-
-  // Feed bus positions to interpolator when API data arrives
-  useEffect(() => {
-    if (rawBusMarkers.length > 0 && routePath.length >= 2 && !busStale) {
-      interpolatorRef.current.update(rawBusMarkers);
-    }
-  }, [rawBusMarkers, routePath, busStale]);
-
-  // Animation loop — runs at ~60fps, updates interpolated positions
-  useEffect(() => {
-    if (routePath.length < 2 || rawBusMarkers.length === 0) {
-      setInterpolatedBuses([]);
-      return;
-    }
-
-    let active = true;
-    const tick = () => {
-      if (!active) return;
-      const positions = interpolatorRef.current.getPositions();
-      setInterpolatedBuses(positions);
-      rafRef.current = requestAnimationFrame(tick);
-    };
-    rafRef.current = requestAnimationFrame(tick);
-
-    return () => {
-      active = false;
-      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
-    };
-  }, [routePath, rawBusMarkers]);
-
-  // Fall back to raw positions when route not available
-  const busMarkers = useMemo(() => {
-    if (interpolatedBuses.length > 0) return interpolatedBuses;
-    return rawBusMarkers.map((b) => ({ ...b, bearing: 0 }));
-  }, [interpolatedBuses, rawBusMarkers]);
+  const metroLines = useMemo(() => METRO_POLYLINES.map((line, i) => (
+    <Polyline key={`mp-${i}`} coordinates={line.coords}
+      strokeColor={line.color + '99'} strokeWidth={2.5} lineCap="round" />
+  )), []);
 
   const lineRouteCodes = useMemo(
     () => new Set((allRoutes ?? []).map((r) => r.RouteCode)),
     [allRoutes],
   );
 
-  // Selected stop
-  const [selectedStop, setSelectedStop] = useState<{
-    name: string; stopCode: string;
-    arrivals: Array<{ min: number; color: string }> | null;
-    loading: boolean; walkMin: number | null; lat: number; lng: number;
-  } | null>(null);
-  const selectedStopRef = useRef<{ lat: number; lng: number; stopCode: string } | null>(null);
+  /* ── Selected stop ─────────────────────────────────────────── */
 
-  const onStopPress = useCallback(async (stop: { lat: number; lng: number; name: string; code: string }) => {
-    setWalkCoords([]);
-    selectedStopRef.current = { lat: stop.lat, lng: stop.lng, stopCode: stop.code };
-    setStopLines(null);
-    setSelectedStop({ name: stop.name, stopCode: stop.code, arrivals: null, loading: true, walkMin: null, lat: stop.lat, lng: stop.lng });
+  const [selectedStop, setSelectedStop] = useState<ParsedStop | null>(null);
+  const selectedStopCode = selectedStop?.code ?? null;
 
-    const ul = userLocationRef.current;
-    const [arrivalsResult, walkResult] = await Promise.allSettled([
-      getStopArrivals(stop.code),
-      ul ? getWalkingRoute(ul.lat, ul.lng, stop.lat, stop.lng) : Promise.resolve(null),
-    ]);
-    const arrivals = arrivalsResult.status === 'fulfilled' ? arrivalsResult.value ?? [] : [];
-    const walkRoute = walkResult.status === 'fulfilled' ? walkResult.value : null;
+  // React Query owns arrivals polling: keyed by stop code, so a slow response
+  // for stop A can no longer land in stop B's card, and it pauses when the
+  // screen is unfocused or the app is backgrounded.
+  const arrivalsQuery = useArrivals(selectedStopCode ?? undefined, focused);
+  // `useArrivals` keeps the previous result as placeholder data so a 15s
+  // refetch does not flash a spinner — but across a *key* change that
+  // placeholder is the previous stop's arrivals. `isPlaceholderData` is true
+  // only in that case, which is exactly when it must not be shown.
+  const rawArrivals = arrivalsQuery.isPlaceholderData ? undefined : arrivalsQuery.data;
+  const arrivalsLoading = arrivalsQuery.isLoading || arrivalsQuery.isPlaceholderData;
 
-    let walkMin: number | null = null;
-    if (walkRoute && walkRoute.coords.length > 1) {
-      walkMin = Math.round(walkRoute.durationSec / 60);
-      setWalkCoords(walkRoute.coords.map((c: [number, number]) => ({ latitude: c[1], longitude: c[0] })));
-    }
-
-    const filtered = (arrivals ?? []).filter((a) => lineRouteCodes.has(a.route_code));
-    if (filtered.length === 0) {
-      setSelectedStop({ name: stop.name, stopCode: stop.code, arrivals: [], loading: false, walkMin, lat: stop.lat, lng: stop.lng });
-    } else {
-      const sorted = [...filtered].sort((a, b) => Number(a.btime2) - Number(b.btime2));
-      const items = sorted.slice(0, 5).map((a) => {
+  const arrivals = useMemo(() => {
+    if (!rawArrivals) return null;
+    return rawArrivals
+      .filter((a) => lineRouteCodes.has(a.route_code))
+      .sort((a, b) => Number(a.btime2) - Number(b.btime2))
+      .slice(0, 5)
+      .map((a) => {
         const min = Number(a.btime2);
         return { min, color: getArrivalColor(min) };
       });
-      setSelectedStop({ name: stop.name, stopCode: stop.code, arrivals: items, loading: false, walkMin, lat: stop.lat, lng: stop.lng });
-    }
-  }, [lineRouteCodes]);
+  }, [rawArrivals, lineRouteCodes]);
 
-  // Auto-refresh arrivals
+  const walkTarget = useMemo(
+    () => (selectedStop ? { lat: selectedStop.lat, lng: selectedStop.lng, key: selectedStop.code } : null),
+    [selectedStop],
+  );
+  const walk = useWalkingRoute(walkTarget, userLoc);
+
+  // Read through a ref so `onStopPress` stays stable — a new callback identity
+  // would re-render every memoized marker whenever the stop list changed.
+  const stopsByCode = useMemo(
+    () => new Map(parsedStops.map((st) => [st.code, st])),
+    [parsedStops],
+  );
+  const stopsByCodeRef = useRef(stopsByCode);
+  stopsByCodeRef.current = stopsByCode;
+
+  const onStopPress = useCallback((code: string) => {
+    const st = stopsByCodeRef.current.get(code);
+    if (!st) return;
+    setSelectedStop(st);
+    setShowAllLines(false);
+    setShowAlertPicker(false);
+  }, []);
+
+  const closeStop = useCallback(() => {
+    setSelectedStop(null);
+    setShowAllLines(false);
+    setShowAlertPicker(false);
+  }, []);
+
+  // Saved-stop state, mirrored so the bookmark icon can re-render on toggle.
+  const [stopSaved, setStopSaved] = useState(false);
   useEffect(() => {
-    if (!selectedStop || !selectedStop.stopCode) return;
-    const code = selectedStop.stopCode;
-    const id = setInterval(async () => {
-      try {
-        const arrivals = await getStopArrivals(code);
-        const filtered = (arrivals ?? []).filter((a) => lineRouteCodes.has(a.route_code));
-        const items = filtered.length === 0 ? [] :
-          [...filtered].sort((a, b) => Number(a.btime2) - Number(b.btime2)).slice(0, 5).map((a) => {
-            const min = Number(a.btime2);
-            return { min, color: getArrivalColor(min) };
-          });
-        setSelectedStop((prev) => prev && prev.stopCode === code ? { ...prev, arrivals: items, loading: false } : prev);
-      } catch {}
-    }, POLL_INTERVAL * 1000);
-    return () => clearInterval(id);
-  }, [selectedStop?.stopCode, lineRouteCodes]);
+    setStopSaved(selectedStop ? isFavoriteStop(selectedStop.code) : false);
+  }, [selectedStop]);
 
-  // Long press
+  const toggleStopSaved = useCallback(() => {
+    if (!selectedStop) return;
+    if (isFavoriteStop(selectedStop.code)) {
+      Alert.alert('Remove Stop', `Remove "${selectedStop.name}" from saved stops?`, [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Remove', style: 'destructive', onPress: () => {
+          removeFavoriteStop(selectedStop.code);
+          setStopSaved(false);
+        } },
+      ]);
+    } else {
+      addFavoriteStop({ stopCode: selectedStop.code, stopName: selectedStop.name, lat: selectedStop.lat, lng: selectedStop.lng });
+      setStopSaved(true);
+    }
+  }, [selectedStop]);
+
+  const confirmAlert = useCallback(async () => {
+    if (!selectedStop) return;
+    const min = parseInt(alertThreshold, 10);
+    if (isNaN(min) || min <= 0) return;
+    setAlertBusy(true);
+    setAlertError(null);
+    const res = await startAlertWatch({
+      stopCode: selectedStop.code,
+      stopName: selectedStop.name,
+      thresholdMin: min,
+      lineId: lineId ?? '',
+      routeCodes: [...lineRouteCodes],
+      color: primaryColor,
+    });
+    setAlertBusy(false);
+    if (!res.ok) {
+      // Keep the dialog open with the reason. Firing and forgetting made a
+      // notifications denial look exactly like success.
+      setAlertError(res.message);
+      return;
+    }
+    setShowAlertPicker(false);
+    // Only one alert can be armed at a time; arming this one cancelled the
+    // other, and saying nothing about it is silent data loss.
+    if (res.replaced) {
+      Alert.alert(
+        'Alert moved',
+        `Your alert for ${res.replaced.lineId} at ${res.replaced.stopName} was cancelled.`,
+      );
+    }
+  }, [selectedStop, alertThreshold, lineId, lineRouteCodes, primaryColor]);
+
+  // All lines at this stop — cached + offline-tolerant via the shared hook.
+  const { data: stopRoutes, isLoading: loadingStopLines } = useRoutesForStop(
+    showAllLines && selectedStopCode ? selectedStopCode : undefined,
+  );
+  const stopLines = useMemo<LineGroup[] | null>(() => {
+    if (!showAllLines || !stopRoutes) return null;
+    return buildLineGroups(stopRoutes, rawArrivals ?? [], linesMap).lines;
+  }, [showAllLines, stopRoutes, rawArrivals, linesMap]);
+
+  /* ── Map interactions ──────────────────────────────────────── */
+
   const onMapLongPress = useCallback((e: { nativeEvent: { coordinate: { latitude: number; longitude: number } } }) => {
     setStampName(''); setStampEmoji('📍');
     setStampModal({ lat: e.nativeEvent.coordinate.latitude, lng: e.nativeEvent.coordinate.longitude });
   }, []);
 
-  // Marker bitmap tracking (burst-enable then disable for perf)
-  const selectedStopCode = selectedStop?.stopCode ?? null;
-  const stopTracking = useMarkerTracking([stopsWithBearings, primaryColor]);
-  const selectedTracking = useMarkerTracking([selectedStopCode]);
-  const userTracking = useMarkerTracking([userHeading], 400);
-  const stampTracking = useMarkerTracking([stamps.map((s) => s.id).join(',')]);
+  const onMapReady = useCallback(() => setMapReady(true), []);
+  const onRemoveStamp = useCallback((id: string) => setStamps(removeStamp(id)), []);
 
-  const initialRegion = useInitialRegion(0.05);
+  const recenter = useCallback(() => {
+    const loc = userLocationRef.current;
+    if (loc && mapRef.current) {
+      mapRef.current.animateToRegion({
+        latitude: loc.lat, longitude: loc.lng,
+        latitudeDelta: 0.01, longitudeDelta: 0.01,
+      }, 500);
+    }
+  }, [userLocationRef]);
+
+  const selectRoute = useCallback((routeCode: string) => {
+    setActiveRouteCode(routeCode);
+    setShowRouteMenu(false);
+    closeStop();
+  }, [closeStop]);
+
+  /* ── Header ────────────────────────────────────────────────── */
+
+  const activeRouteLabel = useMemo(() => {
+    const r = allRoutes?.find((x) => x.RouteCode === activeRouteCode);
+    return r ? (r.RouteDescrEng || r.RouteDescr) : '';
+  }, [allRoutes, activeRouteCode]);
+  const hasMultipleRoutes = (allRoutes?.length ?? 0) > 1;
+
+  const toggleRouteMenu = useCallback(() => setShowRouteMenu((v) => !v), []);
+  const toggleFav = useCallback(() => {
+    setFav((prev) => {
+      if (prev) { removeFavorite(lineCode); return false; }
+      addFavorite({ lineCode, lineId: lineId ?? '', lineDescr: lineDescr ?? '', lineDescrEng: lineDescr ?? '' });
+      return true;
+    });
+  }, [lineCode, lineId, lineDescr]);
+
+  // A fresh options object makes expo-router call setOptions and re-render the
+  // native header. Rebuilt per frame (which is what the inline object did) that
+  // is a full native header pass 60 times a second.
+  const headerOptions = useMemo(() => ({
+    headerStyle: { backgroundColor: colors.bg },
+    headerTitle: () => (
+      <TouchableOpacity style={s.headerTitleWrap} disabled={!hasMultipleRoutes}
+        onPress={toggleRouteMenu} activeOpacity={0.7}>
+        <View style={s.headerTitleRow}>
+          <Text style={s.headerLineId}>{lineId ?? ''}</Text>
+          {hasMultipleRoutes && (
+            <Ionicons name={showRouteMenu ? 'chevron-up' : 'chevron-down'}
+              size={16} color={colors.textMuted} style={{ marginLeft: 4 }} />
+          )}
+        </View>
+        {activeRouteLabel ? <Text style={s.headerRouteDescr} numberOfLines={1}>{activeRouteLabel}</Text> : null}
+      </TouchableOpacity>
+    ),
+    headerRight: () => (
+      <TouchableOpacity onPress={toggleFav} hitSlop={12} style={{ marginRight: spacing.sm }}>
+        <Ionicons name={fav ? 'heart' : 'heart-outline'} size={24} color={fav ? '#B91C1C' : colors.textMuted} />
+      </TouchableOpacity>
+    ),
+  }), [hasMultipleRoutes, showRouteMenu, activeRouteLabel, lineId, fav, toggleRouteMenu, toggleFav]);
+
+  /* ── Status ────────────────────────────────────────────────── */
+
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
+  const errorMessage = useMemo(() => {
+    if (routesError) return describeApiError(routesError, 'Loading directions');
+    if (stopsError) return describeApiError(stopsError, 'Loading stops');
+    if (shapeError) return describeApiError(shapeError, 'Loading the route shape');
+    if (busError) return describeApiError(busError, 'Live bus positions');
+    return null;
+  }, [routesError, stopsError, shapeError, busError]);
+  const visibleError = errorMessage && errorMessage !== dismissedError ? errorMessage : null;
+
+  const retryAll = useCallback(() => {
+    setDismissedError(null);
+    setRetryNonce((n) => n + 1);
+    refetchRoutes();
+    refetchStops();
+    refetchBuses();
+  }, [refetchRoutes, refetchStops, refetchBuses]);
+
+  const dismissError = useCallback(() => setDismissedError(errorMessage), [errorMessage]);
+
+  // Stops, polyline and buses all arrive well after the route list, and the
+  // old spinner disappeared as soon as the list did — leaving an empty dark
+  // map with no feedback through the slowest part of the load.
+  const loadingLabel = useMemo(() => {
+    if (!allRoutes) return 'Loading directions…';
+    if (!stops) return 'Loading stops…';
+    if (shapeLoading) return 'Drawing the route…';
+    if (!buses && focused && isOnline) return 'Locating buses…';
+    return null;
+  }, [allRoutes, stops, shapeLoading, buses, focused, isOnline]);
 
   return (
     <View style={ms.container}>
-      <Stack.Screen
-        options={{
-          headerStyle: { backgroundColor: colors.bg },
-          headerTitle: () => {
-            const hasMultiple = allRoutes && allRoutes.length > 1;
-            const activeRoute = allRoutes?.find((r) => r.RouteCode === activeRouteCode);
-            const routeLabel = activeRoute ? (activeRoute.RouteDescrEng || activeRoute.RouteDescr) : '';
-            return (
-              <TouchableOpacity style={s.headerTitleWrap} disabled={!hasMultiple}
-                onPress={() => setShowRouteMenu((v) => !v)} activeOpacity={0.7}>
-                <View style={s.headerTitleRow}>
-                  <Text style={s.headerLineId}>{lineId ?? ''}</Text>
-                  {hasMultiple && (
-                    <Ionicons name={showRouteMenu ? 'chevron-up' : 'chevron-down'}
-                      size={16} color={colors.textMuted} style={{ marginLeft: 4 }} />
-                  )}
-                </View>
-                {routeLabel ? <Text style={s.headerRouteDescr} numberOfLines={1}>{routeLabel}</Text> : null}
-              </TouchableOpacity>
-            );
-          },
-          headerRight: () => (
-            <TouchableOpacity
-              onPress={() => {
-                if (fav) { removeFavorite(lineCode); setFav(false); }
-                else { addFavorite({ lineCode, lineId: lineId ?? '', lineDescr: lineDescr ?? '', lineDescrEng: lineDescr ?? '' }); setFav(true); }
-              }}
-              hitSlop={12} style={{ marginRight: spacing.sm }}>
-              <Ionicons name={fav ? 'heart' : 'heart-outline'} size={24} color={fav ? '#B91C1C' : colors.textMuted} />
-            </TouchableOpacity>
-          ),
-        }}
-      />
+      <Stack.Screen options={headerOptions} />
 
       <MapView
         ref={mapRef}
@@ -433,7 +618,10 @@ export default function LiveMapScreen() {
         showsCompass={false}
         toolbarEnabled={false}
         pitchEnabled={false}
+        onMapReady={onMapReady}
         onLongPress={onMapLongPress}
+        onRegionChangeStart={onRegionChangeStart}
+        onRegionChangeComplete={onRegionChangeComplete}
         moveOnMarkerPress={false}
       >
         {/* Route polyline */}
@@ -443,82 +631,47 @@ export default function LiveMapScreen() {
         )}
 
         {/* Walking route */}
-        {walkCoords.length > 1 && (
-          <Polyline coordinates={walkCoords} strokeColor="#4285F4"
+        {walk.coords.length > 1 && (
+          <Polyline coordinates={walk.coords} strokeColor="#4285F4"
             strokeWidth={4} lineDashPattern={[8, 6]} lineCap="round" lineJoin="round" />
         )}
 
         {/* Metro polylines */}
-        {showMetro && metroData.map((line, i) => (
-          <Polyline key={`mp-${i}`} coordinates={line.coords}
-            strokeColor={line.color + '99'} strokeWidth={2.5} lineCap="round" />
-        ))}
+        {showMetro && metroLines}
 
         {/* Stop markers — bus icon with directional arrow */}
-        {stopsWithBearings.map((stop, i) => {
-          const isSelected = selectedStopCode === stop.code;
-          return (
-          <Marker key={`st-${stop.code}-${i}-${primaryColor}`}
-            coordinate={{ latitude: stop.lat, longitude: stop.lng }}
-            anchor={{ x: 0.5, y: 0.65 }} tracksViewChanges={stopTracking || selectedTracking}
-            rotation={stop.bearing}
-            flat={true}
-            zIndex={isSelected ? 1050 : 999}
-            onPress={() => onStopPress(stop)}>
-            <View style={s.stopMarkerOuter} collapsable={false}>
-              <View style={[s.stopArrow, isSelected && { borderBottomColor: 'transparent' }]} />
-              <View style={s.stopDotWrap}>
-                {isSelected && <View style={[s.stopRing, { borderColor: primaryColor }]} />}
-                <View style={[
-                  s.stopDot,
-                  isSelected
-                    ? { backgroundColor: '#FFFFFF', borderColor: primaryColor, borderWidth: 3 }
-                    : { backgroundColor: primaryColor },
-                  { transform: [{ rotate: `${-stop.bearing}deg` }] },
-                ]}>
-                  <Ionicons name="bus" size={10} color={isSelected ? primaryColor : '#FFFFFF'} />
-                </View>
-              </View>
-            </View>
-          </Marker>
-          );
-        })}
-
-        {/* Buses */}
-        {busMarkerUri && busMarkers.map((bus) => (
-          <Marker key={`bus-${bus.id}-${busStale}`}
-            coordinate={{ latitude: bus.lat, longitude: bus.lng }}
-            anchor={{ x: 0.5, y: BUS_MARKER_ANCHOR_Y }}
-            zIndex={1100}
-            opacity={busStale ? 0.35 : 1}
-            image={{ uri: busMarkerUri }}
+        {visibleStops.map((stop) => (
+          <RouteStopMarker
+            key={`st-${stop.code}`}
+            code={stop.code}
+            lat={stop.lat}
+            lng={stop.lng}
+            bearing={stop.bearing}
+            selected={selectedStopCode === stop.code}
+            color={primaryColor}
+            onPress={onStopPress}
           />
         ))}
 
+        {/* Buses — animated natively, no React state per frame */}
+        <BusLayer
+          buses={busMarkers}
+          route={routeGeometry}
+          imageUri={busMarkerUri}
+          color={primaryColor}
+          durationMs={BUS_POLL_MS}
+          stale={busStale}
+          active={focused}
+        />
+
         {/* Stamps */}
-        {showStamps && stamps.map((st) => (
-          <Marker key={`stamp-${st.id}`}
-            coordinate={{ latitude: st.lat, longitude: st.lng }}
-            anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={stampTracking}
-            onPress={() => {
-              Alert.alert('Remove stamp?', `Delete "${st.name}"?`, [
-                { text: 'Cancel', style: 'cancel' },
-                { text: 'Delete', style: 'destructive', onPress: () => setStamps(removeStamp(st.id)) },
-              ]);
-            }}>
-            <View style={ms.stampMarker}>
-              <Text style={ms.stampEmoji}>{st.emoji}</Text>
-              <Text style={ms.stampLabel}>{st.name}</Text>
-            </View>
-          </Marker>
-        ))}
+        {showStamps && <StampLayer stamps={stamps} onRemove={onRemoveStamp} />}
 
         {/* User location */}
         {userLoc && (
           <UserLocationMarker
             lat={userLoc.lat} lng={userLoc.lng}
             heading={userHeading} iconStyle={iconStyle}
-            tracksViewChanges={userTracking}
           />
         )}
       </MapView>
@@ -530,40 +683,27 @@ export default function LiveMapScreen() {
           <View style={ms.arrivalHeader}>
             <Text style={ms.arrivalName} numberOfLines={1}>{selectedStop.name}</Text>
             <View style={s.arrivalHeaderBtns}>
-              <TouchableOpacity onPress={() => {
-                if (isFavoriteStop(selectedStop.stopCode)) {
-                  Alert.alert('Remove Stop', `Remove "${selectedStop.name}" from saved stops?`, [
-                    { text: 'Cancel', style: 'cancel' },
-                    { text: 'Remove', style: 'destructive', onPress: () => {
-                      removeFavoriteStop(selectedStop.stopCode);
-                      setSelectedStop((prev) => prev ? { ...prev } : prev);
-                    }},
-                  ]);
-                } else {
-                  addFavoriteStop({ stopCode: selectedStop.stopCode, stopName: selectedStop.name, lat: selectedStop.lat, lng: selectedStop.lng });
-                  setSelectedStop((prev) => prev ? { ...prev } : prev);
-                }
-              }} hitSlop={10}>
+              <TouchableOpacity onPress={toggleStopSaved} hitSlop={10}>
                 <Ionicons
-                  name={isFavoriteStop(selectedStop.stopCode) ? 'bookmark' : 'bookmark-outline'}
+                  name={stopSaved ? 'bookmark' : 'bookmark-outline'}
                   size={16}
-                  color={isFavoriteStop(selectedStop.stopCode) ? primaryColor : colors.textMuted}
+                  color={stopSaved ? primaryColor : colors.textMuted}
                 />
               </TouchableOpacity>
               <TouchableOpacity onPress={() => {
-                if (arrivalAlert?.stopCode === selectedStop.stopCode) {
+                if (arrivalAlert?.stopCode === selectedStop.code) {
                   stopAlertWatch(); setShowAlertPicker(false);
                 } else {
                   setShowAlertPicker((v) => !v);
                 }
               }} hitSlop={10}>
                 <Ionicons
-                  name={arrivalAlert?.stopCode === selectedStop.stopCode ? 'notifications' : 'notifications-outline'}
+                  name={arrivalAlert?.stopCode === selectedStop.code ? 'notifications' : 'notifications-outline'}
                   size={16}
-                  color={arrivalAlert?.stopCode === selectedStop.stopCode ? colors.warning : colors.textMuted}
+                  color={arrivalAlert?.stopCode === selectedStop.code ? colors.warning : colors.textMuted}
                 />
               </TouchableOpacity>
-              <TouchableOpacity onPress={() => { setSelectedStop(null); selectedStopRef.current = null; setStopLines(null); setWalkCoords([]); setShowAlertPicker(false); }} hitSlop={10}>
+              <TouchableOpacity onPress={closeStop} hitSlop={10}>
                 <Ionicons name="close" size={18} color={colors.textMuted} />
               </TouchableOpacity>
             </View>
@@ -574,32 +714,21 @@ export default function LiveMapScreen() {
               threshold={alertThreshold}
               onChangeThreshold={setAlertThreshold}
               accentColor={primaryColor}
-              onCancel={() => setShowAlertPicker(false)}
-              onConfirm={() => {
-                const min = parseInt(alertThreshold, 10);
-                if (!isNaN(min) && min > 0) {
-                  startAlertWatch({
-                    stopCode: selectedStop.stopCode,
-                    stopName: selectedStop.name,
-                    thresholdMin: min,
-                    lineId: lineId ?? '',
-                    routeCodes: [...lineRouteCodes],
-                    color: primaryColor,
-                  });
-                  setShowAlertPicker(false);
-                }
-              }}
+              errorMessage={alertError}
+              busy={alertBusy}
+              onCancel={() => { setShowAlertPicker(false); setAlertError(null); }}
+              onConfirm={confirmAlert}
             />
-          {selectedStop.walkMin !== null && (
+          {walk.walkMin !== null && (
             <View style={ms.walkRow}>
               <Ionicons name="walk" size={14} color="#4285F4" />
-              <Text style={ms.walkText}>{selectedStop.walkMin} min walk</Text>
+              <Text style={ms.walkText}>{walk.walkMin} min walk</Text>
             </View>
           )}
-          {selectedStop.loading ? (
+          {arrivalsLoading ? (
             <ActivityIndicator size="small" color={colors.primaryLight} style={{ marginTop: 6 }} />
-          ) : selectedStop.arrivals && selectedStop.arrivals.length > 0 ? (
-            selectedStop.arrivals.map((a, i) => (
+          ) : arrivals && arrivals.length > 0 ? (
+            arrivals.map((a, i) => (
               <View key={i} style={s.arrivalRow}>
                 <View style={[s.arrivalBadge, { backgroundColor: a.color }]}>
                   <Text style={s.arrivalMin}>{a.min} min</Text>
@@ -616,25 +745,7 @@ export default function LiveMapScreen() {
             </View>
           )}
           <TouchableOpacity style={s.allLinesBtn} activeOpacity={0.7}
-            onPress={async () => {
-              if (stopLines) { setStopLines(null); return; }
-              setLoadingStopLines(true);
-              try {
-                let routes: Awaited<ReturnType<typeof getRoutesForStop>> | null = null;
-                let arrivals: Awaited<ReturnType<typeof getStopArrivals>> = [];
-                try {
-                  [routes, arrivals] = await Promise.all([
-                    getRoutesForStop(selectedStop.stopCode), getStopArrivals(selectedStop.stopCode),
-                  ]);
-                  if (routes && routes.length > 0) setCachedRoutesForStop(selectedStop.stopCode, routes);
-                } catch {
-                  routes = await getCachedRoutesForStop(selectedStop.stopCode);
-                  arrivals = [];
-                }
-                const { lines } = buildLineGroups(routes ?? [], arrivals ?? [], linesMap);
-                setStopLines(lines);
-              } catch {} finally { setLoadingStopLines(false); }
-            }}>
+            onPress={() => setShowAllLines((v) => !v)}>
             {loadingStopLines ? (
               <ActivityIndicator size="small" color={primaryColor} />
             ) : (
@@ -681,11 +792,7 @@ export default function LiveMapScreen() {
           {allRoutes.map((r) => (
             <TouchableOpacity key={r.RouteCode}
               style={[s.routeMenuItem, activeRouteCode === r.RouteCode && s.routeMenuItemActive]}
-              onPress={() => {
-                setActiveRouteCode(r.RouteCode); setShowRouteMenu(false);
-                setSelectedStop(null); selectedStopRef.current = null;
-                setStopLines(null); setWalkCoords([]);
-              }}>
+              onPress={() => selectRoute(r.RouteCode)}>
               <Text style={[s.routeMenuText, activeRouteCode === r.RouteCode && s.routeMenuTextActive]} numberOfLines={2}>
                 {r.RouteDescrEng || r.RouteDescr}
               </Text>
@@ -716,19 +823,15 @@ export default function LiveMapScreen() {
 
       {/* Bottom right controls */}
       <View style={ms.bottomControls}>
-        <TouchableOpacity style={ms.locationBtn}
-          onPress={() => {
-            const loc = userLocationRef.current;
-            if (loc && mapRef.current) {
-              mapRef.current.animateToRegion({
-                latitude: loc.lat, longitude: loc.lng,
-                latitudeDelta: 0.01, longitudeDelta: 0.01,
-              }, 500);
-            }
-          }}>
+        <TouchableOpacity style={ms.locationBtn} onPress={recenter}>
           <View style={ms.locationIcon}><View style={ms.locationDot} /></View>
         </TouchableOpacity>
-        <RefreshTimer staleLabel={staleLabel} />
+        <RefreshTimer
+          dataUpdatedAt={busUpdatedAt}
+          intervalMs={BUS_POLL_MS}
+          fetching={busFetching}
+          staleLabel={staleLabel}
+        />
       </View>
 
       {/* Schedule overlay */}
@@ -750,15 +853,19 @@ export default function LiveMapScreen() {
         </View>
       )}
 
-      {!allRoutes && (
-        <View style={ms.loaderOverlay}>
-          <ActivityIndicator size="large" color={colors.primaryLight} />
-        </View>
-      )}
+      <MapStatus
+        blocking={!allRoutes && !routesError}
+        loadingLabel={loadingLabel}
+        hint={stopsHidden && stopsWithBearings.length > 0 ? 'Zoom in to see stops' : null}
+        error={visibleError}
+        onRetry={retryAll}
+        onDismissError={dismissError}
+      />
 
       <StampModal
         visible={!!stampModal}
         name={stampName} emoji={stampEmoji}
+        accentColor={primaryColor}
         onChangeName={setStampName} onChangeEmoji={setStampEmoji}
         onCancel={() => setStampModal(null)}
         onSave={() => {

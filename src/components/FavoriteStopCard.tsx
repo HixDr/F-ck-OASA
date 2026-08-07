@@ -1,280 +1,609 @@
 /**
  * FavoriteStopCard — live arrival dashboard for a saved stop.
- * Polls getStopArrivals + getRoutesForStop, groups by line,
- * and shows a compact arrival board with alert buttons.
- * Supports filtering visible lines via an edit mode.
- * Shows next scheduled departure when no live arrivals are available.
+ *
+ * Arrivals come from `useArrivals` (the one sanctioned polling path: deduped
+ * across cards, paused when Home is unfocused or the app is backgrounded).
+ * Everything cosmetic — "to <destination>" labels, timetables — is filled in
+ * afterwards and must never gate the numbers.
  */
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   ActivityIndicator,
   ScrollView,
+  Alert as RNAlert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, spacing } from '../theme';
-import { getStopArrivals, getRoutesForStop, getRoutes, getDailySchedule } from '../services/api';
-import { updateFavoriteStop, getCachedSchedule, setCachedSchedule, getCachedRoutesForStop, setCachedRoutesForStop, getCachedRoutes } from '../services/storage';
+import { getRoutes, getDailySchedule, isUsableSchedule } from '../services/api';
+import {
+  updateFavoriteStop,
+  getCachedSchedule,
+  setCachedSchedule,
+  getCachedRoutes,
+  setCachedRoutes,
+} from '../services/storage';
+import { useArrivals, useRoutesForStop, ARRIVALS_POLL_MS } from '../hooks';
 import { useLinesMap } from '../hooks/useLinesMap';
-import { buildLineGroups, enrichWithDirectionHints, getArrivalColor, type LineGroup } from '../features/map/mapUtils';
-import { startAlertWatch, stopAlertWatch, subscribeAlertConfig, type AlertConfig } from '../services/notifications';
-import { parseSchedule, type LineSchedule } from '../utils/scheduleUtils';
+import { useNetworkStatus } from '../services/network';
+import {
+  buildLineGroups,
+  enrichWithDirectionHints,
+  getArrivalColor,
+  type LineGroup,
+} from '../features/map/mapUtils';
+import {
+  startAlertWatch,
+  stopAlertWatch,
+  subscribeAlertConfig,
+  type AlertConfig,
+} from '../services/notifications';
+import { parseSchedule, athensNowMin, type LineSchedule } from '../utils/scheduleUtils';
 import ScheduleGrid from './ScheduleGrid';
 import AlertPickerModal from './AlertPickerModal';
 import { s } from './FavoriteStopCard.styles';
-import type { FavoriteStop } from '../types';
+import type { FavoriteStop, OasaDailySchedule } from '../types';
 
-const POLL_INTERVAL = 15_000;
+/** How often derived-from-clock values (next departure, arrival decay) are
+ *  recomputed. Minute-resolution data does not need a per-second tick. */
+const CLOCK_TICK_MS = 30_000;
+/** Past this age the live numbers stop being trustworthy and are dimmed. */
+const STALE_AFTER_MS = ARRIVALS_POLL_MS * 3;
+
+const EMPTY_LABELS: ReadonlyMap<string, string> = new Map();
+const EMPTY_SCHEDULES: ReadonlyMap<string, LineSchedule> = new Map();
+const EMPTY_RAW_SCHEDULES: ReadonlyMap<string, RawSchedule> = new Map();
+
+interface RawSchedule {
+  data: OasaDailySchedule;
+  direction: 'go' | 'come';
+}
 
 interface Props {
   stop: FavoriteStop;
   primaryColor: string;
-  onRemove: () => void;
+  /** False while Home is not the focused screen: pauses polling and clocks. */
+  active?: boolean;
+  /** Home is in edit mode — show the destructive / reordering affordances. */
+  editing?: boolean;
+  onRemove: (stop: FavoriteStop) => void;
+  onMoveUp?: (stop: FavoriteStop) => void;
+  onMoveDown?: (stop: FavoriteStop) => void;
+  canMoveUp?: boolean;
+  canMoveDown?: boolean;
 }
 
-export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props) {
+/* ── Freshness indicator ─────────────────────────────────────── */
+
+/**
+ * "Live" / "updated 40s ago". Owns its own one-second interval so the seconds
+ * counter does not re-render the arrival rows around it.
+ */
+const Freshness = React.memo(function Freshness({
+  updatedAt,
+  failed,
+  offline,
+  active,
+}: {
+  updatedAt: number;
+  failed: boolean;
+  offline: boolean;
+  active: boolean;
+}) {
+  const [, tick] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    if (!active || !updatedAt) return;
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [active, updatedAt]);
+
+  if (!updatedAt) return null;
+  const age = Math.max(0, Date.now() - updatedAt);
+  const fresh = !failed && age < ARRIVALS_POLL_MS + 5_000;
+  const label = age < 10_000 ? 'just now' : age < 60_000 ? `${Math.floor(age / 1000)}s ago` : `${Math.floor(age / 60_000)}m ago`;
+
+  return (
+    <View style={s.footer} accessibilityLabel={fresh ? 'Arrivals are live' : `Arrivals last updated ${label}`}>
+      <View style={[s.dot, { backgroundColor: fresh ? colors.success : colors.warning }]} />
+      <Text style={[s.footerText, !fresh && { color: colors.warning }]}>
+        {fresh
+          ? 'Live'
+          : offline
+            ? `Offline · last updated ${label}`
+            : `Not updating · last updated ${label}`}
+      </Text>
+    </View>
+  );
+});
+
+/* ── One arrival row ─────────────────────────────────────────── */
+
+interface RowProps {
+  lineId: string;
+  lineCode: string;
+  label: string;
+  /** Minutes to arrival, already decayed by the age of the data. */
+  minutes: number | null;
+  color: string;
+  stale: boolean;
+  nextDeparture: string | null;
+  nextIsTomorrow: boolean;
+  hasTimetable: boolean;
+  scheduleOpen: boolean;
+  alertActive: boolean;
+  primaryColor: string;
+  onPress: (lineCode: string) => void;
+  onToggleSchedule: (lineCode: string) => void;
+  onToggleAlert: (lineCode: string) => void;
+}
+
+const LineRow = React.memo(function LineRow({
+  lineId,
+  lineCode,
+  label,
+  minutes,
+  color,
+  stale,
+  nextDeparture,
+  nextIsTomorrow,
+  hasTimetable,
+  scheduleOpen,
+  alertActive,
+  primaryColor,
+  onPress,
+  onToggleSchedule,
+  onToggleAlert,
+}: RowProps) {
+  const arrivalText =
+    minutes == null ? null : minutes <= 0 ? 'now' : String(minutes);
+
+  // Spoken form of the app's core datum. "4′" is announced as "4 feet".
+  const spoken =
+    minutes == null
+      ? nextDeparture
+        ? `next scheduled departure ${nextDeparture}${nextIsTomorrow ? ' tomorrow' : ''}`
+        : 'no arrival information'
+      : minutes <= 0
+        ? 'arriving now'
+        : `${minutes} minute${minutes === 1 ? '' : 's'}`;
+
+  return (
+    <View>
+      <TouchableOpacity
+        style={s.lineRow}
+        activeOpacity={0.7}
+        onPress={() => onPress(lineCode)}
+        accessibilityRole="button"
+        accessibilityLabel={`Line ${lineId}, ${label}, ${spoken}${stale ? ', data may be out of date' : ''}`}
+        accessibilityHint="Opens the live map for this line"
+      >
+        <View style={[s.lineBadge, { backgroundColor: primaryColor }]}>
+          <Text style={s.lineBadgeText}>{lineId}</Text>
+        </View>
+
+        <View style={s.lineMain}>
+          <Text style={s.lineDescr} numberOfLines={1}>{label}</Text>
+          {hasTimetable && (
+            <TouchableOpacity
+              style={s.schedPill}
+              activeOpacity={0.7}
+              onPress={() => onToggleSchedule(lineCode)}
+              accessibilityRole="button"
+              accessibilityState={{ expanded: scheduleOpen }}
+              accessibilityLabel={
+                nextDeparture
+                  ? `Timetable, next departure ${nextDeparture}${nextIsTomorrow ? ' tomorrow' : ''}`
+                  : 'Timetable'
+              }
+            >
+              <Ionicons
+                name={scheduleOpen ? 'time' : 'time-outline'}
+                size={12}
+                color={scheduleOpen ? primaryColor : colors.textMuted}
+              />
+              <Text style={[s.schedPillText, scheduleOpen && { color: primaryColor }]}>
+                {nextDeparture
+                  ? nextIsTomorrow ? `${nextDeparture} tomorrow` : nextDeparture
+                  : 'Timetable'}
+              </Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        <View style={[s.arrivalBlock, stale && s.stale]}>
+          {arrivalText == null ? (
+            <Text style={s.noArrival}>—</Text>
+          ) : arrivalText === 'now' ? (
+            <Text style={[s.arrivalNow, { color }]}>now</Text>
+          ) : (
+            <>
+              <Text style={[s.arrivalMin, { color }]}>{arrivalText}</Text>
+              <Text style={s.arrivalUnit}>min</Text>
+            </>
+          )}
+        </View>
+
+        <TouchableOpacity
+          style={s.bellBtn}
+          onPress={() => onToggleAlert(lineCode)}
+          accessibilityRole="switch"
+          accessibilityState={{ checked: alertActive }}
+          accessibilityLabel={`Arrival alert for line ${lineId}`}
+          accessibilityHint={alertActive ? 'Turns the alert off' : 'Choose how early to be warned'}
+        >
+          <Ionicons
+            name={alertActive ? 'notifications' : 'notifications-outline'}
+            size={22}
+            color={alertActive ? colors.warning : colors.textMuted}
+          />
+        </TouchableOpacity>
+      </TouchableOpacity>
+    </View>
+  );
+});
+
+/* ── Card ────────────────────────────────────────────────────── */
+
+function FavoriteStopCard({
+  stop,
+  primaryColor,
+  active = true,
+  editing = false,
+  onRemove,
+  onMoveUp,
+  onMoveDown,
+  canMoveUp,
+  canMoveDown,
+}: Props) {
   const router = useRouter();
-  const { allLines, linesMap } = useLinesMap();
+  const { linesMap, linesLoading, linesError, refetchLines } = useLinesMap();
+  const isOnline = useNetworkStatus();
 
-  const [allLineGroups, setAllLineGroups] = useState<LineGroup[] | null>(null);
-  const [loading, setLoading] = useState(true);
-  const routeToLineRef = useRef<Map<string, string>>(new Map());
-  // Keep original descriptions for the edit screen (before "to X" enrichment)
-  const rawDescrMap = useRef<Map<string, string>>(new Map());
+  const routesQuery = useRoutesForStop(stop.stopCode);
+  const arrivalsQuery = useArrivals(stop.stopCode, active);
 
-  // Edit mode for line visibility
-  const [editing, setEditing] = useState(false);
+  /* Line groups are derived, not fetched: `buildLineGroups` already has every
+     arrival minute the moment both queries resolve. Nothing else may delay it. */
+  const built = useMemo(() => {
+    if (!routesQuery.data) return null;
+    return buildLineGroups(routesQuery.data, arrivalsQuery.data ?? [], linesMap);
+  }, [routesQuery.data, arrivalsQuery.data, linesMap]);
+  const allLineGroups = built?.lines ?? null;
+
+  /* A *stable* identity for "which lines this stop serves". The arrival poll
+     rebuilds `allLineGroups` every 15s with fresh object identities; effects
+     keyed on that array re-ran a network call per line, forever. */
+  const linesKey = useMemo(
+    () => (allLineGroups ?? []).map((l) => `${l.lineCode}:${l.routeCode}`).sort().join('|'),
+    [allLineGroups],
+  );
+
+  // Latest groups for effects that must not depend on their identity.
+  const groupsRef = useRef<LineGroup[]>([]);
+  useEffect(() => {
+    groupsRef.current = allLineGroups ?? [];
+  });
+
+  /* Clock tick. Everything derived from "now" (next departure, decay of an
+     arrival estimate) refreshes from here instead of from the poll. */
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!active) return;
+    // Catch up after time spent unfocused, without a redundant render on mount.
+    setNowMs((prev) => (Date.now() - prev > 1_000 ? Date.now() : prev));
+    const id = setInterval(() => setNowMs(Date.now()), CLOCK_TICK_MS);
+    return () => clearInterval(id);
+  }, [active]);
+
+  const [labels, setLabels] = useState<ReadonlyMap<string, string>>(EMPTY_LABELS);
+  const [rawSchedules, setRawSchedules] = useState<ReadonlyMap<string, RawSchedule>>(EMPTY_RAW_SCHEDULES);
+  const [filtering, setFiltering] = useState(false);
   const [visibleSet, setVisibleSet] = useState<Set<string> | null>(() =>
     stop.visibleLines ? new Set(stop.visibleLines) : null,
   );
-
-  // Alert state
-  const [arrivalAlert, setArrivalAlert] = useState<AlertConfig | null>(null);
-  useEffect(() => subscribeAlertConfig(setArrivalAlert), []);
-  const [alertLineCode, setAlertLineCode] = useState<string | null>(null);
-  const [alertThreshold, setAlertThreshold] = useState('5');
-
-  // Schedule state
-  const [scheduleMap, setScheduleMap] = useState<Map<string, LineSchedule>>(new Map());
   const [expandedScheduleLine, setExpandedScheduleLine] = useState<string | null>(null);
 
-  // Filtered lines for display
+  // Home's edit mode owns the header while it is on, so the per-card line
+  // filter cannot stay open underneath it.
+  useEffect(() => {
+    if (editing) setFiltering(false);
+  }, [editing]);
+
+  const [arrivalAlert, setArrivalAlert] = useState<AlertConfig | null>(null);
+  useEffect(() => subscribeAlertConfig(setArrivalAlert), []);
+  const [pickerLine, setPickerLine] = useState<string | null>(null);
+  const [alertThreshold, setAlertThreshold] = useState('5');
+  const [arming, setArming] = useState(false);
+  const [pickerError, setPickerError] = useState<string | null>(null);
+
+  /* "to <destination>" labels — one `getStops` per line, purely cosmetic.
+     These used to be awaited before any arrival was rendered: ~10 requests
+     before the user saw a single number at an 8-line stop. */
+  useEffect(() => {
+    if (!linesKey) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const enriched = await enrichWithDirectionHints(groupsRef.current, stop.stopCode);
+        if (cancelled) return;
+        setLabels(new Map(enriched.map((l) => [l.lineCode, l.lineDescrEng])));
+      } catch {
+        // Labels are decoration; the raw route description stays.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [linesKey, stop.stopCode]);
+
+  /* Timetables — fetched once per set of lines, cache first. */
+  useEffect(() => {
+    if (!linesKey) return;
+    let cancelled = false;
+    const ctrl = new AbortController();
+    (async () => {
+      const next = new Map<string, RawSchedule>();
+      await Promise.allSettled(
+        groupsRef.current.map(async (line) => {
+          // Direction: our route's position in the line's route list decides
+          // whether the "go" or "come" column of the timetable applies.
+          let direction: 'go' | 'come' = 'go';
+          let lineRoutes = await getCachedRoutes(line.lineCode).catch(() => null);
+          if (!lineRoutes?.length) {
+            try {
+              lineRoutes = await getRoutes(line.lineCode, { signal: ctrl.signal });
+              if (lineRoutes?.length) setCachedRoutes(line.lineCode, lineRoutes);
+            } catch {
+              lineRoutes = null;
+            }
+          }
+          if (lineRoutes?.length) {
+            const idx = lineRoutes.findIndex((r) => r.RouteCode === line.routeCode);
+            direction = idx <= 0 ? 'come' : 'go';
+          }
+
+          let data = await getCachedSchedule(line.lineCode).catch(() => null);
+          if (!isUsableSchedule(data)) {
+            try {
+              const fresh = await getDailySchedule(line.lineCode, { signal: ctrl.signal });
+              if (isUsableSchedule(fresh)) {
+                data = fresh;
+                setCachedSchedule(line.lineCode, fresh);
+              }
+            } catch {
+              // No timetable for this line right now — the row just omits it.
+            }
+          }
+          if (isUsableSchedule(data)) next.set(line.lineCode, { data: data!, direction });
+        }),
+      );
+      if (!cancelled) setRawSchedules(next);
+    })();
+    return () => { cancelled = true; ctrl.abort(); };
+  }, [linesKey]);
+
+  /* Next departure is a function of the clock, so it is derived here rather
+     than frozen into state when the timetable was fetched. */
+  const schedules = useMemo(() => {
+    if (rawSchedules.size === 0) return EMPTY_SCHEDULES;
+    const nowMin = athensNowMin(new Date(nowMs));
+    const m = new Map<string, LineSchedule>();
+    rawSchedules.forEach((raw, lineCode) => {
+      m.set(lineCode, parseSchedule(raw.data, raw.direction, nowMin));
+    });
+    return m;
+  }, [rawSchedules, nowMs]);
+
   const displayLines = useMemo(() => {
     if (!allLineGroups) return null;
     if (!visibleSet) return allLineGroups;
     return allLineGroups.filter((l) => visibleSet.has(l.lineCode));
   }, [allLineGroups, visibleSet]);
 
-  // Initial load — fetch routes and arrivals
-  const fetchData = useCallback(async () => {
-    try {
-      let routes: Awaited<ReturnType<typeof getRoutesForStop>> | null = null;
-      let arrivals: Awaited<ReturnType<typeof getStopArrivals>> = [];
-      try {
-        [routes, arrivals] = await Promise.all([
-          getRoutesForStop(stop.stopCode),
-          getStopArrivals(stop.stopCode),
-        ]);
-        // Cache routes for offline use
-        if (routes && routes.length > 0) {
-          setCachedRoutesForStop(stop.stopCode, routes);
-        }
-      } catch {
-        // Offline fallback — use cached routes, no arrivals
-        routes = await getCachedRoutesForStop(stop.stopCode);
-        arrivals = [];
-      }
-      const { lines: grouped, routeToLine } = buildLineGroups(routes ?? [], arrivals ?? [], linesMap);
-      routeToLineRef.current = routeToLine;
-      // Save raw descriptions before enrichment (for edit mode)
-      grouped.forEach((l) => rawDescrMap.current.set(l.lineCode, l.lineDescrEng));
-      // Enrich circular routes with direction hints
-      const enriched = await enrichWithDirectionHints(grouped, stop.stopCode);
-      setAllLineGroups(enriched);
-    } catch {
-      setAllLineGroups([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [stop.stopCode, linesMap]);
+  /* Freshness: how much of the last known estimate has already elapsed. */
+  const updatedAt = arrivalsQuery.dataUpdatedAt;
+  const ageMs = updatedAt ? Math.max(0, nowMs - updatedAt) : 0;
+  const decayMin = updatedAt ? Math.floor(ageMs / 60_000) : 0;
+  const isStale = !!updatedAt && ageMs > STALE_AFTER_MS;
 
-  useEffect(() => {
-    if (!allLines) return; // Wait for lines data to populate linesMap
-    fetchData();
-  }, [fetchData, allLines]);
+  /* ── Handlers ──────────────────────────────────────────────── */
 
-  // Auto-refresh arrivals
-  useEffect(() => {
-    if (loading) return;
-    const id = setInterval(async () => {
-      try {
-        const arrivals = await getStopArrivals(stop.stopCode);
-        const routeToLine = routeToLineRef.current;
-        const lineMinMap = new Map<string, number>();
-        (arrivals ?? []).forEach((a) => {
-          const lineCode = routeToLine.get(a.route_code);
-          if (lineCode) {
-            const min = Number(a.btime2);
-            const prev = lineMinMap.get(lineCode);
-            if (prev === undefined || min < prev) lineMinMap.set(lineCode, min);
-          }
-        });
-        setAllLineGroups((prev) => {
-          if (!prev) return prev;
-          return prev.map((l) => {
-            const nextMin = lineMinMap.get(l.lineCode) ?? null;
-            const color = nextMin != null ? getArrivalColor(nextMin) : colors.textMuted;
-            return { ...l, nextMin, color };
-          });
-        });
-      } catch {}
-    }, POLL_INTERVAL);
-    return () => clearInterval(id);
-  }, [stop.stopCode, loading]);
-
-  // Fetch schedules for all displayed lines (one-time, cached)
-  useEffect(() => {
-    if (!allLineGroups || allLineGroups.length === 0) return;
-    let cancelled = false;
-    (async () => {
-      const newMap = new Map<string, LineSchedule>();
-      await Promise.allSettled(
-        allLineGroups.map(async (line) => {
-          try {
-            // Determine direction: fetch line's routes, find index of our routeCode
-            let direction: 'go' | 'come' = 'go';
-            try {
-              // Try API first, fall back to cache
-              let lineRoutes;
-              try {
-                lineRoutes = await getRoutes(line.lineCode);
-              } catch {
-                lineRoutes = await getCachedRoutes(line.lineCode);
-              }
-              if (lineRoutes && lineRoutes.length > 0) {
-                const idx = lineRoutes.findIndex((r) => r.RouteCode === line.routeCode);
-                direction = idx <= 0 ? 'come' : 'go';
-              }
-            } catch {}
-
-            // Try cache first, then network
-            let data = await getCachedSchedule(line.lineCode);
-            if (!data) {
-              try {
-                data = await getDailySchedule(line.lineCode);
-                if (data) setCachedSchedule(line.lineCode, data);
-              } catch {}
-            }
-            if (data) {
-              newMap.set(line.lineCode, parseSchedule(data, direction));
-            }
-          } catch {}
-        }),
-      );
-      if (!cancelled) setScheduleMap(newMap);
-    })();
-    return () => { cancelled = true; };
-  }, [allLineGroups]);
-
-  const handleLinePress = useCallback((line: LineGroup) => {
-    const info = linesMap.get(line.lineCode);
+  const handleLinePress = useCallback((lineCode: string) => {
+    const line = groupsRef.current.find((l) => l.lineCode === lineCode);
+    if (!line) return;
+    const info = linesMap.get(lineCode);
     router.push({
       pathname: '/map/[lineCode]',
       params: {
-        lineCode: line.lineCode,
+        lineCode,
         lineId: line.lineId,
         lineDescr: info?.LineDescrEng ?? info?.LineDescr ?? line.lineDescrEng,
       },
     });
   }, [linesMap, router]);
 
-  const handleAlertToggle = useCallback((line: LineGroup) => {
-    if (arrivalAlert?.stopCode === stop.stopCode) {
+  const toggleSchedule = useCallback((lineCode: string) => {
+    setExpandedScheduleLine((prev) => (prev === lineCode ? null : lineCode));
+  }, []);
+
+  const alertHere = arrivalAlert?.stopCode === stop.stopCode ? arrivalAlert : null;
+
+  /**
+   * One alert watch exists app-wide. Tapping a bell therefore means:
+   * this line's alert is on → turn it off; anything else → open the picker and
+   * *switch* to this line. It used to silently stop whatever was armed.
+   */
+  const handleAlertToggle = useCallback((lineCode: string) => {
+    const line = groupsRef.current.find((l) => l.lineCode === lineCode);
+    if (!line) return;
+    if (alertHere && alertHere.lineId === line.lineId) {
       stopAlertWatch();
-      setAlertLineCode(null);
       return;
     }
-    if (alertLineCode === line.lineCode) {
-      setAlertLineCode(null);
-      return;
-    }
-    setAlertLineCode(line.lineCode);
-    setAlertThreshold('5');
-  }, [arrivalAlert, stop.stopCode, alertLineCode]);
+    setAlertThreshold(String(alertHere?.thresholdMin ?? 5));
+    setPickerError(null);
+    setPickerLine(lineCode);
+  }, [alertHere]);
 
-  const handleAlertConfirm = useCallback((line: LineGroup) => {
-    const min = parseInt(alertThreshold, 10);
-    if (!isNaN(min) && min > 0) {
-      const routeCodes: string[] = [];
-      routeToLineRef.current.forEach((lc, rc) => {
-        if (lc === line.lineCode) routeCodes.push(rc);
-      });
-      startAlertWatch({
-        stopCode: stop.stopCode,
-        stopName: stop.stopName,
-        thresholdMin: min,
-        lineId: line.lineId,
-        routeCodes,
-        color: primaryColor,
-      });
-      setAlertLineCode(null);
-    }
-  }, [alertThreshold, stop]);
-
-  const toggleLineVisibility = useCallback((lineCode: string) => {
-    setVisibleSet((prev) => {
-      const allCodes = (allLineGroups ?? []).map((l) => l.lineCode);
-      const current = prev ?? new Set(allCodes);
-      const next = new Set(current);
-      if (next.has(lineCode)) {
-        next.delete(lineCode);
-      } else {
-        next.add(lineCode);
-      }
-      // If all are selected, store null (show all)
-      const result = next.size === allCodes.length ? null : next;
-      updateFavoriteStop(stop.stopCode, {
-        visibleLines: result ? [...result] : null,
-      });
-      return result;
+  const handleAlertConfirm = useCallback(async () => {
+    const line = groupsRef.current.find((l) => l.lineCode === pickerLine);
+    const min = Number.parseInt(alertThreshold, 10);
+    if (!line || !Number.isFinite(min) || min <= 0) return;
+    const routeCodes: string[] = [];
+    built?.routeToLine.forEach((lc, rc) => {
+      if (lc === line.lineCode) routeCodes.push(rc);
     });
-  }, [allLineGroups, stop.stopCode]);
+
+    setArming(true);
+    setPickerError(null);
+    // Arming can fail for reasons the user can act on (notifications denied,
+    // Android refusing the foreground service). Closing the dialog regardless
+    // would leave a bell that looks armed and an alert that can never fire.
+    const result = await startAlertWatch({
+      stopCode: stop.stopCode,
+      stopName: stop.stopName,
+      thresholdMin: min,
+      lineId: line.lineId,
+      routeCodes,
+      color: primaryColor,
+    });
+    setArming(false);
+
+    if (!result.ok) {
+      setPickerError(result.message);
+      return;
+    }
+    setPickerLine(null);
+    if (result.replaced) {
+      // Only one watch exists app-wide, so this just cancelled someone else's.
+      RNAlert.alert(
+        'Alert switched',
+        `The alert for line ${result.replaced.lineId} at ${result.replaced.stopName} was cancelled — only one alert can run at a time.`,
+      );
+    }
+  }, [alertThreshold, pickerLine, built, stop.stopCode, stop.stopName, primaryColor]);
+
+  /**
+   * Visibility filter. The storage write used to live *inside* the state
+   * updater, which React may replay during a concurrent render.
+   */
+  const toggleLineVisibility = useCallback((lineCode: string) => {
+    const allCodes = groupsRef.current.map((l) => l.lineCode);
+    // With no lines loaded, `next.size === allCodes.length` is 0 === 0 and we
+    // would persist "show all" over the user's actual selection.
+    if (allCodes.length === 0) return;
+    const current = visibleSet ?? new Set(allCodes);
+    const next = new Set(current);
+    if (next.has(lineCode)) next.delete(lineCode);
+    else next.add(lineCode);
+    const result = next.size === allCodes.length ? null : next;
+    setVisibleSet(result);
+    updateFavoriteStop(stop.stopCode, { visibleLines: result ? [...result] : null });
+  }, [visibleSet, stop.stopCode]);
+
+  const handleRetry = useCallback(() => {
+    refetchLines();
+    routesQuery.refetch();
+    arrivalsQuery.refetch();
+  }, [refetchLines, routesQuery, arrivalsQuery]);
+
+  /* ── Render ────────────────────────────────────────────────── */
+
+  const hasLines = !!allLineGroups && allLineGroups.length > 0;
+  const failed = (linesError || routesQuery.isError) && !hasLines;
+  const loading = !failed && !allLineGroups && (linesLoading || routesQuery.isLoading);
+  // An armed alert whose line the filter hides would otherwise be unreachable.
+  const orphanAlert =
+    alertHere && !(displayLines ?? []).some((l) => l.lineId === alertHere.lineId) ? alertHere : null;
 
   return (
     <View style={s.card}>
-      <TouchableOpacity style={s.header} activeOpacity={0.7} onLongPress={onRemove}>
+      <View style={s.header}>
         <Ionicons name="location" size={16} color={primaryColor} />
-        <Text style={s.stopName} numberOfLines={1}>{stop.stopName}</Text>
-        {!loading && allLineGroups && allLineGroups.length > 0 && (
-          <TouchableOpacity onPress={() => setEditing((v) => !v)} hitSlop={12}>
-            <Ionicons name={editing ? 'checkmark-circle' : 'options-outline'} size={16}
-              color={editing ? primaryColor : colors.textMuted} />
-          </TouchableOpacity>
-        )}
-      </TouchableOpacity>
+        <Text style={s.stopName} numberOfLines={1} accessibilityRole="header">{stop.stopName}</Text>
 
-      {/* Edit mode — line visibility toggles */}
-      {editing && allLineGroups && allLineGroups.length > 0 && (
+        {editing ? (
+          <>
+            <TouchableOpacity
+              style={s.headerBtn}
+              disabled={!canMoveUp}
+              onPress={() => onMoveUp?.(stop)}
+              accessibilityRole="button"
+              accessibilityLabel={`Move ${stop.stopName} up`}
+              accessibilityState={{ disabled: !canMoveUp }}
+            >
+              <Ionicons name="chevron-up" size={20} color={canMoveUp ? colors.text : colors.border} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={s.headerBtn}
+              disabled={!canMoveDown}
+              onPress={() => onMoveDown?.(stop)}
+              accessibilityRole="button"
+              accessibilityLabel={`Move ${stop.stopName} down`}
+              accessibilityState={{ disabled: !canMoveDown }}
+            >
+              <Ionicons name="chevron-down" size={20} color={canMoveDown ? colors.text : colors.border} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={s.headerBtn}
+              onPress={() => onRemove(stop)}
+              accessibilityRole="button"
+              accessibilityLabel={`Remove ${stop.stopName} from saved stops`}
+            >
+              <Ionicons name="remove-circle" size={22} color={colors.danger} />
+            </TouchableOpacity>
+          </>
+        ) : hasLines ? (
+          <TouchableOpacity
+            style={s.headerBtn}
+            onPress={() => setFiltering((v) => !v)}
+            accessibilityRole="button"
+            accessibilityState={{ expanded: filtering }}
+            accessibilityLabel={filtering ? 'Done choosing lines' : 'Choose which lines to show'}
+          >
+            <Ionicons
+              name={filtering ? 'checkmark-circle' : 'options-outline'}
+              size={20}
+              color={filtering ? primaryColor : colors.textMuted}
+            />
+          </TouchableOpacity>
+        ) : null}
+      </View>
+
+      {/* Line visibility */}
+      {filtering && hasLines && (
         <ScrollView style={s.editScroll} showsVerticalScrollIndicator={false} nestedScrollEnabled>
-          {allLineGroups.map((line) => {
+          {allLineGroups!.map((line) => {
             const isVisible = !visibleSet || visibleSet.has(line.lineCode);
             return (
-              <TouchableOpacity key={line.lineCode} style={s.editRow} activeOpacity={0.7}
-                onPress={() => toggleLineVisibility(line.lineCode)}>
+              <TouchableOpacity
+                key={line.lineCode}
+                style={s.editRow}
+                activeOpacity={0.7}
+                onPress={() => toggleLineVisibility(line.lineCode)}
+                accessibilityRole="checkbox"
+                accessibilityState={{ checked: isVisible }}
+                accessibilityLabel={`Show line ${line.lineId}, ${line.lineDescrEng}`}
+              >
                 <Ionicons
                   name={isVisible ? 'checkbox' : 'square-outline'}
-                  size={18}
+                  size={20}
                   color={isVisible ? primaryColor : colors.textMuted}
                 />
                 <View style={[s.lineBadge, { backgroundColor: isVisible ? primaryColor : colors.border }]}>
                   <Text style={s.lineBadgeText}>{line.lineId}</Text>
                 </View>
-                <Text style={[s.lineDescr, !isVisible && { opacity: 0.4 }]}>
-                  {rawDescrMap.current.get(line.lineCode) || line.lineDescrEng}
+                <Text style={[s.lineDescrMuted, { flex: 1 }, !isVisible && { opacity: 0.4 }]} numberOfLines={1}>
+                  {line.lineDescrEng}
                 </Text>
               </TouchableOpacity>
             );
@@ -282,86 +611,133 @@ export default function FavoriteStopCard({ stop, primaryColor, onRemove }: Props
         </ScrollView>
       )}
 
-      {/* Normal mode — filtered arrival board */}
-      {!editing && (
-        loading ? (
-          <ActivityIndicator size="small" color={primaryColor} style={{ marginTop: spacing.sm }} />
+      {!filtering && (
+        failed ? (
+          <View style={s.errorBox}>
+            <Text style={s.errorText}>
+              {isOnline ? "Couldn't load this stop." : 'No connection — arrivals unavailable.'}
+            </Text>
+            <TouchableOpacity
+              style={[s.retryBtn, { borderColor: primaryColor }]}
+              onPress={handleRetry}
+              accessibilityRole="button"
+              accessibilityLabel="Retry loading this stop"
+            >
+              <Ionicons name="refresh" size={16} color={primaryColor} />
+              <Text style={[s.retryText, { color: primaryColor }]}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        ) : loading ? (
+          <ActivityIndicator
+            size="small"
+            color={primaryColor}
+            style={{ marginVertical: spacing.md }}
+            accessibilityLabel={`Loading arrivals for ${stop.stopName}`}
+          />
         ) : displayLines && displayLines.length > 0 ? (
           displayLines.map((line) => {
-            const isAlertActive = arrivalAlert?.stopCode === stop.stopCode && arrivalAlert?.lineId === line.lineId;
-            const lineSched = scheduleMap.get(line.lineCode);
-            const isSchedExpanded = expandedScheduleLine === line.lineCode;
+            const sched = schedules.get(line.lineCode);
+            const minutes = line.nextMin == null ? null : Math.max(0, line.nextMin - decayMin);
             return (
-              <View key={line.lineCode}>
-                <TouchableOpacity style={s.lineRow} activeOpacity={0.7}
-                  onPress={() => handleLinePress(line)}>
-                  <View style={[s.lineBadge, { backgroundColor: primaryColor }]}>
-                    <Text style={s.lineBadgeText}>{line.lineId}</Text>
-                  </View>
-                  <Text style={s.lineDescr} numberOfLines={1}>{line.lineDescrEng}</Text>
-                  {line.nextMin != null ? (
-                    <View style={[s.arrivalBadge, { backgroundColor: line.color }]}>
-                      <Text style={s.arrivalMin}>{line.nextMin}'</Text>
-                    </View>
-                  ) : lineSched?.nextDeparture ? (
-                    <TouchableOpacity
-                      style={s.schedBadge}
-                      hitSlop={6}
-                      onPress={() => setExpandedScheduleLine(isSchedExpanded ? null : line.lineCode)}>
-                      <Ionicons name="time-outline" size={10} color={colors.textMuted} style={{ marginRight: 2 }} />
-                      <Text style={s.schedBadgeText}>{lineSched.nextDeparture}</Text>
-                    </TouchableOpacity>
-                  ) : (
-                    <Text style={s.noArrival}>—</Text>
-                  )}
-                  {/* Schedule toggle — show on all lines that have schedule data */}
-                  {lineSched && lineSched.times.length > 0 && (
-                    <TouchableOpacity
-                      onPress={() => setExpandedScheduleLine(isSchedExpanded ? null : line.lineCode)}
-                      hitSlop={14}
-                      style={{ marginLeft: 6, padding: 6 }}>
-                      <Ionicons name={isSchedExpanded ? 'time' : 'time-outline'} size={22}
-                        color={isSchedExpanded ? primaryColor : colors.textMuted} />
-                    </TouchableOpacity>
-                  )}
-                  <TouchableOpacity onPress={() => handleAlertToggle(line)} hitSlop={14} style={{ marginLeft: 4, padding: 6 }}>
-                    <Ionicons
-                      name={isAlertActive ? 'notifications' : 'notifications-outline'}
-                      size={22}
-                      color={isAlertActive ? colors.warning : colors.textMuted}
-                    />
-                  </TouchableOpacity>
-                </TouchableOpacity>
-                {/* Inline full schedule grid */}
-                {isSchedExpanded && lineSched && (
+              <React.Fragment key={line.lineCode}>
+                <LineRow
+                  lineId={line.lineId}
+                  lineCode={line.lineCode}
+                  label={labels.get(line.lineCode) ?? line.lineDescrEng}
+                  minutes={minutes}
+                  // Recomputed from the decayed value: a 4-minute amber that
+                  // has since aged into "1 minute" must read as urgent.
+                  color={minutes != null ? getArrivalColor(minutes) : line.color}
+                  stale={isStale && minutes != null}
+                  nextDeparture={sched?.nextDeparture ?? null}
+                  nextIsTomorrow={!!sched?.nextIsTomorrow}
+                  hasTimetable={!!sched && sched.times.length > 0}
+                  scheduleOpen={expandedScheduleLine === line.lineCode}
+                  alertActive={!!alertHere && alertHere.lineId === line.lineId}
+                  primaryColor={primaryColor}
+                  onPress={handleLinePress}
+                  onToggleSchedule={toggleSchedule}
+                  onToggleAlert={handleAlertToggle}
+                />
+                {expandedScheduleLine === line.lineCode && sched && (
                   <View style={s.schedExpandContainer}>
-                    <ScheduleGrid times={lineSched.times} nextDeparture={lineSched.nextDeparture} accentColor={primaryColor} maxHeight={120} />
+                    <ScheduleGrid
+                      times={sched.times}
+                      nextDeparture={sched.nextDeparture}
+                      accentColor={primaryColor}
+                      maxHeight={120}
+                    />
                   </View>
                 )}
-              </View>
+              </React.Fragment>
             );
           })
-        ) : displayLines && displayLines.length === 0 && visibleSet && visibleSet.size === 0 ? (
-          <Text style={s.emptyText}>Tap <Ionicons name="options-outline" size={12} color={colors.textMuted} /> to choose lines</Text>
+        ) : hasLines ? (
+          <Text style={s.emptyText}>
+            Tap <Ionicons name="options-outline" size={12} color={colors.textMuted} /> to choose lines
+          </Text>
         ) : (
-          <Text style={s.emptyText}>No lines found</Text>
+          // Only reachable once the request actually succeeded — a failure is
+          // the `failed` branch above, not a claim about the stop.
+          <Text style={s.emptyText}>No lines serve this stop.</Text>
         )
       )}
 
-      {/* Alert picker modal */}
+      {orphanAlert && (
+        <View style={s.alertBanner}>
+          <Ionicons name="notifications" size={14} color={colors.warning} />
+          {/* Spelled out rather than "≤5′": the prime is announced as "feet",
+              and the app has never agreed with itself on which glyph to use. */}
+          <Text style={s.alertBannerText} numberOfLines={1}>
+            Alerting {orphanAlert.lineId} at {orphanAlert.thresholdMin} min
+          </Text>
+          <TouchableOpacity
+            style={s.alertBannerBtn}
+            onPress={() => stopAlertWatch()}
+            accessibilityRole="button"
+            accessibilityLabel={`Stop the arrival alert for line ${orphanAlert.lineId}`}
+          >
+            <Text style={s.alertBannerBtnText}>Stop</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {!filtering && !failed && hasLines && (
+        arrivalsQuery.isError || (!isOnline && !updatedAt) ? (
+          <View style={s.footer}>
+            <View style={[s.dot, { backgroundColor: colors.warning }]} />
+            <Text style={[s.footerText, { color: colors.warning }]}>
+              {isOnline
+                ? 'Live arrivals unavailable — showing the timetable'
+                : 'Offline — showing the saved timetable'}
+            </Text>
+          </View>
+        ) : (
+          <Freshness
+            updatedAt={updatedAt}
+            failed={arrivalsQuery.isError}
+            offline={!isOnline}
+            active={active}
+          />
+        )
+      )}
+
       <AlertPickerModal
-        visible={!!alertLineCode}
-        subtitle={`${alertLineCode && displayLines ? displayLines.find(l => l.lineCode === alertLineCode)?.lineId : ''} at ${stop.stopName}`}
+        visible={!!pickerLine}
+        subtitle={`${groupsRef.current.find((l) => l.lineCode === pickerLine)?.lineId ?? ''} at ${stop.stopName}`}
         threshold={alertThreshold}
         onChangeThreshold={setAlertThreshold}
         accentColor={primaryColor}
-        onCancel={() => setAlertLineCode(null)}
-        onConfirm={() => {
-          const line = displayLines?.find(l => l.lineCode === alertLineCode);
-          if (line) handleAlertConfirm(line);
-        }}
+        confirmLabel={arrivalAlert ? 'Switch' : 'Start'}
+        errorMessage={pickerError}
+        busy={arming}
+        onCancel={() => { setPickerLine(null); setPickerError(null); }}
+        onConfirm={handleAlertConfirm}
       />
     </View>
   );
 }
 
+/** Memoized: Home re-renders on focus, refresh and accent changes, and each
+ *  card owns live queries that must not be torn through for nothing. */
+export default React.memo(FavoriteStopCard);

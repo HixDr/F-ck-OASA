@@ -2,11 +2,26 @@ import { useEffect, useRef, useState } from 'react';
 import {
   getLocation,
   getHeading,
+  requestHighAccuracy,
   subscribe as subscribeLocation,
   subscribeHeading,
 } from '../services/location';
 
 export type LatLng = { lat: number; lng: number };
+
+export interface UseUserLocationOptions {
+  /** Side-effect on every position change (walk route refresh, query key, …). */
+  onLocationUpdate?: (loc: LatLng) => void;
+  /**
+   * Lease 1 Hz GPS while true.
+   *
+   * The service defaults to a cheap Balanced/10s tier; only the map screens
+   * need better, and only while they are actually on screen. expo-router's
+   * native stack keeps pushed-behind screens mounted, so pass the screen's
+   * focus state rather than a bare `true`.
+   */
+  highAccuracy?: boolean;
+}
 
 /**
  * Shared hook — subscribes to GPS position + heading, keeps a ref for
@@ -14,11 +29,11 @@ export type LatLng = { lat: number; lng: number };
  *
  * Replaces the identical subscription boilerplate in LiveMapScreen and
  * NearbyMapScreen (each ~15 lines of hook code).
- *
- * @param onLocationUpdate Optional callback invoked on every location change —
- *        allows the consumer to perform side-effects (e.g. update walkCoords).
  */
-export function useUserLocation(onLocationUpdate?: (loc: LatLng) => void) {
+export function useUserLocation({
+  onLocationUpdate,
+  highAccuracy = false,
+}: UseUserLocationOptions = {}) {
   const userLocationRef = useRef<LatLng | null>(getLocation());
   const [userLoc, setUserLoc] = useState<LatLng | null>(getLocation());
   const [userHeading, setUserHeading] = useState<number | null>(getHeading());
@@ -36,6 +51,13 @@ export function useUserLocation(onLocationUpdate?: (loc: LatLng) => void) {
     const unHead = subscribeHeading((h) => setUserHeading(h));
     return () => { unLoc(); unHead(); };
   }, []);
+
+  useEffect(() => {
+    if (!highAccuracy) return;
+    // Lease-counted, so overlapping map screens behave and the last release
+    // drops the watcher back to the cheap tier.
+    return requestHighAccuracy();
+  }, [highAccuracy]);
 
   return { userLocationRef, userLoc, userHeading };
 }

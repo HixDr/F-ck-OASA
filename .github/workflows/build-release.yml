@@ -42,14 +42,59 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Fail before spending 15 minutes on a build that cannot be signed.
+      # A release APK signed with the AOSP debug key is worse than no APK:
+      # that key is public, so the signature proves nothing.
+      - name: Check release signing secrets are present
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          OASA_KEYSTORE_PASSWORD: ${{ secrets.OASA_KEYSTORE_PASSWORD }}
+          OASA_KEY_ALIAS: ${{ secrets.OASA_KEY_ALIAS }}
+          OASA_KEY_PASSWORD: ${{ secrets.OASA_KEY_PASSWORD }}
+        run: |
+          missing=""
+          for name in KEYSTORE_BASE64 OASA_KEYSTORE_PASSWORD OASA_KEY_ALIAS OASA_KEY_PASSWORD; do
+            [ -n "${!name}" ] || missing="$missing $name"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Missing repository secret(s):$missing — see README > 'Release signing'."
+            exit 1
+          fi
+
+      # `--clean` wipes android/, so the keystore has to be written afterwards.
       - name: Expo prebuild
         run: npx expo prebuild --platform android --clean
         env:
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
 
+      - name: Decode release keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          printf '%s' "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/oasa-release.keystore"
+          # Never echo the file or its size to the log; just prove it decoded.
+          test -s "$RUNNER_TEMP/oasa-release.keystore"
+
       - name: Build release APK
         working-directory: android
+        env:
+          OASA_KEYSTORE_PATH: ${{ runner.temp }}/oasa-release.keystore
+          OASA_KEYSTORE_PASSWORD: ${{ secrets.OASA_KEYSTORE_PASSWORD }}
+          OASA_KEY_ALIAS: ${{ secrets.OASA_KEY_ALIAS }}
+          OASA_KEY_PASSWORD: ${{ secrets.OASA_KEY_PASSWORD }}
         run: ./gradlew assembleRelease --parallel --daemon --build-cache -Dorg.gradle.jvmargs="-Xmx2g"
+
+      # Belt and braces: prove the APK is not signed with the public AOSP debug
+      # key (SHA1 5E:8F:16:...:F6:25, CN=Android Debug) before publishing it.
+      - name: Verify APK signature
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n1)
+          OUT=$("$APKSIGNER" verify --print-certs android/app/build/outputs/apk/release/app-release.apk)
+          echo "$OUT" | grep -v -i 'SHA-256 digest\|SHA-1 digest\|MD5 digest' || true
+          if echo "$OUT" | grep -qi 'CN=Android Debug'; then
+            echo "::error::APK is signed with the public AOSP debug key. Refusing to publish."
+            exit 1
+          fi
 
       - name: Read version from package.json
         id: version
@@ -57,10 +102,16 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Rename APK
+      # The in-app updater looks for a companion digest and only falls back to a
+      # size check (with a loud warning) when there is none. Publishing this file
+      # is what makes the update path actually verifiable.
+      - name: Rename APK and publish SHA-256
+        working-directory: android/app/build/outputs/apk/release
         run: |
-          mv android/app/build/outputs/apk/release/app-release.apk \
-             android/app/build/outputs/apk/release/fck-oasa-v${{ steps.version.outputs.version }}.apk
+          NAME="fck-oasa-v${{ steps.version.outputs.version }}.apk"
+          mv app-release.apk "$NAME"
+          sha256sum "$NAME" > "$NAME.sha256"
+          cat "$NAME.sha256"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -69,6 +120,12 @@ jobs:
           name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
           make_latest: true
-          files: android/app/build/outputs/apk/release/fck-oasa-v${{ steps.version.outputs.version }}.apk
+          files: |
+            android/app/build/outputs/apk/release/fck-oasa-v${{ steps.version.outputs.version }}.apk
+            android/app/build/outputs/apk/release/fck-oasa-v${{ steps.version.outputs.version }}.apk.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove decoded keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/oasa-release.keystore"
