@@ -11,7 +11,6 @@ import React, {
   useCallback,
   useEffect,
   useMemo,
-  useReducer,
   useRef,
   useState,
 } from 'react';
@@ -116,49 +115,6 @@ const LoadingRows = React.memo(function LoadingRows({ stopName }: { stopName: st
           <SkeletonBox width={40} height={26} radius={radius.sm} />
         </View>
       ))}
-    </View>
-  );
-});
-
-/* ── Freshness indicator ─────────────────────────────────────── */
-
-/**
- * "Live" / "updated 40s ago". Owns its own one-second interval so the seconds
- * counter does not re-render the arrival rows around it.
- */
-const Freshness = React.memo(function Freshness({
-  updatedAt,
-  failed,
-  offline,
-  active,
-}: {
-  updatedAt: number;
-  failed: boolean;
-  offline: boolean;
-  active: boolean;
-}) {
-  const [, tick] = useReducer((n: number) => n + 1, 0);
-  useEffect(() => {
-    if (!active || !updatedAt) return;
-    const id = setInterval(tick, 1000);
-    return () => clearInterval(id);
-  }, [active, updatedAt]);
-
-  if (!updatedAt) return null;
-  const age = Math.max(0, Date.now() - updatedAt);
-  const fresh = !failed && age < ARRIVALS_POLL_MS + 5_000;
-  const label = age < 10_000 ? 'just now' : age < 60_000 ? `${Math.floor(age / 1000)}s ago` : `${Math.floor(age / 60_000)}m ago`;
-
-  return (
-    <View style={s.footer} accessibilityLabel={fresh ? 'Arrivals are live' : `Arrivals last updated ${label}`}>
-      <View style={[s.dot, { backgroundColor: fresh ? colors.success : colors.warning }]} />
-      <Text style={[s.footerText, !fresh && { color: colors.warning }]}>
-        {fresh
-          ? 'Live'
-          : offline
-            ? `Offline · last updated ${label}`
-            : `Not updating · last updated ${label}`}
-      </Text>
     </View>
   );
 });
@@ -739,24 +695,20 @@ function FavoriteStopCard({
         </View>
       )}
 
-      {!filtering && !failed && hasLines && (
-        arrivalsQuery.isError || (!isOnline && !updatedAt) ? (
-          <View style={s.footer}>
-            <View style={[s.dot, { backgroundColor: colors.warning }]} />
-            <Text style={[s.footerText, { color: colors.warning }]}>
-              {isOnline
-                ? 'Live arrivals unavailable — showing the timetable'
-                : 'Offline — showing the saved timetable'}
-            </Text>
-          </View>
-        ) : (
-          <Freshness
-            updatedAt={updatedAt}
-            failed={arrivalsQuery.isError}
-            offline={!isOnline}
-            active={active}
-          />
-        )
+      {/* Only what is specific to *this* stop. "Live / updated 40s ago" moved to
+          the one indicator in Home's header — six cards each running their own
+          seconds counter were six claims about a single shared clock. A stop
+          whose own request is failing still says so here, because which stop's
+          numbers are guesses is not something a screen-level readout can say. */}
+      {!filtering && !failed && hasLines && (arrivalsQuery.isError || (!isOnline && !updatedAt)) && (
+        <View style={s.footer}>
+          <View style={[s.dot, { backgroundColor: colors.warning }]} />
+          <Text style={[s.footerText, { color: colors.warning }]}>
+            {isOnline
+              ? 'Live arrivals unavailable — showing the timetable'
+              : 'Offline — showing the saved timetable'}
+          </Text>
+        </View>
       )}
 
       <AlertPickerModal

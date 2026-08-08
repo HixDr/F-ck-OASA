@@ -246,6 +246,30 @@ export function isFavorite(lineCode: string): boolean {
   return _favorites.some((f) => f.lineCode === lineCode);
 }
 
+/**
+ * Reorder saved lines to match `codes` — the line grid on Home can be dragged
+ * into the order the user actually rides.
+ *
+ * Same contract as `reorderFavoriteStops`: codes that no longer exist are
+ * ignored, and any line missing from `codes` is kept and appended, so a stale
+ * list from the UI can never silently delete a saved line.
+ */
+export function reorderFavorites(codes: string[]): FavoriteLine[] {
+  const byCode = new Map(_favorites.map((f) => [f.lineCode, f]));
+  const ordered: FavoriteLine[] = [];
+  for (const code of codes) {
+    const line = byCode.get(code);
+    if (line) {
+      ordered.push(line);
+      byCode.delete(code);
+    }
+  }
+  for (const leftover of byCode.values()) ordered.push(leftover);
+  _favorites = ordered;
+  persistFavorites();
+  return _favorites;
+}
+
 /* ── Favorite Stops (sync reads from mirror, async writes) ──── */
 
 export function getFavoriteStops(): FavoriteStop[] {
