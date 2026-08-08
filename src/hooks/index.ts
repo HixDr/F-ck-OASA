@@ -38,7 +38,24 @@ export function useLines() {
        reached. Going offline used to strand the line map on "Loading
        directions…" with a full offline bundle sitting on disk. */
     networkMode: 'offlineFirst',
+    retry: retryUnlessOffline,
   });
+}
+
+/**
+ * Retry policy for the `offlineFirst` queries below.
+ *
+ * `offlineFirst` runs queryFn once and then *pauses* retries. On a cache hit
+ * that is exactly right. On a cache miss while offline the request fails and
+ * the retry parks, which leaves the query `status: 'pending'` with `error:
+ * null` and `data: undefined` — indistinguishable from still loading. The line
+ * map read that as "Loading directions…" and sat there forever.
+ *
+ * Failing fast while offline turns that into a real error the screen can
+ * report, with the Retry the user actually needs.
+ */
+function retryUnlessOffline(failureCount: number): boolean {
+  return onlineManager.isOnline() && failureCount < 2;
 }
 
 const ROUTES_STALE_MS = 60 * 60 * 1000;
@@ -93,6 +110,7 @@ export function useRoutes(lineCode: string | undefined) {
        reached. Going offline used to strand the line map on "Loading
        directions…" with a full offline bundle sitting on disk. */
     networkMode: 'offlineFirst',
+    retry: retryUnlessOffline,
   });
 }
 
@@ -150,6 +168,7 @@ export function useStops(routeCode: string | undefined) {
        reached. Going offline used to strand the line map on "Loading
        directions…" with a full offline bundle sitting on disk. */
     networkMode: 'offlineFirst',
+    retry: retryUnlessOffline,
   });
 }
 
@@ -370,13 +389,13 @@ export function useArrivals(stopCode: string | undefined, enabled = true) {
     },
     enabled: on,
     staleTime: 5_000,
-    retry: 1,
     /* offlineFirst, not the global 'online': the disk fallback lives inside
        queryFn, and 'online' pauses the query before it runs, so going offline
        emptied every saved-stop card of the numbers that were on screen a
        moment earlier. The shared clock still parks while offline — this only
        decides what happens when something does ask. */
     networkMode: 'offlineFirst',
+    retry: retryUnlessOffline,
     // Keep showing the last known arrivals while a refetch is in flight
     // instead of flashing a spinner every 15 seconds — but ONLY for the same
     // stop. A bare `(prev) => prev` also survives a queryKey change, which
@@ -522,6 +541,7 @@ export function useRoutesForStop(stopCode: string | undefined) {
        reached. Going offline used to strand the line map on "Loading
        directions…" with a full offline bundle sitting on disk. */
     networkMode: 'offlineFirst',
+    retry: retryUnlessOffline,
   });
 }
 
@@ -581,6 +601,7 @@ export function useSchedule(lineCode: string | undefined, enabled = true) {
        reached. Going offline used to strand the line map on "Loading
        directions…" with a full offline bundle sitting on disk. */
     networkMode: 'offlineFirst',
+    retry: retryUnlessOffline,
     // A timetable is valid for the day; the global 5-minute gcTime would
     // throw it away between screens and re-fetch it for nothing.
     gcTime: 24 * 60 * 60 * 1000,
