@@ -62,6 +62,27 @@ export function isOnline(): boolean {
   return _isOnline ?? true;
 }
 
+/**
+ * True only once NetInfo has positively reported a connection.
+ *
+ * `isOnline()` is optimistic while NetInfo is still answering, which is right
+ * for anything user-facing — the banner must not flash "offline" during every
+ * cold start. It is wrong for deciding whether to *retry* a failed request.
+ *
+ * On a cold start with the radio already off, `NetInfo.fetch()` is still in
+ * flight when the first query runs, so an optimistic read schedules a retry;
+ * by the time that retry runs NetInfo has answered, React Query refuses to
+ * fetch, and the retry parks — leaving the query `pending` with no error and no
+ * data, which is indistinguishable from still loading. That is the difference
+ * between "turned wifi off inside the app" (works) and "opened the app with
+ * wifi already off" (used to hang forever).
+ *
+ * Retry decisions therefore ask this instead: unknown counts as offline.
+ */
+export function isOnlineConfirmed(): boolean {
+  return _isOnline === true;
+}
+
 /* ── Wire React Query to NetInfo ─────────────────────────────── */
 
 let _setupDone = false;
