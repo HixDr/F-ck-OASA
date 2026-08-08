@@ -33,6 +33,11 @@ export function useLines() {
       return fresh;
     },
     staleTime: 24 * 60 * 60 * 1000,
+    /* offlineFirst, not the global 'online': this serves from the file cache
+       inside queryFn, and 'online' pauses the query so that cache is never
+       reached. Going offline used to strand the line map on "Loading
+       directions…" with a full offline bundle sitting on disk. */
+    networkMode: 'offlineFirst',
   });
 }
 
@@ -83,6 +88,11 @@ export function useRoutes(lineCode: string | undefined) {
     enabled: !!lineCode,
     staleTime: ROUTES_STALE_MS,
     gcTime: STATIC_GC_MS,
+    /* offlineFirst, not the global 'online': this serves from the file cache
+       inside queryFn, and 'online' pauses the query so that cache is never
+       reached. Going offline used to strand the line map on "Loading
+       directions…" with a full offline bundle sitting on disk. */
+    networkMode: 'offlineFirst',
   });
 }
 
@@ -135,6 +145,11 @@ export function useStops(routeCode: string | undefined) {
     enabled: !!routeCode,
     staleTime: ROUTES_STALE_MS,
     gcTime: STATIC_GC_MS,
+    /* offlineFirst, not the global 'online': this serves from the file cache
+       inside queryFn, and 'online' pauses the query so that cache is never
+       reached. Going offline used to strand the line map on "Loading
+       directions…" with a full offline bundle sitting on disk. */
+    networkMode: 'offlineFirst',
   });
 }
 
@@ -402,6 +417,11 @@ export function useRoutesForStop(stopCode: string | undefined) {
     },
     enabled: !!stopCode,
     staleTime: 60 * 60 * 1000,
+    /* offlineFirst, not the global 'online': this serves from the file cache
+       inside queryFn, and 'online' pauses the query so that cache is never
+       reached. Going offline used to strand the line map on "Loading
+       directions…" with a full offline bundle sitting on disk. */
+    networkMode: 'offlineFirst',
   });
 }
 
@@ -456,6 +476,11 @@ export function useSchedule(lineCode: string | undefined, enabled = true) {
     },
     enabled: !!lineCode && enabled,
     staleTime: 24 * 60 * 60 * 1000,
+    /* offlineFirst, not the global 'online': this serves from the file cache
+       inside queryFn, and 'online' pauses the query so that cache is never
+       reached. Going offline used to strand the line map on "Loading
+       directions…" with a full offline bundle sitting on disk. */
+    networkMode: 'offlineFirst',
     // A timetable is valid for the day; the global 5-minute gcTime would
     // throw it away between screens and re-fetch it for nothing.
     gcTime: 24 * 60 * 60 * 1000,

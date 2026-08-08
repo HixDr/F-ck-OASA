@@ -73,7 +73,6 @@ export const s = StyleSheet.create({
     marginBottom: spacing.sm,
     borderWidth: 1,
     borderColor: colors.border,
-    borderTopColor: colors.edge,
     overflow: 'hidden',
   },
   searchBtnText: {
@@ -101,7 +100,6 @@ export const s = StyleSheet.create({
     minHeight: HIT_SIZE,
     borderWidth: 1,
     borderColor: colors.border,
-    borderTopColor: colors.edge,
     gap: spacing.xs,
   },
   actionBtnText: {
@@ -164,7 +162,6 @@ export const s = StyleSheet.create({
     justifyContent: 'center',
     borderWidth: 1,
     borderColor: colors.border,
-    borderTopColor: colors.edge,
     minHeight: HIT_SIZE,
     minWidth: HIT_SIZE,
     paddingHorizontal: spacing.xs,
@@ -237,7 +234,6 @@ export const s = StyleSheet.create({
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    borderTopColor: colors.edge,
     backgroundColor: colors.card,
   },
   emptySecondaryText: {

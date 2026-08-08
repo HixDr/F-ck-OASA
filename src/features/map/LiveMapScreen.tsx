@@ -364,11 +364,22 @@ export default function LiveMapScreen() {
     return stopsWithBearings.filter((st) => isInRegion(st.lat, st.lng, region));
   }, [stopsWithBearings, region]);
 
-  // Fit map to route bounds — after the map is ready, and again per direction.
-  const fittedRoute = useRef<string | null>(null);
+  // Fit map to route bounds — once per screen, on the first direction whose
+  // stops actually arrive.
+  //
+  // Switching direction deliberately does NOT re-fit: the stop list is refetched
+  // per RouteCode, so `parsedStops` changes identity and this effect runs again,
+  // but by then the user has usually panned and zoomed somewhere of their own
+  // choosing and yanking the camera back throws that away. The other direction
+  // of a line covers nearly the same ground, so there is nothing to re-frame.
+  // Latching on the route code instead of a plain boolean is what caused it.
+  const hasFitted = useRef(false);
   useEffect(() => {
+    // Both guards are load-bearing for "exactly once": the stops arrive
+    // asynchronously (instantly from cache, seconds later from the network),
+    // and latching on an empty list would lock out the only fit we get.
     if (!mapReady || !activeRouteCode || parsedStops.length < 2) return;
-    if (fittedRoute.current === activeRouteCode) return;
+    if (hasFitted.current) return;
     const map = mapRef.current;
     // On Android fitToCoordinates is a no-op before the map is ready, and the
     // old code latched `hasFitted` *before* calling it — so a fast cached load
@@ -378,7 +389,9 @@ export default function LiveMapScreen() {
       parsedStops.map((p) => ({ latitude: p.lat, longitude: p.lng })),
       { edgePadding: FIT_PADDING, animated: true },
     );
-    fittedRoute.current = activeRouteCode;
+    hasFitted.current = true;
+    // activeRouteCode stays a dependency so a direction switched *before* the
+    // first fit still gets one — that user has never been positioned at all.
   }, [mapReady, activeRouteCode, parsedStops]);
 
   // Metro polyline data (pre-computed constant)

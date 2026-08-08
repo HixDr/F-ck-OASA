@@ -165,7 +165,6 @@ export const s = StyleSheet.create({
     marginBottom: spacing.sm,
     borderWidth: 1,
     borderColor: colors.border,
-    borderTopColor: colors.edge,
   },
   legRow: {
     flexDirection: 'row',
@@ -279,7 +278,6 @@ export const s = StyleSheet.create({
     marginTop: spacing.xs,
     paddingTop: spacing.xs,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
   },
   totalText: {
     color: colors.text,

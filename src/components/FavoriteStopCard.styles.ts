@@ -11,9 +11,6 @@ export const s = StyleSheet.create({
     marginBottom: spacing.sm,
     borderWidth: 1,
     borderColor: colors.border,
-    // Lit from above: bg → surface → card is a 4% fill delta that collapses
-    // into one flat plane on OLED in daylight.
-    borderTopColor: colors.edge,
   },
   header: {
     flexDirection: 'row',
@@ -48,7 +45,6 @@ export const s = StyleSheet.create({
     minHeight: HIT_SIZE,
     paddingVertical: spacing.xs,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
   },
 
   /* ── Arrival row ───────────────────────────────────────────── */
@@ -58,7 +54,6 @@ export const s = StyleSheet.create({
     minHeight: 62,
     paddingVertical: spacing.xs,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
   },
   /** Cold-start placeholder. Same metrics as `lineRow` so the real rows land
    *  where the grey ones were rather than shoving the card taller. */
@@ -69,7 +64,6 @@ export const s = StyleSheet.create({
     minHeight: 62,
     paddingVertical: spacing.xs,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.border,
   },
   skeletonGrow: {
     flex: 1,

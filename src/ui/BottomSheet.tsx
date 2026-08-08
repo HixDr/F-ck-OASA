@@ -179,7 +179,6 @@ const s = StyleSheet.create({
     borderWidth: 1,
     borderBottomWidth: 0,
     borderColor: colors.border,
-    borderTopColor: colors.edge,
     overflow: 'hidden',
   },
   handleArea: {

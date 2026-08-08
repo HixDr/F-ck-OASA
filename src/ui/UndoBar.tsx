@@ -145,7 +145,6 @@ const s = StyleSheet.create({
     borderRadius: radius.lg,
     borderWidth: 1,
     borderColor: colors.border,
-    borderTopColor: colors.edge,
     paddingLeft: spacing.md,
     paddingRight: spacing.xs,
     minHeight: HIT_SIZE + 4,
