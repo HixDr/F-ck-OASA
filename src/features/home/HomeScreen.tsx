@@ -107,6 +107,7 @@ import {
   resolveResize,
   snapAxis,
   tierFor,
+  CARD_GAP_DP,
   CARD_MIN_H_DP,
   CARD_MIN_W_DP,
   SNAP_DP,
@@ -224,9 +225,12 @@ interface CanvasCtl {
   /** An edge was caught or released. Selection haptic, per the app's drag
    *  vocabulary. */
   onSnap: () => void;
-  onDrop: (index: number, x: number, y: number, w: number, h: number) => void;
+  /** The card has landed. `rect` is null when the gesture ended with nothing to
+   *  commit — the JS side still has a timer, a scroll lock and an `activeRef`
+   *  to unwind, and every exit from a lift has to reach this. */
+  onDrop: (index: number, rect: Rect | null) => void;
   onResizeStart: (index: number) => void;
-  onResizeEnd: (index: number, x: number, y: number, w: number, h: number) => void;
+  onResizeEnd: (index: number, rect: Rect | null) => void;
 }
 
 interface Sized {
@@ -304,9 +308,11 @@ interface Carried {
  * Deliberately pure, and deliberately takes everything as arguments rather than
  * reading the shared values itself: it is called both from the gesture worklet
  * on the UI thread and from the auto-scroll tick on the JS thread, and reading
- * a shared value from JS is a synchronous hop into the UI runtime — cheap once,
- * not cheap sixty times a second in a loop competing with the drag it exists to
- * serve. Writing the results back is the caller's job for the same reason.
+ * a shared value from JS is a synchronous hop into the UI runtime. The tick
+ * pays for a few scalars anyway — it has to, to know where the finger is — so
+ * what this actually buys is the two *arrays*, which would otherwise be marshalled
+ * across the boundary sixty times a second for values that cannot change during
+ * a drag. Writing the results back is the caller's job for the same reason.
  *
  * A snap that would push the card off the canvas is dropped rather than
  * clamped: showing a guide line the card then fails to sit on is worse than not
@@ -484,8 +490,11 @@ const StopCard = React.memo(function StopCard({
           if (index >= rects.length) return;
           /* The previous card is still settling and has not committed yet.
              Lifting a second one now would let that pending commit clear
-             `active` out from under this drag. */
-          if (ctl.active.value >= 0) return;
+             `active` out from under this drag. A corner being dragged counts:
+             the two paths share `activeRef`, the scroll lock and the edge
+             timer, so with two fingers whichever finishes first would tear
+             those out from under the other. */
+          if (ctl.active.value >= 0 || ctl.resizing.value >= 0) return;
 
           /* Built here rather than handed over from JS: the first `onUpdate`
              can arrive before a `runOnJS` hop has landed, and a frame of
@@ -550,9 +559,12 @@ const StopCard = React.memo(function StopCard({
           ctl.guideY.value = -1;
           ctl.lift.value = withSpring(1, liftSpring);
           if (!base) {
-            ctl.active.value = -1;
-            ctl.dx.value = 0;
-            ctl.dy.value = 0;
+            /* Nothing to commit, but the JS side still owns a 16ms timer, a
+               scroll lock and an `activeRef` that gates every future republish
+               of the geometry. Returning here without saying so is how a drag
+               leaves the screen permanently unscrollable and every later drag
+               running on stale boxes. */
+            runOnJS(ctl.onDrop)(index, null);
             return;
           }
           /* Resolved before the card lands, not after: the spring has to travel
@@ -567,14 +579,14 @@ const StopCard = React.memo(function StopCard({
           if (ctl.reduced.value) {
             ctl.dx.value = tx;
             ctl.dy.value = ty;
-            runOnJS(ctl.onDrop)(index, got.x, got.y, got.w, got.h);
+            runOnJS(ctl.onDrop)(index, got);
           } else {
             ctl.dx.value = withSpring(tx, liftSpring);
             /* Commit once the card has physically landed. It is already sitting
                on the resolved box by then, so the write that follows changes
                nothing on screen. */
             ctl.dy.value = withSpring(ty, liftSpring, () => {
-              runOnJS(ctl.onDrop)(index, got.x, got.y, got.w, got.h);
+              runOnJS(ctl.onDrop)(index, got);
             });
           }
         }),
@@ -644,7 +656,12 @@ const StopCard = React.memo(function StopCard({
           ctl.resizing.value = -1;
           ctl.guideX.value = -1;
           ctl.guideY.value = -1;
-          if (index >= rects.length) return;
+          // Nothing to commit, but the scroll lock and `activeRef` still have
+          // to be unwound — see the same branch in the body drag.
+          if (index >= rects.length) {
+            runOnJS(ctl.onResizeEnd)(index, null);
+            return;
+          }
           const base = rects[index];
           const got = resolveResize(
             { x: base.x, y: base.y, w: ctl.previewW.value / u, h: ctl.previewH.value / u },
@@ -652,7 +669,7 @@ const StopCard = React.memo(function StopCard({
             CARD_MIN_W_DP / u,
             CARD_MIN_H_DP / u,
           );
-          runOnJS(ctl.onResizeEnd)(index, got.x, got.y, got.w, got.h);
+          runOnJS(ctl.onResizeEnd)(index, got);
         }),
     [ctl, index],
   );
@@ -1134,8 +1151,9 @@ const LineChip = React.memo(function LineChip({
   return (
     /* The detector sits on the transformed wrapper rather than inside it: its
        one child is then a single element, which is all `GestureDetector` will
-       accept. The stop cells attach one level down only because a FlatList
-       owns their outermost view. */
+       accept. A stop card attaches one level down instead, because in arrange
+       mode its wrapper has a second child — the resize handle, which must be
+       outside the body's gesture to have a gesture of its own. */
     <GestureDetector gesture={gesture}>
       <Animated.View style={[s.lineCell, animStyle]} onLayout={measure}>
         <Pressable
@@ -1180,9 +1198,12 @@ interface SavedLinesProps {
 /**
  * The grid owns its drag state.
  *
- * It renders inside Home's `ListFooterComponent`, which is a `useMemo`: keeping
- * the state here means a lift does not touch that memo's dependencies, so the
- * footer element is not rebuilt — once per drag, let alone once per frame.
+ * Home renders it from the `listFooter` memo below the stop canvas; keeping the
+ * state here means a lift does not touch that memo's dependencies, so the
+ * element is not rebuilt — once per drag, let alone once per frame. That
+ * mattered when the footer belonged to a FlatList and it still matters now that
+ * it is a plain child of the scroll view, because Home re-renders on focus, on
+ * every arrival measurement and on every accent change.
  */
 const SavedLines = React.memo(function SavedLines({
   lines,
@@ -1589,14 +1610,23 @@ export default function HomeScreen() {
    * chasing its own tail: the write it triggers re-runs the effect, the second
    * pass finds nothing to do, and the overwhelmingly common case — same phone,
    * same orientation, every launch — writes nothing at all.
+   *
+   * Held back while a card is up, for the same reason the geometry republish
+   * above is. The freeze at lift writes `favoriteStops`, so without this guard
+   * a re-fit would run in the middle of a drag and could move cards the drag's
+   * own — deliberately frozen — geometry still believes are where they were.
+   * `dropTick` brings it back once the card is down.
    */
   useEffect(() => {
+    if (activeRef.current >= 0) return;
     const changed = fitAll(favoriteStops, canvasW);
     if (changed.size === 0) return;
     const patches = new Map<string, Partial<FavoriteStop>>();
     changed.forEach((rect, stopCode) => patches.set(stopCode, { layout: rect }));
-    setFavoriteStops(updateFavoriteStops(patches));
-  }, [favoriteStops, canvasW]);
+    const next = updateFavoriteStops(patches);
+    stopsRef.current = next;
+    setFavoriteStops(next);
+  }, [favoriteStops, canvasW, dropTick]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -1610,21 +1640,42 @@ export default function HomeScreen() {
   /**
    * Turn every flowing card into a placed one, at the box it already occupies.
    *
-   * Run the moment anything is picked up, and nothing moves when it does — the
-   * boxes being written are the ones `placeAll` just laid out. What changes is
-   * that the cards stop being allowed to grow: from here on an arrival landing
-   * scrolls inside a card instead of pushing the one below it down, which is
-   * the only behaviour compatible with "nothing may overlap".
+   * Run the moment anything is picked up. What changes is that the cards stop
+   * being allowed to grow: from here on an arrival landing scrolls inside a
+   * card instead of pushing the one below it down, which is the only behaviour
+   * compatible with "nothing may overlap".
    *
    * Doing it at lift rather than at drop matters. An interrupted drag — a call
    * arriving mid-gesture — must still leave a consistent canvas, and it would
    * not if half the cards had concrete boxes and half were still flowing under
    * a card that had already been moved out of the stack.
+   *
+   * The one thing that can move is a card whose content measures less than
+   * `CARD_MIN_H_DP` — a stop serving no lines is about 79dp. It is floored
+   * here rather than left for `fitAll` to raise afterwards, because `fitAll`
+   * would do it in the middle of the drag this freeze belongs to, pushing every
+   * card below it down while the geometry the gesture is using stays
+   * deliberately frozen; the magnets and the drop would then be answering about
+   * a layout that is no longer on screen.
+   *
+   * And flooring one card means re-running the stack, not just editing that
+   * card: flowing cards sit directly under one another, so a card that grows
+   * to the floor overlaps the one below it unless everything after it moves
+   * too. When nothing needs raising — the overwhelmingly common case — the walk
+   * below reproduces the existing `y` values exactly and nothing moves at all.
    */
   const freezeFlowing = useCallback(() => {
+    const u = uRef.current;
+    const minH = CARD_MIN_H_DP / u;
+    const gap = CARD_GAP_DP / u;
     const patches = new Map<string, Partial<FavoriteStop>>();
+    let top = -1;
     for (const c of placedRef.current.cards) {
-      if (c.flowing) patches.set(c.stopCode, { layout: c.rect });
+      if (!c.flowing) continue;
+      if (top < 0) top = c.rect.y;
+      const h = c.rect.h < minH ? minH : c.rect.h;
+      patches.set(c.stopCode, { layout: { x: c.rect.x, y: top, w: c.rect.w, h } });
+      top += h + gap;
     }
     if (patches.size === 0) return;
     const next = updateFavoriteStops(patches);
@@ -1710,7 +1761,7 @@ export default function HomeScreen() {
   }, []);
 
   const onDrop = useCallback(
-    (index: number, x: number, y: number, w: number, h: number) => {
+    (index: number, rect: Rect | null) => {
       if (edgeTimer.current) {
         clearInterval(edgeTimer.current);
         edgeTimer.current = null;
@@ -1718,9 +1769,9 @@ export default function HomeScreen() {
       activeRef.current = -1;
       setDragging(false);
 
-      const stop = stopsRef.current[index];
-      if (stop) {
-        const next = updateFavoriteStop(stop.stopCode, { layout: { x, y, w, h } });
+      const stop = rect ? stopsRef.current[index] : undefined;
+      if (stop && rect) {
+        const next = updateFavoriteStop(stop.stopCode, { layout: rect });
         stopsRef.current = next;
         setFavoriteStops(next);
         hapticImpact();
@@ -1836,21 +1887,18 @@ export default function HomeScreen() {
     [freezeFlowing],
   );
 
-  const onResizeEnd = useCallback(
-    (index: number, x: number, y: number, w: number, h: number) => {
-      activeRef.current = -1;
-      setDragging(false);
-      const stop = stopsRef.current[index];
-      if (stop) {
-        const next = updateFavoriteStop(stop.stopCode, { layout: { x, y, w, h } });
-        stopsRef.current = next;
-        setFavoriteStops(next);
-        hapticImpact();
-      }
-      setDropTick((v) => v + 1);
-    },
-    [],
-  );
+  const onResizeEnd = useCallback((index: number, rect: Rect | null) => {
+    activeRef.current = -1;
+    setDragging(false);
+    const stop = rect ? stopsRef.current[index] : undefined;
+    if (stop && rect) {
+      const next = updateFavoriteStop(stop.stopCode, { layout: rect });
+      stopsRef.current = next;
+      setFavoriteStops(next);
+      hapticImpact();
+    }
+    setDropTick((v) => v + 1);
+  }, []);
 
   /**
    * Every field here is stable, and it has to be: this object is a dependency
@@ -1905,12 +1953,28 @@ export default function HomeScreen() {
     [scrollY],
   );
 
+  /**
+   * How far the canvas can scroll.
+   *
+   * Kept from `onContentSizeChange` and the viewport's own layout rather than
+   * from `onScroll`, which is where it used to come from: a ScrollView emits no
+   * scroll event until it is scrolled, so on a freshly opened Home the limit
+   * was zero and the edge auto-scroll refused to move — in exactly the case it
+   * exists for, and only until the user happened to scroll by hand once.
+   */
+  const contentHRef = useRef(0);
+  const onContentSize = useCallback((_w: number, h: number) => {
+    contentHRef.current = h;
+    scrollMaxRef.current = Math.max(0, h - viewportRef.current.height);
+  }, []);
+
   const onScrollLayout = useCallback((e: LayoutChangeEvent) => {
     const { y, height } = e.nativeEvent.layout;
     // The scroll view's parent fills the screen from the top, so its own y
     // doubles as the window coordinate the gesture's absoluteY is measured
     // against.
     viewportRef.current = { top: y, height };
+    scrollMaxRef.current = Math.max(0, contentHRef.current - height);
   }, []);
 
   /* ── Favorites ─────────────────────────────────────────────── */
@@ -2266,6 +2330,7 @@ export default function HomeScreen() {
           onScroll={onScroll}
           scrollEventThrottle={16}
           onLayout={onScrollLayout}
+          onContentSizeChange={onContentSize}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}

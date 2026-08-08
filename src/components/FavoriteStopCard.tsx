@@ -952,14 +952,19 @@ function FavoriteStopCard({
         </Text>
 
         {editing ? (
-          /* The chevrons are not a leftover beside the drag gesture Home now
-             offers — they are the only way to reorder that a screen reader can
-             drive, since a lift-and-move has nothing to announce or activate.
-             They survive at `detailed` only: two 40dp buttons beside the 40dp
-             remove button are 120 of a 146dp row, which leaves the stop's name
-             26dp and reorders a stop the user can no longer identify. A
-             two-dimensional arrangement needs the canvas's own accessibility
-             actions rather than a pair of per-card chevrons in any case. */
+          /* The chevrons move a stop in the saved *order*, which is what
+             positions a card that has never been arranged — so they still
+             matter, and they are the only way to do it that a screen reader can
+             drive, a lift-and-move having nothing to announce or activate. They
+             are not the accessible path for the canvas itself: once a card has
+             a placement, "up" and "down" are two of six directions and they
+             live on Home's card wrapper as `accessibilityActions`, which is
+             also why this whole subtree is hidden from the screen reader while
+             arrange mode is on.
+
+             `detailed` only: two 40dp buttons beside the 40dp remove button are
+             120 of a 146dp row, which leaves the stop's name 26dp and offers to
+             reorder a stop the user can no longer identify. */
           <>
             {tier === 'detailed' && (
               <>

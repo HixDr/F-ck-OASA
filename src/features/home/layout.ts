@@ -255,9 +255,11 @@ export function snapAxis(origin: number, size: number, edges: readonly number[],
  * possibly be the nearest free one are those where the card sits flush against
  * a blocker on one axis, so the candidate set is the desired coordinate plus
  * the four flush positions per blocker, and every combination of the two axes
- * is tried. With 20 saved stops that is ~1700 candidates of a handful of
- * comparisons each, once per drop, which is nothing — and it cannot fail,
- * because `bottom` (below every card) is always in the candidate set.
+ * is tried. At twenty saved stops that is ~1700 candidates tested against
+ * nineteen blockers each — call it 30k comparisons, once per drop, on the UI
+ * thread. Worth stating plainly rather than as "cheap": it is well inside a
+ * frame at the sizes this app sees, and it would not be at two hundred cards.
+ * It cannot fail, because `bottom` — below every card — is always a candidate.
  */
 export function resolveMove(want: Rect, others: readonly Rect[]): Rect {
   'worklet';
