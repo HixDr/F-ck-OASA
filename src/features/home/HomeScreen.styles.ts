@@ -153,6 +153,32 @@ export const s = StyleSheet.create({
     position: 'absolute',
     elevation: 0,
   },
+  /** What arrange mode looks like. An outline rather than a tint or a scrim:
+   *  at three cards across a phone, anything painted over a card is painted
+   *  over an arrival number, which is the one thing this app exists to show.
+   *  Colour comes from the accent inline. */
+  arrangeOutline: {
+    ...StyleSheet.absoluteFillObject,
+    borderWidth: 2,
+    borderRadius: radius.lg,
+  },
+  /** Magnet guides. One hairline each, spanning the whole canvas so that an
+   *  alignment two cards apart is legible as an alignment; positioned by
+   *  transform from a shared value, which is why `left`/`top` are zero. */
+  snapGuideV: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    width: 1,
+  },
+  snapGuideH: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    height: 1,
+  },
   linesSection: {
     marginTop: spacing.md,
   },
