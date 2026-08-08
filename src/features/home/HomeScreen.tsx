@@ -257,10 +257,15 @@ function sizeTo(
   const tol = SNAP_DP / u;
   const minW = CARD_MIN_W_DP / u;
   const minH = CARD_MIN_H_DP / u;
-  const maxW = 1 - base.x;
+  /* The floor wins over the margin, and `maxW` says so rather than leaving it
+     to the order of two ternaries. A card placed closer to the right edge than
+     the minimum width cannot be resized about a fixed corner at all — the drop
+     resolves that by moving it — and a preview drawn at less than the floor
+     would promise a size the card is never allowed to take. */
+  const maxW = Math.max(minW, 1 - base.x);
 
   let w = base.w + panX / u;
-  w = w < minW ? minW : w > maxW ? maxW : w;
+  w = w > maxW ? maxW : w < minW ? minW : w;
   let h = base.h + panY / u;
   if (h < minH) h = minH;
 
@@ -317,7 +322,11 @@ function carryTo(
 ): Carried {
   'worklet';
   const tol = SNAP_DP / u;
-  const maxX = 1 - base.w;
+  /* `Math.max` for the same reason `resolveMove` needs it: a card can be wider
+     than the canvas — a layout authored on a wider phone, widened to the dp
+     floor on a narrow one — and a negative ceiling here would let the clamp
+     below carry it off the left edge instead of pinning it at zero. */
+  const maxX = Math.max(0, 1 - base.w);
   let x = base.x + panX / u;
   x = x < 0 ? 0 : x > maxX ? maxX : x;
   let y = base.y + panY / u;
