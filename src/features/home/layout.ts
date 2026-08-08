@@ -69,8 +69,19 @@ export const CARD_MIN_W_DP = 120;
 export const TIER_STANDARD_DP = 178;
 /** Where a destination label becomes legible beside badge and figure. */
 export const TIER_DETAILED_DP = 300;
-/** A stop name plus one arrival row. */
-export const CARD_MIN_H_DP = 80;
+/**
+ * A stop name plus one arrival row.
+ *
+ * The design says ~80dp, and 80 is what a *standard* card needs: 14dp of card
+ * padding, a 32dp header and a 52dp row. It is not what the tier that actually
+ * reaches this floor needs. A compact card stacks, and stacking costs height —
+ * 14 padding + 24 header + 22 badge + 4 + 26 figure + 12 caption is 102 before
+ * anything clips, and what clips first is the badge that says which bus the
+ * number belongs to. The floor has to be the tallest thing any tier can be
+ * asked to fit in the narrowest box, so it is that number rather than the
+ * design's estimate of it, which was made before the stack was costed.
+ */
+export const CARD_MIN_H_DP = 104;
 
 /**
  * Gap between flowing cards.

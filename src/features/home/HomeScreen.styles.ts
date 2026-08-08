@@ -162,6 +162,39 @@ export const s = StyleSheet.create({
     borderWidth: 2,
     borderRadius: radius.lg,
   },
+  /** The corner target. Its 32dp is a compromise the tier boundaries force: at
+   *  `HIT_SIZE` it would cover a third of a 120dp card and sit on top of the
+   *  arrival figure, and it only exists while arrange mode is on, when nothing
+   *  underneath it is being read. */
+  resizeHandle: {
+    position: 'absolute',
+    right: 0,
+    bottom: 0,
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /** Filled, unlike everything else in arrange mode: an outline grip on a card
+   *  that is itself outlined is invisible. Its glyph takes `onAccent` so it
+   *  stays legible on a yellow or green accent. */
+  resizeGrip: {
+    width: 22,
+    height: 22,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /** The box a corner drag is describing, drawn while the card itself stays
+   *  put. Positioned by transform from shared values, hence the zeroed
+   *  `left`/`top`. */
+  resizePreview: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    borderWidth: 2,
+    borderRadius: radius.lg,
+  },
   /** Magnet guides. One hairline each, spanning the whole canvas so that an
    *  alignment two cards apart is legible as an alignment; positioned by
    *  transform from a shared value, which is why `left`/`top` are zero. */

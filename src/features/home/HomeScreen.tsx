@@ -101,7 +101,10 @@ import {
   fitAll,
   placeAll,
   resolveMove,
+  resolveResize,
   snapAxis,
+  CARD_MIN_H_DP,
+  CARD_MIN_W_DP,
   SNAP_DP,
   type PlacedCard,
   type Rect,
@@ -200,6 +203,13 @@ interface CanvasCtl {
   /** Canvas usable width. Every conversion between stored units and pixels
    *  goes through it. */
   u: SharedValue<number>;
+  /** Index of the card whose corner is being dragged, -1 when none. */
+  resizing: SharedValue<number>;
+  /** The box that corner is currently describing, in canvas pixels. */
+  previewX: SharedValue<number>;
+  previewY: SharedValue<number>;
+  previewW: SharedValue<number>;
+  previewH: SharedValue<number>;
   /** Finger position in window coordinates — drives the edge auto-scroll. */
   pointerY: SharedValue<number>;
   scrollY: SharedValue<number>;
@@ -210,6 +220,64 @@ interface CanvasCtl {
    *  vocabulary. */
   onSnap: () => void;
   onDrop: (index: number, x: number, y: number, w: number, h: number) => void;
+  onResizeStart: (index: number) => void;
+  onResizeEnd: (index: number, x: number, y: number, w: number, h: number) => void;
+}
+
+interface Sized {
+  w: number;
+  h: number;
+  /** Snapped edge in canvas pixels, or -1. */
+  gx: number;
+  gy: number;
+}
+
+/**
+ * The box a corner drag is describing, in stored units.
+ *
+ * The top-left is fixed, so only the trailing edges snap and only they are
+ * clamped. Pure and argument-taking for the same reason as `carryTo`, and
+ * because the accessibility "grow" and "shrink" actions have to reach the same
+ * answer through `resizeStep` without a gesture anywhere in sight.
+ */
+function sizeTo(
+  base: Rect,
+  panX: number,
+  panY: number,
+  u: number,
+  edgeX: readonly number[],
+  edgeY: readonly number[],
+): Sized {
+  'worklet';
+  const tol = SNAP_DP / u;
+  const minW = CARD_MIN_W_DP / u;
+  const minH = CARD_MIN_H_DP / u;
+  const maxW = 1 - base.x;
+
+  let w = base.w + panX / u;
+  w = w < minW ? minW : w > maxW ? maxW : w;
+  let h = base.h + panY / u;
+  if (h < minH) h = minH;
+
+  /* Only the trailing edge is offered a magnet: the leading one has not moved,
+     and snapping an edge the user is not dragging would silently resize the
+     card from the side they are holding still. */
+  const sx = snapAxis(base.x + w, 0, edgeX, tol);
+  let gx = sx.guide;
+  if (gx >= 0) {
+    const snapped = sx.v - base.x;
+    if (snapped >= minW && snapped <= maxW) w = snapped;
+    else gx = -1;
+  }
+  const sy = snapAxis(base.y + h, 0, edgeY, tol);
+  let gy = sy.guide;
+  if (gy >= 0) {
+    const snapped = sy.v - base.y;
+    if (snapped >= minH) h = snapped;
+    else gy = -1;
+  }
+
+  return { w, h, gx: gx >= 0 ? gx * u : -1, gy: gy >= 0 ? gy * u : -1 };
 }
 
 interface Carried {
@@ -440,6 +508,82 @@ const StopCard = React.memo(function StopCard({
     [ctl, index],
   );
 
+  /**
+   * The corner handle.
+   *
+   * A plain pan, not a held one: it is a target the user went looking for, and
+   * asking them to hold a control that only exists in arrange mode would be a
+   * second lock on a door already unlocked. It still refuses to start while
+   * anything else is in the air, for the same reason the body drag does.
+   */
+  const resize = useMemo(
+    () =>
+      Gesture.Pan()
+        .maxPointers(1)
+        .onStart(() => {
+          const rects = ctl.rects.value;
+          if (index >= rects.length) return;
+          if (ctl.active.value >= 0 || ctl.resizing.value >= 0) return;
+          const others: Rect[] = [];
+          for (let i = 0; i < rects.length; i++) {
+            if (i !== index) others.push(rects[i]);
+          }
+          ctl.others.value = others;
+          ctl.edgeX.value = edgesX(others);
+          ctl.edgeY.value = edgesY(others);
+          const u = ctl.u.value;
+          const base = rects[index];
+          ctl.previewX.value = base.x * u;
+          ctl.previewY.value = base.y * u;
+          ctl.previewW.value = base.w * u;
+          ctl.previewH.value = base.h * u;
+          ctl.guideX.value = -1;
+          ctl.guideY.value = -1;
+          ctl.resizing.value = index;
+          runOnJS(ctl.onResizeStart)(index);
+        })
+        .onUpdate((e) => {
+          if (ctl.resizing.value !== index) return;
+          const rects = ctl.rects.value;
+          if (index >= rects.length) return;
+          const u = ctl.u.value;
+          const base = rects[index];
+          const next = sizeTo(
+            base,
+            e.translationX,
+            e.translationY,
+            u,
+            ctl.edgeX.value,
+            ctl.edgeY.value,
+          );
+          ctl.previewW.value = next.w * u;
+          ctl.previewH.value = next.h * u;
+          if (next.gx !== ctl.guideX.value || next.gy !== ctl.guideY.value) {
+            ctl.guideX.value = next.gx;
+            ctl.guideY.value = next.gy;
+            if (next.gx >= 0 || next.gy >= 0) runOnJS(ctl.onSnap)();
+          }
+        })
+        .onFinalize(() => {
+          if (ctl.resizing.value !== index) return;
+          const rects = ctl.rects.value;
+          const u = ctl.u.value;
+          ctl.resizing.value = -1;
+          ctl.guideX.value = -1;
+          ctl.guideY.value = -1;
+          if (index >= rects.length) return;
+          const base = rects[index];
+          const got = resolveResize(
+            { x: base.x, y: base.y, w: ctl.previewW.value / u, h: ctl.previewH.value / u },
+            ctl.others.value,
+            CARD_MIN_W_DP / u,
+            CARD_MIN_H_DP / u,
+          );
+          runOnJS(ctl.onResizeEnd)(index, got.x, got.y, got.w, got.h);
+        }),
+    [ctl, index],
+  );
+
   const animStyle = useAnimatedStyle(() => {
     const held = ctl.active.value === index;
     return {
@@ -490,6 +634,22 @@ const StopCard = React.memo(function StopCard({
           )}
         </Animated.View>
       </GestureDetector>
+
+      {/* Deliberately a sibling of the body's detector rather than a child of
+          it. Nested, a hold on the corner would satisfy the body's long press
+          after 260ms and lift the card the user was trying to resize; out here
+          the touch never reaches that gesture at all, which is a structural
+          answer rather than one that depends on getting a gesture-relation API
+          right. */}
+      {arranging && (
+        <GestureDetector gesture={resize}>
+          <View style={s.resizeHandle}>
+            <View style={[s.resizeGrip, { backgroundColor: primaryColor }]}>
+              <Ionicons name="resize" size={13} color={onAccent(primaryColor)} />
+            </View>
+          </View>
+        </GestureDetector>
+      )}
     </Animated.View>
   );
 });
@@ -521,8 +681,29 @@ const SnapGuides = React.memo(function SnapGuides({
     opacity: ctl.guideY.value >= 0 ? 1 : 0,
     transform: [{ translateY: ctl.guideY.value }],
   }));
+  /**
+   * The box a corner drag is describing.
+   *
+   * The card itself is left alone until the gesture ends, and that is the whole
+   * design of the resize rather than a shortcut. Re-laying-out a card on every
+   * frame means a Yoga pass over up to ten arrival rows sixty times a second,
+   * on a screen where every card is already running a live query — and the tier
+   * change that a resize exists to produce is a React render, which cannot
+   * happen per frame at all. One outline moves instead, and the card takes the
+   * new box, at the new tier, in a single commit when the finger lifts.
+   */
+  const boxStyle = useAnimatedStyle(() => ({
+    opacity: ctl.resizing.value >= 0 ? 1 : 0,
+    width: ctl.previewW.value,
+    height: ctl.previewH.value,
+    transform: [{ translateX: ctl.previewX.value }, { translateY: ctl.previewY.value }],
+  }));
   return (
     <>
+      <Animated.View
+        pointerEvents="none"
+        style={[s.resizePreview, { borderColor: color }, boxStyle]}
+      />
       <Animated.View
         pointerEvents="none"
         style={[s.snapGuideV, { backgroundColor: color }, vStyle]}
@@ -1250,6 +1431,11 @@ export default function HomeScreen() {
   const edgeXSV = useSharedValue<number[]>([]);
   const edgeYSV = useSharedValue<number[]>([]);
   const uSV = useSharedValue(1);
+  const resizing = useSharedValue(-1);
+  const previewX = useSharedValue(0);
+  const previewY = useSharedValue(0);
+  const previewW = useSharedValue(0);
+  const previewH = useSharedValue(0);
   const pointerY = useSharedValue(0);
   const scrollY = useSharedValue(0);
   const scrollAt = useSharedValue(0);
@@ -1450,6 +1636,38 @@ export default function HomeScreen() {
   );
 
   /**
+   * A corner drag is a lift too, as far as the rest of the screen is concerned:
+   * the canvas must stop scrolling, and the flowing cards must become boxes
+   * before anything is asked to have a size.
+   */
+  const onResizeStart = useCallback(
+    (index: number) => {
+      activeRef.current = index;
+      hapticImpact();
+      setArranging(true);
+      setDragging(true);
+      freezeFlowing();
+    },
+    [freezeFlowing],
+  );
+
+  const onResizeEnd = useCallback(
+    (index: number, x: number, y: number, w: number, h: number) => {
+      activeRef.current = -1;
+      setDragging(false);
+      const stop = stopsRef.current[index];
+      if (stop) {
+        const next = updateFavoriteStop(stop.stopCode, { layout: { x, y, w, h } });
+        stopsRef.current = next;
+        setFavoriteStops(next);
+        hapticImpact();
+      }
+      setDropTick((v) => v + 1);
+    },
+    [],
+  );
+
+  /**
    * Every field here is stable, and it has to be: this object is a dependency
    * of each card's gesture, and a new gesture object mid-drag detaches the one
    * the finger is already holding.
@@ -1469,6 +1687,11 @@ export default function HomeScreen() {
       edgeX: edgeXSV,
       edgeY: edgeYSV,
       u: uSV,
+      resizing,
+      previewX,
+      previewY,
+      previewW,
+      previewH,
       pointerY,
       scrollY,
       scrollAt,
@@ -1476,11 +1699,14 @@ export default function HomeScreen() {
       onLift,
       onSnap,
       onDrop,
+      onResizeStart,
+      onResizeEnd,
     }),
     [
       active, dx, dy, panX, panY, lift, guideX, guideY, rectsSV, othersSV,
-      edgeXSV, edgeYSV, uSV, pointerY, scrollY, scrollAt, reducedSV,
-      onLift, onSnap, onDrop,
+      edgeXSV, edgeYSV, uSV, resizing, previewX, previewY, previewW, previewH,
+      pointerY, scrollY, scrollAt, reducedSV,
+      onLift, onSnap, onDrop, onResizeStart, onResizeEnd,
     ],
   );
 
