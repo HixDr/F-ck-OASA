@@ -39,6 +39,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { InteractionManager, Platform, StyleSheet, View } from 'react-native';
 import { usePathname } from 'expo-router';
 import MapView, { PROVIDER_GOOGLE } from 'react-native-maps';
+import { mapPerf } from '../utils/mapPerf';
 import { useInitialRegion } from '../hooks/useInitialRegion';
 import { GOOGLE_DARK_STYLE, GOOGLE_MAP_ID } from '../theme/googleMapStyle';
 
@@ -116,7 +117,9 @@ export function MapWarmup() {
         // A deep link (`fck-oasa://map/...`) can put a real map on screen before
         // this fires. Mounting a second one alongside it is the one case where
         // the warm-up is pure cost: the real map is already doing all of it.
-        setPhase(pathnameRef.current.startsWith('/map') ? 'done' : 'warming');
+        const onMapRoute = pathnameRef.current.startsWith('/map');
+        mapPerf(onMapRoute ? 'warmup skipped (already on a map)' : 'warmup armed');
+        setPhase(onMapRoute ? 'done' : 'warming');
       }, WARMUP_DELAY_MS);
     });
     return () => {
@@ -128,13 +131,23 @@ export function MapWarmup() {
   useEffect(() => {
     if (phase !== 'warming' && phase !== 'loaded') return;
     const t = setTimeout(
-      () => setPhase('done'),
+      () => {
+        /* Which branch this is, is the whole question: 'loaded' means the
+           hidden map really drew and the warm-up did its job; 'cap' means
+           onMapLoaded never fired and only SDK init was warmed. */
+        mapPerf(phase === 'loaded' ? 'warmup torn down (loaded)' : 'warmup torn down (CAP — never loaded)');
+        setPhase('done');
+      },
       phase === 'loaded' ? WARMUP_LINGER_MS : WARMUP_MAX_MS,
     );
     return () => clearTimeout(t);
   }, [phase]);
 
-  const onMapLoaded = useCallback(() => setPhase('loaded'), []);
+  const onMapLoaded = useCallback(() => {
+    mapPerf('warmup onMapLoaded');
+    setPhase('loaded');
+  }, []);
+  const onMapReady = useCallback(() => mapPerf('warmup onMapReady'), []);
 
   if (phase !== 'warming' && phase !== 'loaded') return null;
 
@@ -162,6 +175,7 @@ export function MapWarmup() {
         initialRegion={region}
         customMapStyle={GOOGLE_DARK_STYLE}
         googleMapId={GOOGLE_MAP_ID}
+        onMapReady={onMapReady}
         onMapLoaded={onMapLoaded}
         // Nothing here is interactive or observable, so everything optional is
         // off. `showsUserLocation` in particular stays false: it would ask for

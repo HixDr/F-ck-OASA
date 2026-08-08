@@ -49,6 +49,7 @@ import { RouteStopMarker } from './components/StopMarkers';
 import { StopMarkerCaptureHost } from './components/StopMarkerImages';
 import { useMinuteTick, useScreenFocused, useVisibleRegion, useWalkingRoute } from './components/mapHooks';
 import { BusMarkerRenderer } from '../../components/BusMarkerSvg';
+import { mapPerf } from '../../utils/mapPerf';
 import { bearingBetween } from '../../utils/geo';
 import { s } from './LiveMapScreen.styles';
 import type { MapStamp } from '../../types';
@@ -75,6 +76,7 @@ interface StopWithBearing extends ParsedStop { bearing: number }
 /* ── Live Map Component ──────────────────────────────────────── */
 
 export default function LiveMapScreen() {
+  useEffect(() => { mapPerf('line map screen mounted'); }, []);
   const router = useRouter();
   const { lineCode, lineId, lineDescr } = useLocalSearchParams<{
     lineCode: string;
@@ -503,7 +505,14 @@ export default function LiveMapScreen() {
     setStampModal({ lat: e.nativeEvent.coordinate.latitude, lng: e.nativeEvent.coordinate.longitude });
   }, []);
 
-  const onMapReady = useCallback(() => setMapReady(true), []);
+  const onMapReady = useCallback(() => {
+    mapPerf('line map onMapReady');
+    setMapReady(true);
+  }, []);
+  /* The mark that answers the question: how long after the screen mounts do
+     tiles actually appear. Everything before it is warmable in principle;
+     the gap between mount and this is the per-instance cost that is not. */
+  const onMapLoaded = useCallback(() => mapPerf('line map onMapLoaded'), []);
   const onRemoveStamp = useCallback((id: string) => setStamps(removeStamp(id)), []);
 
   const recenter = useCallback(() => {
@@ -676,6 +685,7 @@ export default function LiveMapScreen() {
         toolbarEnabled={false}
         pitchEnabled={false}
         onMapReady={onMapReady}
+        onMapLoaded={onMapLoaded}
         onLongPress={onMapLongPress}
         onRegionChangeStart={onRegionChangeStart}
         onRegionChangeComplete={onRegionChangeComplete}
