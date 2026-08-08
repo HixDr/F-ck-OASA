@@ -216,15 +216,21 @@ const LineRow = React.memo(function LineRow({
           )}
         </View>
 
+        {/* Everything in this block carries the figure's cap, including the two
+            that are not the figure. Uncapped, at accessibility text sizes the
+            `min` caption and the em dash outgrow the digits they annotate and
+            become the widest thing in the block — which lifts it off the floor
+            in `arrivalBlock` that keeps the row from reflowing on every poll,
+            and makes a row with no arrival taller than the rows above it. */}
         <View style={[s.arrivalBlock, stale && s.stale]}>
           {arrivalText == null ? (
-            <Text style={s.noArrival}>—</Text>
+            <Text style={s.noArrival} maxFontSizeMultiplier={fontScaleCap.figure}>—</Text>
           ) : arrivalText === 'now' ? (
             <Text style={[s.arrivalNow, { color }]} maxFontSizeMultiplier={fontScaleCap.figure}>now</Text>
           ) : (
             <>
               <Text style={[s.arrivalMin, { color }]} maxFontSizeMultiplier={fontScaleCap.figure}>{arrivalText}</Text>
-              <Text style={s.arrivalUnit}>min</Text>
+              <Text style={s.arrivalUnit} maxFontSizeMultiplier={fontScaleCap.figure}>min</Text>
             </>
           )}
         </View>

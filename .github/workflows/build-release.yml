@@ -22,37 +22,53 @@ jobs:
     # secret is the cause. Locally this is masked by .env being on disk.
     env:
       GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+
+      # ─── ccache, wired into the NDK/CMake toolchain ────────────────────
+      #
+      # The C++ compile is the single biggest line item in this build. With
+      # arm64-v8a as the only ABI, a release still compiles roughly 235
+      # translation units: ~100 for reanimated + worklets, ~47 for
+      # expo-modules-core, ~65 for the app module's autolinked codegen (the
+      # `*_autolinked_build` trees under android/app/.cxx), plus screens and
+      # gesture-handler. Those are folly/jsi/React-header-heavy files; on a
+      # 4-vCPU runner they are minutes of wall clock on their own.
+      #
+      # CMake ≥ 3.4 initialises the CMAKE_<LANG>_COMPILER_LAUNCHER *cache
+      # variable* from the environment variable of the same name (the Android
+      # SDK ships CMake 3.22.1, so this applies), which makes every compile
+      # rule in the generated build.ninja run as `ccache clang++ ...`. Nothing
+      # in android/ or plugins/ has to change for this, which matters because
+      # `expo prebuild --clean` regenerates that whole directory anyway.
+      #
+      # These are job-level rather than step-level on purpose. Gradle forks a
+      # build JVM, and AGP forks cmake/ninja from *that*; putting the values in
+      # the job environment means every process in that chain inherits them no
+      # matter which step happens to start the daemon.
+      #
+      # Why ccache and not a cache of android/app/.cxx — see the "Cache ccache"
+      # step below. Kill switch: delete these five variables and the build is
+      # bit-for-bit the same, just slower.
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CMAKE_CXX_COMPILER_LAUNCHER: ccache
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 1G
+      # The NDK is re-downloaded by AGP on every run, so the clang binary gets a
+      # fresh mtime each time. ccache's default compiler_check is `mtime`, which
+      # would treat every run as a different compiler and miss 100% of the time.
+      # `content` hashes the compiler binary instead: stable across runs, and
+      # still an exact identity check if the NDK version ever moves.
+      CCACHE_COMPILERCHECK: content
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 17
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Cache Gradle dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties', 'android/build.gradle', 'android/app/build.gradle') }}
-          restore-keys: gradle-
-
-      - name: Install dependencies
-        run: npm ci
 
       # Fail before spending 15 minutes on a build that cannot be signed.
       # A release APK signed with the AOSP debug key is worse than no APK:
       # that key is public, so the signature proves nothing.
+      #
+      # First step after checkout, deliberately: this used to sit after
+      # `npm ci`, which meant a missing secret cost a minute of npm before it
+      # said so. It needs nothing from the toolchain, so it runs while the
+      # runner is still cheap.
       - name: Check required secrets are present
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
@@ -72,9 +88,125 @@ jobs:
             exit 1
           fi
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install ccache
+        run: |
+          command -v ccache >/dev/null 2>&1 || {
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq ccache
+          }
+          ccache --version | head -n1
+
+      # Rolling key. The old Gradle cache in this file used a fixed key and this
+      # is the mistake it made, so it is worth spelling out: actions/cache only
+      # *writes* when the key misses. A key that never changes therefore hits
+      # forever and freezes the cache at whatever the first successful run
+      # produced. Suffixing with github.run_id guarantees a miss on the exact
+      # key every time, so the entry is rewritten each run, while restore-keys
+      # pull the most recent prefix match in.
+      #
+      # The key is a performance hint and nothing more. Correctness does not
+      # depend on it: ccache hashes the preprocessed source, the full command
+      # line and (per CCACHE_COMPILERCHECK above) the compiler binary's
+      # contents. A stale or wrong-generation entry can only miss, never return
+      # an object built from different inputs. That is the whole reason this is
+      # ccache and not an actions/cache over android/app/.cxx — see the report
+      # in the PR, but briefly: .cxx caching is decided by ninja's mtime
+      # comparison, and both `npm ci` and `expo prebuild --clean` rewrite every
+      # source file with a fresh mtime, so such a cache either rebuilds
+      # everything anyway or has to be made to lie about mtimes, which is
+      # exactly how a cache silently ships a stale .so.
+      - name: Cache ccache (NDK/C++ object cache)
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ runner.os }}-${{ hashFiles('package-lock.json') }}-
+            ccache-${{ runner.os }}-
+
+      # --prefer-offline uses the ~/.npm tarball cache restored by setup-node
+      # instead of revalidating against the registry; --no-audit/--no-fund drop
+      # two network round-trips that gate nothing here. Scripts still run, which
+      # matters: patch-package is a postinstall, and withAndroidOptimizations.js
+      # refuses to prebuild if the react-native-background-actions patch is
+      # missing.
+      - name: Install dependencies
+        run: npm ci --prefer-offline --no-audit --no-fund
+
       # `--clean` wipes android/, so the keystore has to be written afterwards.
+      #
+      # android/ is gitignored (see .gitignore → "generated native folders"), so
+      # prebuild is not re-deriving something already in the tree — it is the
+      # only thing that creates the Gradle project at all, and it cannot be
+      # skipped or made conditional. --clean is a no-op on a fresh runner and is
+      # kept as a guard for the day the directory does get committed.
+      #
+      # --no-install is new. By default prebuild runs a package install after
+      # syncing the template, and if the template wants different dependency
+      # versions it also rewrites package.json — after `npm ci` has already
+      # installed exactly what package-lock.json pins, and before the "Read
+      # version from package.json" step below reads that same file. Skipping it
+      # keeps the released APK built from the locked tree and nothing else.
       - name: Expo prebuild
-        run: npx expo prebuild --platform android --clean
+        run: npx expo prebuild --platform android --no-install --clean
+
+      # The arm64-only decision lives in plugins/withAndroidOptimizations.js and
+      # is the reason this build compiles one ABI instead of four. Unlike the
+      # manifest and build.gradle edits in that plugin, the gradle.properties
+      # write has no assertion behind it: if it ever stopped taking effect the
+      # build would still succeed, just with ~4x the C++ to compile and an APK
+      # that is twice the size. Cheap to check, so check it.
+      - name: Assert the release is still arm64-only
+        run: |
+          ARCHS=$(sed -n 's/^reactNativeArchitectures=//p' android/gradle.properties)
+          if [ "$ARCHS" != "arm64-v8a" ]; then
+            echo "::error::android/gradle.properties has reactNativeArchitectures='$ARCHS', expected 'arm64-v8a'. plugins/withAndroidOptimizations.js is no longer taking effect — see README > 'Supported devices'."
+            exit 1
+          fi
+
+      # Replaces a hand-rolled actions/cache over ~/.gradle/caches + wrapper.
+      # Two reasons, both concrete:
+      #
+      #  1. The old key hashed android/gradle-wrapper.properties, android/
+      #     build.gradle and android/app/build.gradle — none of which exist at
+      #     that point, because android/ is generated by the prebuild step above
+      #     and is not in the repo. hashFiles returns "" when nothing matches,
+      #     so the key was the literal string "gradle-": a permanent hit, which
+      #     means actions/cache never wrote again. Every run since the first was
+      #     restoring a frozen cache and discarding everything it downloaded.
+      #  2. The fix for that is a rolling key, but ~/.gradle/caches for an
+      #     Expo/RN build is 1.5-2.5 GB, and a rolling key over a single blob
+      #     that size means re-uploading ~1 GB on every run. setup-gradle splits
+      #     the Gradle user home into separately-keyed bundles and only uploads
+      #     the ones whose contents changed, which is the behaviour we actually
+      #     want. It also stops the daemon before saving, so the cache is never
+      #     archived from underneath a JVM that is still writing to it.
+      #
+      # This is the first step that needs android/ to exist, hence the position.
+      # validate-wrappers is off because the wrapper jar is not ours: prebuild
+      # writes it from the Expo template inside node_modules, which `npm ci`
+      # already integrity-checks against package-lock.json. Checksum-validating
+      # a file this repo does not control only adds a way for the build to fail
+      # on the day Expo ships a wrapper the action has not catalogued yet. This
+      # matches the previous behaviour — nothing validated the wrapper before.
+      - name: Setup Gradle (dependency + build cache)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          build-root-directory: android
+          validate-wrappers: false
 
       - name: Decode release keystore
         env:
@@ -84,6 +216,45 @@ jobs:
           # Never echo the file or its size to the log; just prove it decoded.
           test -s "$RUNNER_TEMP/oasa-release.keystore"
 
+      # Zeroed so the stats step below describes this run only, rather than the
+      # accumulated totals of every run whose cache we restored.
+      - name: Reset ccache statistics
+        run: ccache --zero-stats
+
+      # Flags, and why:
+      #
+      #   --parallel      redundant with org.gradle.parallel=true in the
+      #                   generated gradle.properties, but that file is
+      #                   regenerated by prebuild and its contents are not ours,
+      #                   so it is stated explicitly here.
+      #   --build-cache   the reason this matters more than it looks: settings
+      #                   .gradle pulls @react-native/gradle-plugin and the Expo
+      #                   autolinking plugin in as included builds, and their
+      #                   build directories live inside node_modules, which
+      #                   `npm ci` deletes every run. Their Kotlin compilation is
+      #                   cacheable, so with a Gradle cache that actually
+      #                   persists (see above) it comes back from the cache
+      #                   instead of being recompiled during configuration.
+      #   -Xmx4g          was 2g. R8 with resource shrinking plus the Kotlin
+      #                   compile is tight in 2g and spends the difference in
+      #                   GC. Not higher, because the Kotlin Gradle plugin gives
+      #                   the Kotlin daemon the Gradle daemon's -Xmx when
+      #                   kotlin.daemon.jvmargs is unset: 4g here is a ~8g
+      #                   ceiling across two JVMs, and the ninja phase wants
+      #                   room for four concurrent clang processes on top. The
+      #                   standard runner has 4 vCPU / 16 GB.
+      #   MaxMetaspaceSize
+      #                   the generated gradle.properties asks for 512m, and
+      #                   overriding org.gradle.jvmargs from the CLI drops that
+      #                   line wholesale. 1g restores a bound — AGP + KGP + the
+      #                   Expo plugins are a lot of classes — without keeping
+      #                   the 512m cap that they sit close to.
+      #
+      # No --daemon (and no --no-daemon). gradle.properties pins
+      # org.gradle.jvmargs, so the launcher can never build in the client JVM
+      # and forks a build JVM either way; the flag advertised a saving it does
+      # not produce. Leaving the lifecycle alone also lets setup-gradle stop the
+      # daemon at the right moment for the cache save.
       - name: Build release APK
         working-directory: android
         env:
@@ -91,7 +262,17 @@ jobs:
           OASA_KEYSTORE_PASSWORD: ${{ secrets.OASA_KEYSTORE_PASSWORD }}
           OASA_KEY_ALIAS: ${{ secrets.OASA_KEY_ALIAS }}
           OASA_KEY_PASSWORD: ${{ secrets.OASA_KEY_PASSWORD }}
-        run: ./gradlew assembleRelease --parallel --daemon --build-cache -Dorg.gradle.jvmargs="-Xmx2g"
+        run: ./gradlew assembleRelease --parallel --build-cache "-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g"
+
+      # The one way to tell whether the ccache wiring above is real. A run where
+      # "cacheable" is 0 means CMake never picked the launcher up and the whole
+      # thing is inert (harmless, but delete it rather than pretend); a warm run
+      # where hits stay near 0 means the cache is not surviving between runs.
+      # Expect ~0% hits on the first run and a high hit rate afterwards, falling
+      # back to ~0% whenever a dependency bump changes the sources.
+      - name: Report ccache effectiveness
+        if: always()
+        run: ccache --show-stats --verbose || ccache -s
 
       # Belt and braces: prove the APK is not signed with the public AOSP debug
       # key (SHA1 5E:8F:16:...:F6:25, CN=Android Debug) before publishing it.

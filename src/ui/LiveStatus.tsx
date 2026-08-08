@@ -156,14 +156,25 @@ const s = StyleSheet.create({
     fontSize: font.size.micro,
     fontWeight: '600',
   },
-  /** `font.num` and a fixed width, so 9s → 10s does not shove the label. */
+  /**
+   * The pill hugs its text.
+   *
+   * It used to hold a 30dp floor so 9s → 10s could not shove the label. That
+   * floor is invisible on bare text but this pill is *painted*, so a single
+   * digit sat right-aligned in a box still sized for two — the fill stopped
+   * agreeing with the number inside it.
+   *
+   * The label beside it is `flex: 1`, so it absorbs the difference. The width
+   * changes twice per poll cycle (10s → 9s, and the reset back), not once per
+   * tick — `font.num` keeps every digit the same advance, so nothing moves
+   * while the count runs.
+   */
   countdown: {
     ...font.num,
     color: colors.textMuted,
     fontSize: font.size.micro,
     fontWeight: '700',
-    minWidth: 30,
-    textAlign: 'right',
+    textAlign: 'center',
     paddingHorizontal: spacing.xs,
     paddingVertical: 1,
     borderRadius: radius.sm,

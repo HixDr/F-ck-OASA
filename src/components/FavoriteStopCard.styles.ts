@@ -119,6 +119,30 @@ export const s = StyleSheet.create({
   },
 
   /* ── The number the app exists to show ─────────────────────── */
+  /**
+   * `minWidth` is a layout reservation, not decoration. Do not remove it to
+   * make the block "shrink to fit" a single digit.
+   *
+   * The block paints nothing, so the reservation is invisible; what would be
+   * visible is its absence. `lineMain` next to it is `flex: 1`, so every point
+   * the block gives up goes straight to a `numberOfLines={1}` destination label
+   * — let the block hug its digits and a truncated label gains and loses a
+   * character each time an arrival ticks 12 → 9, ~20dp of swing, on a list that
+   * re-renders every poll. The `min` caption re-centres under the number at the
+   * same moment, and the number itself slides half that distance, because the
+   * bell after it pins the block's right edge but not its left.
+   *
+   * 56 is the two-digit state at the figure cap (34pt × 1.3, tabular ≈ 53dp),
+   * so the one thing the poll can actually change stays inside the floor and
+   * the row's geometry is frozen for the whole countdown. `now` is the widest
+   * state and does cross the floor by a couple of points near the top of the
+   * scale — that is one reflow per arrival instead of one per poll, which is
+   * the trade the floor exists to make.
+   *
+   * If this block is ever given a fill, put it on the `Text`, never here:
+   * painting the container paints the reservation, which is exactly the "7 in a
+   * box sized for 17" that a fixed width looks like once it has a colour.
+   */
   arrivalBlock: {
     minWidth: 56,
     alignItems: 'center',
