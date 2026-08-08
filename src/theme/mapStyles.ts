@@ -70,18 +70,10 @@ export const mapStyles = StyleSheet.create({
     borderRadius: 3,
     backgroundColor: '#4285F4',
   },
-  loader: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: colors.bg,
-  },
-  loaderOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.4)',
-  },
+  /* `loader` and `loaderOverlay` used to live here. Both lost their last
+     consumer when MapStatus took over map loading feedback, and the duplicated
+     `rgba(0,0,0,0.4)` meant the scrim's alpha existed in two places that could
+     drift. MapStatus owns it now, in its own StyleSheet. */
   arrivalHeader: {
     flexDirection: 'row',
     alignItems: 'center',

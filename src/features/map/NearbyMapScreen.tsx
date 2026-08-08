@@ -308,6 +308,15 @@ export default function NearbyMapScreen() {
         initialRegion={initialRegion}
         customMapStyle={GOOGLE_DARK_STYLE}
         googleMapId={GOOGLE_MAP_ID}
+        // The native map surface is a child view covering the full bounds, so it
+        // paints over the black RN background with its own loading colour —
+        // white by default, a flashbang in a pure-black UI. `loadingEnabled` is
+        // not redundant here: on Android the loading layout that carries
+        // `loadingBackgroundColor` only exists once loading is enabled, so
+        // dropping this prop silently restores the white flash.
+        loadingEnabled
+        loadingBackgroundColor={colors.bg}
+        loadingIndicatorColor={colors.primaryLight}
         showsUserLocation={false}
         showsMyLocationButton={false}
         showsCompass={false}
