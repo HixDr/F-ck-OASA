@@ -26,6 +26,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, font, spacing, radius, withAlpha, HIT_SIZE } from '../src/theme';
 import { UndoHost } from '../src/ui/UndoBar';
+import { MapWarmup } from '../src/ui/MapWarmup';
 import { initStorage, prefetchFavoriteSchedules } from '../src/services/storage';
 import { initLocation, type LocationInit } from '../src/services/location';
 import { setupNetworkListener, useNetworkStatus } from '../src/services/network';
@@ -600,6 +601,11 @@ export default function RootLayout() {
       <TopBanner banner={banner} />
       <AlertPill />
       <UpdateOverlay progress={updateProgress} />
+      {/* Brings the Google Maps SDK up in the background a moment after the
+          first screen paints, so the first map open is not also the first time
+          Play Services loads maps_core. Draws nothing and is parked offscreen;
+          it is an overlay in the strictest sense. */}
+      <MapWarmup />
       {/* Undo toasts. Last sibling so it draws above every other overlay, and
           an overlay itself — it must never take part in layout. */}
       <UndoHost />
