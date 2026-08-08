@@ -5,7 +5,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { File, Directory, Paths } from 'expo-file-system';
-import type { FavoriteLine, FavoriteStop, OasaLine, MapStamp, OasaDailySchedule, OasaStop, OasaBulkStop, OasaRoute } from '../types';
+import type { FavoriteLine, FavoriteStop, OasaLine, MapStamp, OasaDailySchedule, OasaStop, OasaBulkStop, OasaRoute, OasaArrival } from '../types';
 import { getDailySchedule, isUsableSchedule } from './api';
 import { onAppActiveChange } from './appState';
 
@@ -20,6 +20,7 @@ const TOGGLES_KEY = '@oasa/toggles';
 const SETTINGS_KEY = '@oasa/settings';
 const SCHED_TS_KEY = '@oasa/sched_ts';
 const BUS_POS_PREFIX = '@oasa/buspos/';
+const ARRIVALS_PREFIX = '@oasa/arrivals/';
 const OFFLINE_FLAG_KEY = '@oasa/offline_downloaded';
 const OFFLINE_TS_KEY = '@oasa/offline_ts';
 
@@ -116,7 +117,7 @@ export async function initStorage(): Promise<void> {
 
   _initialized = true;
   // Fire-and-forget: never delay the first frame for housekeeping.
-  void pruneBusPositions();
+  void pruneTimestampedCaches();
 }
 
 /** True when every offline cache file exists and holds more than `{}`. */
@@ -674,24 +675,97 @@ export function setCachedBusPositions(routeCode: string, buses: CachedBusPositio
   AsyncStorage.setItem(BUS_POS_PREFIX + routeCode, JSON.stringify(data)).catch(() => {});
 }
 
+/* ── Last-Known Arrivals Cache ───────────────────────────────── */
+
+export interface CachedArrivals {
+  /**
+   * `Date.now()` at the moment this response came off the *network*.
+   *
+   * Not when it was read back, and deliberately not something the reader can
+   * infer: every minute the UI subtracts from an arrival estimate is measured
+   * from here. Serving these numbers without their original timestamp is what
+   * turns a twenty-minute-old "5 min" into a confident lie about a bus that
+   * has already been and gone.
+   */
+  ts: number;
+  arrivals: OasaArrival[];
+}
+
 /**
- * Drop expired `@oasa/buspos/*` entries.
+ * How long a saved arrival estimate is worth anything.
  *
- * One key is written per route the user ever opens and nothing removed them, so
- * the table grew without bound over the app's lifetime for data that is dead
- * after an hour.
+ * An estimate only decays; it never improves. Past half an hour every
+ * prediction we could be holding has run below zero, so the cache would have
+ * nothing left to say except "every bus is arriving now" about buses that
+ * left — worse than showing nothing. Half an hour is also roughly two headways
+ * on a typical Athens line, and comfortably covers the gaps this exists for: a
+ * metro leg, a basement, a tunnel, a dead spot on the walk to the stop.
  */
-async function pruneBusPositions(): Promise<void> {
+const ARRIVALS_MAX_AGE_MS = 30 * 60 * 1000;
+
+/**
+ * Last-known arrivals for a stop, or null.
+ *
+ * The age check is here rather than only in the pruner because the pruner runs
+ * once at launch: a session that started an hour ago would otherwise still be
+ * served entries it read past their bound. An expired entry returns null so it
+ * behaves exactly like no cache at all — never as data a caller might weigh up.
+ */
+export async function getCachedArrivals(stopCode: string): Promise<CachedArrivals | null> {
   try {
-    const keys = (await AsyncStorage.getAllKeys()).filter((k) => k.startsWith(BUS_POS_PREFIX));
+    const raw = await AsyncStorage.getItem(ARRIVALS_PREFIX + stopCode);
+    if (!raw) return null;
+    const data = JSON.parse(raw) as CachedArrivals;
+    if (!data || !Number.isFinite(data.ts) || !Array.isArray(data.arrivals)) return null;
+    if (Date.now() - data.ts > ARRIVALS_MAX_AGE_MS) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save the arrivals just seen at a stop.
+ *
+ * Called on every successful poll — roughly once per saved stop per 15 s — so
+ * that whenever the connection drops the saved copy is at most one poll old,
+ * which is the whole point of it. The payload is a handful of short strings;
+ * fire-and-forget, like the bus positions above.
+ *
+ * An empty response is stored rather than skipped. "Nothing is due here" is a
+ * real observation, and keeping it means a later cache read cannot resurrect
+ * numbers the network has already superseded.
+ */
+export function setCachedArrivals(stopCode: string, arrivals: OasaArrival[]): void {
+  const data: CachedArrivals = { ts: Date.now(), arrivals };
+  AsyncStorage.setItem(ARRIVALS_PREFIX + stopCode, JSON.stringify(data)).catch(() => {});
+}
+
+/**
+ * Drop expired `@oasa/buspos/*` and `@oasa/arrivals/*` entries.
+ *
+ * One key is written per route the user ever opens and one per stop they ever
+ * watch, and nothing removed them, so the table grew without bound over the
+ * app's lifetime for data that is dead within the hour.
+ */
+async function pruneTimestampedCaches(): Promise<void> {
+  try {
+    const bounds: Array<[string, number]> = [
+      [BUS_POS_PREFIX, BUS_POS_MAX_AGE_MS],
+      [ARRIVALS_PREFIX, ARRIVALS_MAX_AGE_MS],
+    ];
+    const keys = (await AsyncStorage.getAllKeys()).filter((k) =>
+      bounds.some(([prefix]) => k.startsWith(prefix)),
+    );
     if (keys.length === 0) return;
-    const cutoff = Date.now() - BUS_POS_MAX_AGE_MS;
+    const now = Date.now();
     const stale: string[] = [];
     for (const [key, raw] of await AsyncStorage.multiGet(keys)) {
       if (!raw) { stale.push(key); continue; }
+      const maxAge = bounds.find(([prefix]) => key.startsWith(prefix))![1];
       try {
-        const ts = (JSON.parse(raw) as CachedBusPositions)?.ts;
-        if (!Number.isFinite(ts) || ts < cutoff) stale.push(key);
+        const ts = (JSON.parse(raw) as { ts?: number })?.ts;
+        if (!Number.isFinite(ts) || now - (ts as number) > maxAge) stale.push(key);
       } catch {
         stale.push(key);
       }

@@ -6,6 +6,11 @@
  * could say when the next refresh was due. There is one clock now (see the
  * shared arrivals clock in hooks/index.ts) and one place that reports it.
  *
+ * Offline is a first-class state here, not an absence of one. The saved-stop
+ * cards keep counting down arrivals restored from disk, so this line has to
+ * account for numbers that are still moving and still meaningful while nothing
+ * is being fetched — without ever calling them live.
+ *
  * Deliberately not `RefreshTimer` from the map: that one is chrome designed to
  * float over a moving map — translucent pills, right-aligned column — and it has
  * no notion of being paused. Its countdown logic is what is worth borrowing:
@@ -18,9 +23,12 @@ import { View, Text, StyleSheet } from 'react-native';
 import { colors, font, radius, spacing } from '../theme';
 
 interface Props {
-  /** Oldest arrivals timestamp across the stops on screen; 0 before any land. */
+  /** Oldest arrivals timestamp across the stops on screen; 0 before any land.
+   *  When they were *observed*, so a stop being served from the offline cache
+   *  ages honestly here instead of resetting to zero on every read. */
   updatedAt: number;
-  /** Wall-clock ms of the next shared refresh; 0 while the clock is parked. */
+  /** Wall-clock ms of the next shared refresh; 0 while the clock is parked
+   *  (backgrounded, offline, or nothing on screen wants arrivals). */
   nextPollAt: number;
   /** The shared poll interval — decides how old "Live" is allowed to be. */
   intervalMs: number;
@@ -73,19 +81,37 @@ const LiveStatus = memo(function LiveStatus({
   const seconds = nextPollAt ? Math.max(0, Math.ceil((nextPollAt - now) / 1000)) : null;
   const live = !!updatedAt && !offline && failing === 0 && age < intervalMs + 5_000;
 
+  /* `updatedAt` is the moment the arrivals were *observed*, not the moment the
+     query resolved (see `arrivalsOrigin` in hooks/index.ts). Offline the cards
+     go on counting down numbers read back from disk, so this line has to name
+     them as held rather than arriving: "times from 12m ago" says which thing is
+     old. "Offline" alone would suggest the numbers below are simply gone, and
+     "Live" over them would be a straight falsehood — hence `!offline` in `live`. */
   const label = !updatedAt
     ? offline
       ? 'Offline'
       : 'Waiting for arrivals'
     : offline
-      ? `Offline · updated ${ageLabel(age)}`
+      ? `Offline · times from ${ageLabel(age)}`
       : failing > 0
         ? `${failing} stop${failing === 1 ? '' : 's'} not updating`
         : live
           ? 'Live'
           : `Updated ${ageLabel(age)}`;
 
+  /* No scheduled poll is a state, not a missing value: the shared clock parks
+     itself while offline rather than counting into a dead socket. The dash is
+     the only honest glyph here — a frozen number would read as a countdown that
+     has stalled — and the spoken form below says which of the two it is. */
   const countdown = fetching ? '···' : seconds == null ? '—' : `${seconds}s`;
+
+  const spokenCountdown = fetching
+    ? 'refreshing now'
+    : seconds != null
+      ? `next refresh in ${seconds} second${seconds === 1 ? '' : 's'}`
+      : offline
+        ? 'refreshing when the connection returns'
+        : 'no refresh scheduled';
 
   return (
     <View
@@ -93,13 +119,7 @@ const LiveStatus = memo(function LiveStatus({
       /* One accessible node, and deliberately not a live region: this text
          changes every second, and announcing that would bury everything else. */
       accessible
-      accessibilityLabel={
-        seconds == null
-          ? label
-          : fetching
-            ? `${label}, refreshing now`
-            : `${label}, next refresh in ${seconds} second${seconds === 1 ? '' : 's'}`
-      }
+      accessibilityLabel={`${label}, ${spokenCountdown}`}
     >
       <View
         style={[

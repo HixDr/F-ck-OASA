@@ -12,9 +12,9 @@ import {
   type QueryClient,
 } from '@tanstack/react-query';
 import * as api from '../services/api';
-import { getCachedLines, setCachedLines, getCachedSchedule, setCachedSchedule, getCachedStops, setCachedStops, getCachedRoutes, setCachedRoutes, getCachedRoutesForStop, setCachedRoutesForStop, getAllCachedStops, isOfflineDataDownloaded } from '../services/storage';
+import { getCachedLines, setCachedLines, getCachedSchedule, setCachedSchedule, getCachedStops, setCachedStops, getCachedRoutes, setCachedRoutes, getCachedRoutesForStop, setCachedRoutesForStop, getCachedArrivals, setCachedArrivals, getAllCachedStops, isOfflineDataDownloaded } from '../services/storage';
 import { haversineM } from '../utils/geo';
-import type { OasaLine, OasaMLInfo, OasaDailySchedule, OasaNearbyStop, OasaRoute } from '../types';
+import type { OasaArrival, OasaLine, OasaMLInfo, OasaDailySchedule, OasaNearbyStop, OasaRoute } from '../types';
 
 /** How often live arrival data is refreshed, everywhere in the app. */
 export const ARRIVALS_POLL_MS = 15_000;
@@ -260,6 +260,76 @@ export function useArrivalsPollAt(): number {
   return useSyncExternalStore(subscribeClock, readClock, readClock);
 }
 
+/* ── Where a stop's arrivals came from ───────────────────────── */
+
+/**
+ * stopCode → the wall-clock ms at which the arrivals now held for it were seen
+ * on the network. An entry exists *only* while the last serve came off disk.
+ *
+ * React Query stamps `dataUpdatedAt` when the `queryFn` resolves, which for a
+ * disk serve is now. A UI that decays arrival estimates from `dataUpdatedAt` —
+ * as the saved-stop cards do — would therefore render a twenty-minute-old
+ * "5 min" as a fresh "5 min": a confident lie about a bus that already left.
+ * The disk entry carries the original observation time, and this is how it
+ * reaches the components that do the decay maths.
+ *
+ * Absence rather than a duplicate timestamp marks the network case, so
+ * "did this come off disk?" is an exact question with no epsilon in it.
+ */
+const _observedAt = new Map<string, number>();
+
+export interface ArrivalsOrigin {
+  /** When these numbers were actually observed. 0 before any have landed. */
+  observedAt: number;
+  /** They were read back from disk because the network could not be reached. */
+  fromCache: boolean;
+}
+
+const NO_ARRIVALS_ORIGIN: ArrivalsOrigin = { observedAt: 0, fromCache: false };
+
+/**
+ * Provenance of the arrivals currently held for `stopCode`.
+ *
+ * Pass the query's own `dataUpdatedAt`: that is the reactive value, so reading
+ * the registry beside it during render is safe and always describes the result
+ * being rendered — the registry is written before the `queryFn` promise
+ * resolves, and the only thing that resolution can do is re-render.
+ *
+ * Use `observedAt` wherever `dataUpdatedAt` would have been used to talk about
+ * freshness. It is the same number on the network path.
+ */
+export function arrivalsOrigin(stopCode: string | undefined, dataUpdatedAt: number): ArrivalsOrigin {
+  if (!stopCode || !dataUpdatedAt) return NO_ARRIVALS_ORIGIN;
+  const observed = _observedAt.get(stopCode);
+  return observed == null
+    ? { observedAt: dataUpdatedAt, fromCache: false }
+    : { observedAt: observed, fromCache: true };
+}
+
+/**
+ * Serve a stop's last-known arrivals from disk, or null if there is nothing
+ * worth serving.
+ *
+ * Vehicles whose estimate has already run out are dropped rather than left to
+ * be clamped at zero by the UI. `buildLineGroups` shows the *soonest* vehicle
+ * per line, so a bus that was due eight minutes ago would pin the whole line at
+ * "now" for as long as we held it — and hide the one that is genuinely still
+ * coming. The surviving estimates are returned untouched: they are decayed once,
+ * in the UI, against `observedAt`.
+ */
+async function servedFromCache(stopCode: string): Promise<OasaArrival[] | null> {
+  const cached = await getCachedArrivals(stopCode);
+  if (!cached || cached.arrivals.length === 0) return null;
+  const elapsedMin = Math.floor((Date.now() - cached.ts) / 60_000);
+  const due = cached.arrivals.filter((a) => {
+    const min = Number(a.btime2);
+    return Number.isFinite(min) && min - elapsedMin >= 0;
+  });
+  if (due.length === 0) return null;
+  _observedAt.set(stopCode, cached.ts);
+  return due;
+}
+
 /**
  * Real-time arrivals at a stop.
  *
@@ -270,19 +340,43 @@ export function useArrivalsPollAt(): number {
  * single `refetchQueries` refresh entry point; the shared clock above gives one
  * cadence for the whole app, paused while the app is backgrounded or offline.
  *
- * `dataUpdatedAt` from the returned result is the freshness timestamp the UI
- * should surface, so a silently failing poll is visible rather than a frozen
- * number the user trusts.
+ * Every success is written to disk, and a failed request falls back to it, so
+ * losing signal keeps the last numbers on screen instead of blanking the saved
+ * stops. Ask `arrivalsOrigin` — not `dataUpdatedAt` — for the freshness
+ * timestamp to surface: a disk serve resolves *now*, and the difference between
+ * the two is the difference between a countdown and a fabrication.
  */
 export function useArrivals(stopCode: string | undefined, enabled = true) {
   const on = !!stopCode && enabled;
   useArrivalsClock(on);
   return useQuery({
     queryKey: ['arrivals', stopCode],
-    queryFn: ({ signal }) => api.getStopArrivals(stopCode!, { signal }),
+    queryFn: async ({ signal }) => {
+      try {
+        const fresh = await api.getStopArrivals(stopCode!, { signal });
+        // Absence is what marks this as live — see `_observedAt`.
+        _observedAt.delete(stopCode!);
+        setCachedArrivals(stopCode!, fresh);
+        return fresh;
+      } catch (err) {
+        // A cancelled request is not a failed one: the caller superseded it,
+        // and answering it with disk contents would install a result React
+        // Query was told to throw away.
+        if (signal.aborted) throw err;
+        const cached = await servedFromCache(stopCode!);
+        if (!cached) throw err;
+        return cached;
+      }
+    },
     enabled: on,
     staleTime: 5_000,
     retry: 1,
+    /* offlineFirst, not the global 'online': the disk fallback lives inside
+       queryFn, and 'online' pauses the query before it runs, so going offline
+       emptied every saved-stop card of the numbers that were on screen a
+       moment earlier. The shared clock still parks while offline — this only
+       decides what happens when something does ask. */
+    networkMode: 'offlineFirst',
     // Keep showing the last known arrivals while a refetch is in flight
     // instead of flashing a spinner every 15 seconds — but ONLY for the same
     // stop. A bare `(prev) => prev` also survives a queryKey change, which
@@ -295,7 +389,9 @@ export function useArrivals(stopCode: string | undefined, enabled = true) {
 }
 
 export interface ArrivalsStatus {
-  /** Oldest successful response across the given stops; 0 before any lands. */
+  /** Oldest successful response across the given stops; 0 before any lands.
+   *  When it was *observed* — a stop being served from disk keeps ageing here
+   *  rather than looking brand new on every read. */
   updatedAt: number;
   /** Stops whose most recent arrivals request failed. */
   failing: number;
@@ -310,11 +406,15 @@ function readStatus(client: QueryClient, codes: string[]): { updatedAt: number; 
     const st = client.getQueryState(['arrivals', code]);
     if (!st) continue;
     if (st.status === 'error') failing += 1;
-    /* The *oldest* stop, not the newest: "everything you can see is at least
-       this fresh". A maximum would let one stalled stop hide behind the
-       neighbour that refreshed a second ago. */
-    else if (st.dataUpdatedAt > 0 && (updatedAt === 0 || st.dataUpdatedAt < updatedAt)) {
-      updatedAt = st.dataUpdatedAt;
+    else {
+      /* `observedAt`, never `dataUpdatedAt`: a stop served from disk resolved
+         a millisecond ago, and taking that at face value is what would let the
+         header say "Live" over half-hour-old numbers. */
+      const { observedAt } = arrivalsOrigin(code, st.dataUpdatedAt);
+      /* The *oldest* stop, not the newest: "everything you can see is at least
+         this fresh". A maximum would let one stalled stop hide behind the
+         neighbour that refreshed a second ago. */
+      if (observedAt > 0 && (updatedAt === 0 || observedAt < updatedAt)) updatedAt = observedAt;
     }
   }
   return { updatedAt, failing };
