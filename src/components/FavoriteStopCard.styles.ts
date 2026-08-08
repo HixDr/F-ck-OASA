@@ -1,14 +1,35 @@
 import { StyleSheet } from 'react-native';
 import { colors, spacing, radius, font, HIT_SIZE } from '../theme';
 
+/**
+ * The compact tier's arrival figure, in points.
+ *
+ * Every other tier shows 34. The design's first principle is that the arrival
+ * number survives as long as possible — content is dropped around it before it
+ * is shrunk — and this is the single place that principle is deliberately
+ * traded away for density, so that three cards fit across a phone. At ~88dp of
+ * content a 44dp badge and a 56dp block cannot sit side by side at all, so they
+ * stack, and a stacked 34pt figure with its caption is taller than the box a
+ * card that narrow is likely to be given.
+ *
+ * Named once because the `lineHeight` below it must not be allowed to drift
+ * from the size above it: a `lineHeight` smaller than the glyphs clips the
+ * digits' descenders, and a larger one silently costs height the box does not
+ * have.
+ */
+const COMPACT_FIGURE_PT = 24;
+
 export const s = StyleSheet.create({
+  /** No `marginBottom` here any more, and nothing may put one back. Home places
+   *  this card at an absolute position now and hands it an exact box; the gap
+   *  between cards is the canvas's (`CARD_GAP_DP`), and a margin inside the box
+   *  is height the geometry believes it owns and the card does not. */
   card: {
     backgroundColor: colors.card,
     borderRadius: radius.lg,
     paddingHorizontal: spacing.md,
     paddingTop: spacing.sm + 2,
     paddingBottom: spacing.xs,
-    marginBottom: spacing.sm,
     borderWidth: 1,
     borderColor: colors.border,
   },
@@ -18,11 +39,23 @@ export const s = StyleSheet.create({
     gap: spacing.xs,
     minHeight: 32,
   },
+  /** `header`'s 32 is sized for a 16dp pin, a 15pt name and a 40dp button. At
+   *  `compact` only the name is left, and every point of chrome height comes
+   *  straight out of the figure below it — see `compactBody`. */
+  headerCompact: {
+    minHeight: 24,
+  },
   stopName: {
     flex: 1,
     color: colors.text,
     fontSize: font.size.body,
     fontWeight: '600',
+  },
+  /** One step down at `compact`. The name is truncated to a line at any tier,
+   *  so the smaller size is not about fitting the whole name — it is about how
+   *  many characters of it survive the truncation in ~88dp. */
+  stopNameCompact: {
+    fontSize: font.size.label,
   },
   /** Header icon buttons (filter, remove, reorder). 40 rather than 36: the
    *  shared Pressable tops every target up to HIT_SIZE with hitSlop, and at 36
@@ -35,8 +68,14 @@ export const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  /** `flexShrink` is inert while the card sizes itself to its content — an
+   *  unconstrained column has no space to shrink into — and load-bearing once
+   *  the card is handed a fixed box, where 240dp of line list inside a 160dp
+   *  card would be clipped by the card's `overflow: 'hidden'` rather than
+   *  scrolled. */
   editScroll: {
     maxHeight: 240,
+    flexShrink: 1,
   },
   editRow: {
     flexDirection: 'row',
@@ -48,10 +87,41 @@ export const s = StyleSheet.create({
   },
 
   /* ── Arrival row ───────────────────────────────────────────── */
+  /**
+   * The scroll region the arrival rows get once the card has a fixed height.
+   *
+   * `flex: 1` rather than a natural height: a scroll view that sized itself to
+   * its content is exactly the overflow the box exists to prevent, and the
+   * clipping would eat the footer notice — the one line that says the numbers
+   * above it are not live — instead of the rows the user can scroll to. Taking
+   * the leftover height pins that notice to the bottom edge and gives the rows
+   * everything else.
+   */
+  bodyScroll: {
+    flex: 1,
+  },
   lineRow: {
     flexDirection: 'row',
     alignItems: 'center',
     minHeight: 62,
+    paddingVertical: spacing.xs,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
+  /**
+   * The same row at `standard`.
+   *
+   * 62 was the height of a description stacked over a timetable pill beside the
+   * figure. `standard` drops both, so the row is one 34pt figure and its
+   * caption tall and the extra ten points are empty card — which at ~146dp of
+   * content is not cosmetic, it is the difference between three arrival rows
+   * fitting in a box and two. The floor still matters for the rows the figure
+   * does not fill: an em dash or a "now" would otherwise make a card of expired
+   * estimates a ragged stack of short rows.
+   */
+  lineRowStandard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 52,
     paddingVertical: spacing.xs,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
@@ -65,8 +135,24 @@ export const s = StyleSheet.create({
     paddingVertical: spacing.xs,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
+  /** And the same at `standard`, for the same reason: a placeholder that does
+   *  not match the row replacing it reintroduces the jump it exists to avoid. */
+  skeletonRowStandard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+    minHeight: 52,
+    paddingVertical: spacing.xs,
+    borderTopWidth: StyleSheet.hairlineWidth,
+  },
   skeletonGrow: {
     flex: 1,
+  },
+  /** Stands in for `arrivalBlockFill`, so the grey block sits where the figure
+   *  will. */
+  skeletonFill: {
+    flex: 1,
+    alignItems: 'center',
   },
   lineBadge: {
     borderRadius: radius.sm,
@@ -148,6 +234,19 @@ export const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  /**
+   * `standard` only. With the description and the bell gone, nothing else in
+   * the row is flexible, so the block would sit hard against the badge with all
+   * the slack pooled at the card's edge. Letting it take the slack centres the
+   * figure in the space beside the badge instead.
+   *
+   * This does not weaken the reservation above: the block's width is now
+   * decided by the row rather than by its own contents, which is the same
+   * guarantee — a 12 → 9 tick moves nothing — arrived at from the other side.
+   */
+  arrivalBlockFill: {
+    flex: 1,
+  },
   arrivalMin: {
     ...font.num,
     fontSize: font.size.figure,
@@ -186,6 +285,58 @@ export const s = StyleSheet.create({
     paddingVertical: spacing.xs,
     paddingLeft: spacing.sm,
     maxHeight: 140,
+  },
+
+  /* ── Compact tier ──────────────────────────────────────────── */
+  /**
+   * The whole body of a compact card: one badge over one figure, centred in
+   * whatever box the canvas handed the card.
+   *
+   * Centred rather than top-aligned, and not only because it looks composed.
+   * The card clips what it cannot fit, and centring puts the badge's top edge
+   * and the caption's bottom edge at the two boundaries — so a box that is a
+   * few points too short loses those first and the digits last, which is the
+   * order the app's first principle asks for.
+   *
+   * No vertical padding, deliberately. The card's own padding already keeps the
+   * stack off the border, and padding here is height subtracted from the box
+   * before the figure is laid out — which at the bottom of the size range is
+   * the difference between a legible number and a clipped one.
+   *
+   * `flex: 1` is inert when the card has no fixed height (a card the user has
+   * never arranged is full width and therefore never compact), so this style is
+   * safe on both paths.
+   */
+  compactBody: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /** `lineBadge` is built for a row and carries a right margin. Stacked, that
+   *  margin offsets the badge from the figure it labels by 8dp — visible at
+   *  this size, and the one thing a centred stack must not do. */
+  compactBadge: {
+    marginRight: 0,
+    marginBottom: spacing.xs,
+  },
+  compactFigureBlock: {
+    alignItems: 'center',
+  },
+  compactFigure: {
+    ...font.num,
+    fontSize: COMPACT_FIGURE_PT,
+    lineHeight: COMPACT_FIGURE_PT + 2,
+    fontWeight: '800',
+  },
+  /** The compact stand-in for the empty, failed and no-lines rows. Those are
+   *  sentences, and ~88dp of content is not enough for a sentence, so the text
+   *  shrinks to a phrase and the sentence moves to the accessibility label
+   *  where it costs no width at all. */
+  compactNote: {
+    color: colors.textMuted,
+    fontSize: font.size.micro,
+    textAlign: 'center',
+    opacity: 0.7,
   },
 
   /* ── Status / footer ───────────────────────────────────────── */
