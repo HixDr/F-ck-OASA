@@ -45,6 +45,7 @@ import MapStatus from './components/MapStatus';
 import BusLayer, { type RawBus } from './components/BusLayer';
 import StampLayer from './components/StampLayer';
 import { RouteStopMarker } from './components/StopMarkers';
+import { StopMarkerCaptureHost } from './components/StopMarkerImages';
 import { useMinuteTick, useScreenFocused, useVisibleRegion, useWalkingRoute } from './components/mapHooks';
 import { BusMarkerRenderer } from '../../components/BusMarkerSvg';
 import { bearingBetween } from '../../utils/geo';
@@ -786,6 +787,11 @@ export default function LiveMapScreen() {
 
       {/* Hidden SVG renderer for bus marker image capture */}
       <BusMarkerRenderer color={primaryColor} svgRef={busSvgRef} />
+
+      {/* Same idea for the stop markers, and a sibling of the map for the same
+          reason: a hidden view inside <MapView> is dropped by addFeature, never
+          drawn, and an SVG that is never drawn never resolves toDataURL. */}
+      <StopMarkerCaptureHost color={primaryColor} />
     </View>
   );
 }

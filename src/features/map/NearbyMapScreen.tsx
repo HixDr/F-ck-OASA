@@ -31,6 +31,7 @@ import StopSheet, { useStopSheetInset, type StopSheetLine } from '../../ui/StopS
 import MapStatus from './components/MapStatus';
 import StampLayer from './components/StampLayer';
 import { NearbyStopMarker } from './components/StopMarkers';
+import { StopMarkerCaptureHost } from './components/StopMarkerImages';
 import { useScreenFocused, useWalkingRoute } from './components/mapHooks';
 import type { MapStamp } from '../../types';
 
@@ -402,6 +403,10 @@ export default function NearbyMapScreen() {
           setStampModal(null);
         }}
       />
+
+      {/* Offscreen SVG host for the stop-pin capture. Sibling of the map, not a
+          child: a hidden view inside <MapView> is dropped by addFeature. */}
+      <StopMarkerCaptureHost color={primaryColor} />
     </View>
   );
 }
