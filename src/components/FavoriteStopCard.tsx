@@ -5,6 +5,11 @@
  * across cards, paused when Home is unfocused or the app is backgrounded).
  * Everything cosmetic — "to <destination>" labels, timetables — is filled in
  * afterwards and must never gate the numbers.
+ *
+ * Losing signal does not blank the numbers: `useArrivals` falls back to the
+ * last response it saved to disk, and the decay below keeps counting it down
+ * from when it was *observed*. That is only honest as long as the card never
+ * dresses it up as live — hence `isStale` and the footer.
  */
 
 import React, {
@@ -33,7 +38,7 @@ import {
   getCachedRoutes,
   setCachedRoutes,
 } from '../services/storage';
-import { useArrivals, useRoutesForStop, ARRIVALS_POLL_MS } from '../hooks';
+import { useArrivals, useRoutesForStop, arrivalsOrigin, ARRIVALS_POLL_MS } from '../hooks';
 import { useLinesMap } from '../hooks/useLinesMap';
 import { useNetworkStatus } from '../services/network';
 import {
@@ -399,11 +404,22 @@ function FavoriteStopCard({
     return allLineGroups.filter((l) => visibleSet.has(l.lineCode));
   }, [allLineGroups, visibleSet]);
 
-  /* Freshness: how much of the last known estimate has already elapsed. */
-  const updatedAt = arrivalsQuery.dataUpdatedAt;
+  /* Freshness: how much of the last known estimate has already elapsed.
+     `observedAt`, not `dataUpdatedAt` — the latter is when the *query* resolved,
+     and a request that failed into the disk cache resolves now. Decaying from
+     that would redraw a twenty-minute-old "5 min" as a fresh one, which is the
+     one thing this cache must never be allowed to do. On the network path the
+     two are the same number, so nothing about live behaviour moves. */
+  const { observedAt: updatedAt, fromCache } = arrivalsOrigin(
+    stop.stopCode,
+    arrivalsQuery.dataUpdatedAt,
+  );
   const ageMs = updatedAt ? Math.max(0, nowMs - updatedAt) : 0;
   const decayMin = updatedAt ? Math.floor(ageMs / 60_000) : 0;
   const isStale = !!updatedAt && ageMs > STALE_AFTER_MS;
+  /* Minute resolution, matching the numbers it is explaining: a seconds counter
+     next to a decayed "4 min" invites arithmetic that the data cannot support. */
+  const savedAgo = decayMin < 1 ? 'moments ago' : `${decayMin} min ago`;
 
   /* ── Handlers ──────────────────────────────────────────────── */
 
@@ -630,7 +646,15 @@ function FavoriteStopCard({
         ) : displayLines && displayLines.length > 0 ? (
           displayLines.map((line) => {
             const sched = schedules.get(line.lineCode);
-            const minutes = line.nextMin == null ? null : Math.max(0, line.nextMin - decayMin);
+            /* A vehicle whose estimate has run out entirely is gone, not
+               "arriving now". Clamping at zero — which is what this did — pins
+               every expired row on the loudest word the card owns, and offline
+               that is the whole card within half an hour. Dropping to "—" hands
+               the row back to the timetable, which is the only thing that still
+               knows anything. Mirrors the rule `useArrivals` applies when it
+               serves a stop from disk, so the two never disagree. */
+            const remaining = line.nextMin == null ? null : line.nextMin - decayMin;
+            const minutes = remaining != null && remaining >= 0 ? remaining : null;
             return (
               <React.Fragment key={line.lineCode}>
                 <LineRow
@@ -698,15 +722,34 @@ function FavoriteStopCard({
       {/* Only what is specific to *this* stop. "Live / updated 40s ago" moved to
           the one indicator in Home's header — six cards each running their own
           seconds counter were six claims about a single shared clock. A stop
-          whose own request is failing still says so here, because which stop's
-          numbers are guesses is not something a screen-level readout can say. */}
-      {!filtering && !failed && hasLines && (arrivalsQuery.isError || (!isOnline && !updatedAt)) && (
+          whose own request is failing, or whose numbers came off disk, still
+          says so here: which stop's numbers are guesses is not something a
+          screen-level readout can say.
+
+          The three cases are genuinely different and the wording must not blur
+          them. Saved *arrivals* are real minutes still ticking down; the
+          timetable fallback is a scheduled departure that knows nothing about
+          where the bus is. Saying "showing the saved timetable" over live
+          numbers held from ten minutes ago would undersell them, and saying
+          "arrivals" over a timetable would oversell it.
+
+          `fromCache` is qualified by `isStale` — the same threshold that dims
+          the numbers — so one dropped poll on a flaky connection does not
+          raise a warning about data that is fifteen seconds old and identical
+          to what was already on screen. Past that the two appear together,
+          which is the point: dimmed numbers, and a line saying why. */}
+      {!filtering && !failed && hasLines
+        && ((fromCache && isStale) || arrivalsQuery.isError || (!isOnline && !updatedAt)) && (
         <View style={s.footer}>
           <View style={[s.dot, { backgroundColor: colors.warning }]} />
-          <Text style={[s.footerText, { color: colors.warning }]}>
-            {isOnline
-              ? 'Live arrivals unavailable — showing the timetable'
-              : 'Offline — showing the saved timetable'}
+          {/* `flex: 1` so the longer saved-arrivals wording wraps inside the
+              card instead of running off it at a large font scale. */}
+          <Text style={[s.footerText, { flex: 1, color: colors.warning }]}>
+            {fromCache && isStale
+              ? `Not live — arrivals from ${savedAgo}, counting down`
+              : isOnline
+                ? 'Live arrivals unavailable — showing the timetable'
+                : 'Offline — showing the saved timetable'}
           </Text>
         </View>
       )}

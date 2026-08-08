@@ -423,7 +423,6 @@ const s = StyleSheet.create({
     marginTop: spacing.sm,
     paddingVertical: spacing.xs,
     borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: colors.edge,
   },
   allLinesText: { fontSize: font.size.label, fontWeight: '600' },
   lineRow: {

@@ -32,7 +32,7 @@ export const s = StyleSheet.create({
   scheduleCard: {
     position: 'absolute', top: spacing.sm, right: 36 + spacing.sm + spacing.sm,
     backgroundColor: colors.overlay, borderRadius: radius.md, padding: spacing.sm,
-    borderWidth: 1, borderColor: colors.border, borderTopColor: colors.edge,
+    borderWidth: 1, borderColor: colors.border,
     minWidth: 140, maxWidth: 200, maxHeight: 240,
   },
   /* ── Native map marker styles — bus icon + arrow ── */

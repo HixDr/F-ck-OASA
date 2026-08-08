@@ -48,11 +48,54 @@ function readRecents(): string[] {
 }
 
 /**
- * Fold a string for searching: strip diacritics and case.
+ * Greek letters whose glyph is identical, or near enough, to a Latin letter,
+ * collapsed onto the Latin one.
+ *
+ * These are *different code points that draw the same shape*. OASA spells line
+ * A5 with a Greek capital alpha, U+0391; a keyboard set to English produces
+ * U+0041. On screen they are the same pixels, so there is nothing to see and
+ * nothing to correct — `includes()` simply returned false and the line did not
+ * exist. It has to work from either keyboard, so both the haystack and the
+ * query are pushed through this same table.
+ *
+ * Keyed by the lowercase letter because folding runs after `.toLowerCase()`,
+ * which means one entry covers both `Α` and `α`.
+ *
+ * The pairs follow the *capitals*, because capitals are what line IDs and
+ * OASA's descriptions are written in. That leaves three entries looking wrong
+ * in isolation — lowercase `η` reads as `n`, `ν` as `v`, `υ` as `u` — but
+ * pairing those by their lowercase shape would break `Η`/`Ν`/`Υ`, the match
+ * that actually happens, and would cost case-insensitivity on top. Nothing is
+ * lost either way: the haystack carries `LineDescrEng` as well, so `MAROUSI`
+ * is still there for whoever types `u`.
+ *
+ * Only true lookalikes are here. `γ` resembles `y` but its capital `Γ` does
+ * not resemble anything Latin, so folding it would invent matches without ever
+ * fixing one. And no two Greek letters map onto the same Latin letter, so this
+ * can never merge two distinct Greek names into one hit.
+ */
+const HOMOGLYPHS: Record<string, string> = {
+  'α': 'a', 'β': 'b', 'ε': 'e', 'ζ': 'z', 'η': 'h', 'ι': 'i', 'κ': 'k',
+  'μ': 'm', 'ν': 'n', 'ο': 'o', 'ρ': 'p', 'τ': 't', 'υ': 'y', 'χ': 'x',
+};
+
+/* Derived from the table rather than written out again, so the two cannot
+   drift apart, and built once instead of per keystroke. One pass over the
+   string beats a chain of fourteen `.replace()` calls. */
+const HOMOGLYPH_RE = new RegExp(`[${Object.keys(HOMOGLYPHS).join('')}]`, 'g');
+
+/**
+ * Fold a string for searching: strip diacritics, case, and Greek/Latin
+ * lookalikes.
  *
  * OASA's data is Greek, and nobody types accents on a phone. Without this,
  * `'Αθήνα'.toLowerCase()` is `'αθήνα'` and a search for `αθηνα` found nothing —
  * in an Athens app. Final sigma is folded too ('Πατησίων' vs 'ΠΑΤΗΣΙΩΝΟΣ').
+ *
+ * Homoglyphs fold last, on purpose: after `.toLowerCase()` there is only one
+ * case left to map, and after the accents are gone `Ά` has already become `α`
+ * and folds with the rest. Doing it first would need a second table for the
+ * capitals and would strand every accented vowel.
  */
 function fold(input: string): string {
   let out = input;
@@ -66,7 +109,8 @@ function fold(input: string): string {
       .replace(/[ίΊϊΐ]/g, 'ι').replace(/[όΌ]/g, 'ο').replace(/[ύΎϋΰ]/g, 'υ')
       .replace(/[ώΏ]/g, 'ω');
   }
-  return out.toLowerCase().replace(/ς/g, 'σ');
+  out = out.toLowerCase().replace(/ς/g, 'σ');
+  return out.replace(HOMOGLYPH_RE, (ch) => HOMOGLYPHS[ch]);
 }
 
 /**
@@ -388,9 +432,6 @@ const s = StyleSheet.create({
     marginBottom: spacing.xs + 2,
     borderWidth: 1,
     borderColor: colors.border,
-    /* Matches SkeletonListRow, so the placeholder and the real row are the
-       same object rather than two that swap. */
-    borderTopColor: colors.edge,
     minHeight: 60,
   },
   badge: {

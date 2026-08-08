@@ -33,11 +33,13 @@ export const colors = {
   warning: '#F59E0B',
   /** Transparent overlay */
   overlay: 'rgba(0,0,0,0.85)',
-  /** Hairline highlight along a card's top edge.
-   *  bg → surface → card is a 0%/7%/11% fill ramp, which collapses into one
-   *  flat plane on OLED in daylight. Elevation should not depend on a 4% fill
-   *  delta, so cards are also lit from above. */
-  edge: 'rgba(255,255,255,0.06)',
+  /* There was an `edge` hairline here, applied as `borderTopColor` to suggest
+     lighting from above. Do not reintroduce it that way: a per-side border
+     colour on a view that also has borderRadius drops Android off the fast
+     rounded-rect path onto a segment renderer, which draws the odd side as a
+     visible break — the outline reads as cut off at the top. If elevation needs
+     more than the fill ramp gives, it has to come from something that is not a
+     single border side. */
 } as const;
 
 /**
