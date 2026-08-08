@@ -47,12 +47,15 @@ export const s = StyleSheet.create({
     borderBottomColor: '#FFFFFF',
     marginBottom: -2,
   },
+  // No shadow: `elevation` is drawn by the hardware renderer, and this view is
+  // rasterized onto a software Canvas for the marker bitmap, so it only ever
+  // cost an outline and a RenderNode for a shadow that never reached the pixels.
+  // The iOS-only `shadow*` props went with it — the captured PNG the marker
+  // normally draws from has no shadow either, and the two paths have to match.
   stopDot: {
     width: 22, height: 22, borderRadius: 11,
     borderWidth: 2, borderColor: '#FFFFFF',
     alignItems: 'center', justifyContent: 'center',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.6, shadowRadius: 3, elevation: 4,
   },
   stopDotWrap: {
     alignItems: 'center', justifyContent: 'center',

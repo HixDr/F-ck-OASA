@@ -8,9 +8,13 @@ export const s = StyleSheet.create({
   /* ── Map layer ────────────────────────────────────────────── */
 
   /** The map is full-bleed now that the results sheet floats over it, so
-   *  pulling the sheet down reveals more map instead of more background. */
+   *  pulling the sheet down reveals more map instead of more background.
+   *  Black, like every other map wrapper: this view is what shows through in the
+   *  moment before the native map surface paints, and a default-transparent
+   *  wrapper let a light gap flash there. */
   mapFill: {
     flex: 1,
+    backgroundColor: colors.bg,
   },
   /** Touch-transparent scrim for everything drawn over the map. Anchored to
    *  the top: the sheet owns the bottom of the screen at every snap point, so

@@ -25,6 +25,7 @@ import {
   isFavorite, addFavorite, removeFavorite, getStamps, addStamp, removeStamp,
   getToggle, setToggle, getCachedBusPositions, setCachedBusPositions,
   isFavoriteStop, addFavoriteStop, removeFavoriteStop,
+  getCachedRouteShape, setCachedRouteShape,
 } from '../../services/storage';
 import { useNetworkStatus } from '../../services/network';
 import { useSettings } from '../settings/SettingsProvider';
@@ -45,6 +46,7 @@ import MapStatus from './components/MapStatus';
 import BusLayer, { type RawBus } from './components/BusLayer';
 import StampLayer from './components/StampLayer';
 import { RouteStopMarker } from './components/StopMarkers';
+import { StopMarkerCaptureHost } from './components/StopMarkerImages';
 import { useMinuteTick, useScreenFocused, useVisibleRegion, useWalkingRoute } from './components/mapHooks';
 import { BusMarkerRenderer } from '../../components/BusMarkerSvg';
 import { bearingBetween } from '../../utils/geo';
@@ -97,6 +99,9 @@ export default function LiveMapScreen() {
 
   // Stop all-lines expansion state
   const [showAllLines, setShowAllLines] = useState(false);
+  /* Declared up here with the rest of the screen's state, not beside the stop
+     sheet below: the timetable query is gated on it and runs earlier. */
+  const [selectedStop, setSelectedStop] = useState<ParsedStop | null>(null);
 
   // Stamp state
   const [stamps, setStamps] = useState<MapStamp[]>(() => getStamps());
@@ -105,7 +110,11 @@ export default function LiveMapScreen() {
   const [stampEmoji, setStampEmoji] = useState('📍');
 
   // Schedule
-  const { data: scheduleData, isLoading: loadingSchedule } = useSchedule(lineCode);
+  /* Deferred: the overlay is off by default and the stop sheet's next-departure
+     row needs nothing until a stop is tapped, so this no longer competes with
+     the route and stop requests for the open. */
+  const { data: scheduleData, isLoading: loadingSchedule } =
+    useSchedule(lineCode, showSchedule || selectedStop != null);
   // Pick schedule entries matching the active route direction (go vs come)
   // GO: sde_start1 from go entries (departure from terminus A)
   // COME: sde_start2 from come entries (departure from terminus B)
@@ -160,22 +169,47 @@ export default function LiveMapScreen() {
     // Toggling direction A→B→A could land B's polyline last, and every A bus
     // then snapped onto B's geometry. The abort signal is the stale guard.
     const ac = new AbortController();
+    const code = activeRouteCode;
     setRoutePath([]);
     setShapeError(null);
     setShapeLoading(true);
-    getRouteDetails(activeRouteCode, { signal: ac.signal })
+
+    /* Cache-first, then revalidate. The shape is the largest response of the
+       whole open, so drawing the stored one immediately is the difference
+       between a line that appears with the map and one that arrives after it. */
+    let drewFromCache = false;
+    let networkLanded = false;
+
+    getCachedRouteShape(code).then((cached) => {
+      // A network reply that has already landed is newer by definition.
+      if (ac.signal.aborted || networkLanded || !cached || cached.length < 2) return;
+      drewFromCache = true;
+      setRoutePath(cached);
+      setShapeLoading(false);
+    });
+
+    getRouteDetails(code, { signal: ac.signal })
       .then((pts) => {
         if (ac.signal.aborted) return;
-        setRoutePath(pts);
+        networkLanded = true;
+        // Stored simplified so the warm path skips this pass too.
+        const simplified = simplifyPath(pts, ROUTE_SIMPLIFY_M);
+        setRoutePath(simplified);
         setShapeLoading(false);
+        if (simplified.length > 1) setCachedRouteShape(code, simplified);
       })
       .catch((err) => {
         if (ac.signal.aborted) return;
+        networkLanded = true;
+        setShapeLoading(false);
+        // A cached line already on screen is worth more than an error about a
+        // refresh the user never asked for. Only a route we have never drawn
+        // reports failure.
+        if (drewFromCache) return;
         // getRouteDetails throws now, so [] genuinely means "no shape on file"
         // and this branch genuinely means "the request failed".
         setRoutePath([]);
         setShapeError(err);
-        setShapeLoading(false);
       });
     return () => ac.abort();
   }, [activeRouteCode, retryNonce]);
@@ -360,7 +394,6 @@ export default function LiveMapScreen() {
 
   /* ── Selected stop ─────────────────────────────────────────── */
 
-  const [selectedStop, setSelectedStop] = useState<ParsedStop | null>(null);
   const selectedStopCode = selectedStop?.code ?? null;
 
   // React Query owns arrivals polling: keyed by stop code, so a slow response
@@ -615,6 +648,15 @@ export default function LiveMapScreen() {
         initialRegion={initialRegion}
         customMapStyle={GOOGLE_DARK_STYLE}
         googleMapId={GOOGLE_MAP_ID}
+        // The native map surface is a child view covering the full bounds, so it
+        // paints over the black RN background with its own loading colour —
+        // white by default, a flashbang in a pure-black UI. `loadingEnabled` is
+        // not redundant here: on Android the loading layout that carries
+        // `loadingBackgroundColor` only exists once loading is enabled, so
+        // dropping this prop silently restores the white flash.
+        loadingEnabled
+        loadingBackgroundColor={colors.bg}
+        loadingIndicatorColor={colors.primaryLight}
         showsUserLocation={false}
         showsMyLocationButton={false}
         showsCompass={false}
@@ -777,6 +819,11 @@ export default function LiveMapScreen() {
 
       {/* Hidden SVG renderer for bus marker image capture */}
       <BusMarkerRenderer color={primaryColor} svgRef={busSvgRef} />
+
+      {/* Same idea for the stop markers, and a sibling of the map for the same
+          reason: a hidden view inside <MapView> is dropped by addFeature, never
+          drawn, and an SVG that is never drawn never resolves toDataURL. */}
+      <StopMarkerCaptureHost color={primaryColor} />
     </View>
   );
 }

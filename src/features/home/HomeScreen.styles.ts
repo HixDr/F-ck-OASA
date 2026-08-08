@@ -1,6 +1,13 @@
 import { StyleSheet } from 'react-native';
 import { colors, spacing, radius, font, HIT_SIZE } from '../../theme';
 
+/** Gap between saved-line badges, both ways.
+ *
+ * Exported because the drag maths has to re-run the grid's own wrapping to know
+ * where a badge would land, and a layout constant the geometry only *thinks* it
+ * knows is a badge that jumps the moment it is picked up. */
+export const LINE_GRID_GAP = spacing.sm;
+
 export const s = StyleSheet.create({
   container: {
     flex: 1,
@@ -134,11 +141,21 @@ export const s = StyleSheet.create({
   stopCell: {
     elevation: 0,
   },
+  linesSection: {
+    marginTop: spacing.md,
+  },
   lineGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: spacing.sm,
+    gap: LINE_GRID_GAP,
     marginTop: spacing.xs,
+  },
+  /** Wrapper the line drag transforms — the badge itself keeps its own press
+   *  scale. `elevation` is animated from 0 for the same reason `stopCell` has
+   *  it: without it Android paints siblings in declaration order and a carried
+   *  badge slides *under* the ones it is crossing. */
+  lineCell: {
+    elevation: 0,
   },
   lineCard: {
     backgroundColor: colors.card,

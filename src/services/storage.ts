@@ -30,6 +30,10 @@ const ROUTES_FILE = 'oasa_routes.json';
 const ROUTES_FOR_STOP_FILE = 'oasa_routes_for_stop.json';
 const ROUTE_STOPS_FILE = 'oasa_route_stops.json';
 const ALL_STOPS_FILE = 'oasa_all_stops.json';
+/** Deliberately absent from OFFLINE_FILES below: the offline bundle does not
+ *  download shapes, so counting this file would make the bundle look incomplete
+ *  forever. It fills in from ordinary use instead. */
+const ROUTE_SHAPE_FILE = 'oasa_route_shapes.json';
 
 /** Every file the offline bundle consists of. The download flag only means
  *  anything if all of them are present and non-empty. */
@@ -244,6 +248,30 @@ export function removeFavorite(lineCode: string): FavoriteLine[] {
 
 export function isFavorite(lineCode: string): boolean {
   return _favorites.some((f) => f.lineCode === lineCode);
+}
+
+/**
+ * Reorder saved lines to match `codes` — the line grid on Home can be dragged
+ * into the order the user actually rides.
+ *
+ * Same contract as `reorderFavoriteStops`: codes that no longer exist are
+ * ignored, and any line missing from `codes` is kept and appended, so a stale
+ * list from the UI can never silently delete a saved line.
+ */
+export function reorderFavorites(codes: string[]): FavoriteLine[] {
+  const byCode = new Map(_favorites.map((f) => [f.lineCode, f]));
+  const ordered: FavoriteLine[] = [];
+  for (const code of codes) {
+    const line = byCode.get(code);
+    if (line) {
+      ordered.push(line);
+      byCode.delete(code);
+    }
+  }
+  for (const leftover of byCode.values()) ordered.push(leftover);
+  _favorites = ordered;
+  persistFavorites();
+  return _favorites;
 }
 
 /* ── Favorite Stops (sync reads from mirror, async writes) ──── */
@@ -506,6 +534,9 @@ const _schedCache = createDictCache<OasaDailySchedule>(SCHEDULES_FILE);
 const _routesCache = createDictCache<OasaRoute[]>(ROUTES_FILE);
 const _routesForStopCache = createDictCache<OasaRoute[]>(ROUTES_FOR_STOP_FILE);
 const _stopsCache = createDictCache<OasaStop[]>(ROUTE_STOPS_FILE);
+/** One entry per route direction — see the Route Shape Cache section below. */
+export interface ShapePoint { lat: number; lng: number }
+const _shapeCache = createDictCache<ShapePoint[]>(ROUTE_SHAPE_FILE);
 
 /**
  * Eagerly load all dict-cache backing files into memory.
@@ -592,6 +623,30 @@ export function setCachedStops(routeCode: string, data: OasaStop[]): Promise<voi
 
 export function setCachedStopsBulk(data: Record<string, OasaStop[]>): boolean {
   return _stopsCache.setBulk(data);
+}
+
+/* ── Route Shape Cache ───────────────────────────────────────── */
+
+/**
+ * The drawn polyline for a route, already simplified.
+ *
+ * This was the one payload of a map open that nothing cached — not even the
+ * offline bundle — so every open re-fetched the largest response on the screen
+ * (300-1500 shape points, plus the stop list riding along in the same reply)
+ * and the polyline was the one thing that could never work offline.
+ *
+ * Simplified points are what gets stored, not raw: the warm path then skips the
+ * Douglas-Peucker pass as well, and the file is a fifth of the size.
+ */
+export function getCachedRouteShape(routeCode: string): Promise<ShapePoint[] | null> {
+  return _shapeCache.get(routeCode);
+}
+
+export function setCachedRouteShape(routeCode: string, pts: ShapePoint[]): Promise<void> {
+  // No `_offlineDownloaded` guard, unlike the caches above: the bulk download
+  // never writes shapes, so skipping runtime writes would leave this empty for
+  // exactly the users who most want the map to work offline.
+  return _shapeCache.set(routeCode, pts);
 }
 
 /* ── Last-Known Bus Positions Cache ──────────────────────────── */

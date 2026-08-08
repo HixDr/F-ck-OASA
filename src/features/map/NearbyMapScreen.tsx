@@ -31,6 +31,7 @@ import StopSheet, { useStopSheetInset, type StopSheetLine } from '../../ui/StopS
 import MapStatus from './components/MapStatus';
 import StampLayer from './components/StampLayer';
 import { NearbyStopMarker } from './components/StopMarkers';
+import { StopMarkerCaptureHost } from './components/StopMarkerImages';
 import { useScreenFocused, useWalkingRoute } from './components/mapHooks';
 import type { MapStamp } from '../../types';
 
@@ -308,6 +309,15 @@ export default function NearbyMapScreen() {
         initialRegion={initialRegion}
         customMapStyle={GOOGLE_DARK_STYLE}
         googleMapId={GOOGLE_MAP_ID}
+        // The native map surface is a child view covering the full bounds, so it
+        // paints over the black RN background with its own loading colour —
+        // white by default, a flashbang in a pure-black UI. `loadingEnabled` is
+        // not redundant here: on Android the loading layout that carries
+        // `loadingBackgroundColor` only exists once loading is enabled, so
+        // dropping this prop silently restores the white flash.
+        loadingEnabled
+        loadingBackgroundColor={colors.bg}
+        loadingIndicatorColor={colors.primaryLight}
         showsUserLocation={false}
         showsMyLocationButton={false}
         showsCompass={false}
@@ -393,6 +403,10 @@ export default function NearbyMapScreen() {
           setStampModal(null);
         }}
       />
+
+      {/* Offscreen SVG host for the stop-pin capture. Sibling of the map, not a
+          child: a hidden view inside <MapView> is dropped by addFeature. */}
+      <StopMarkerCaptureHost color={primaryColor} />
     </View>
   );
 }

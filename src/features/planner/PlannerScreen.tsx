@@ -25,7 +25,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, onAccent, spacing } from '../../theme';
-import { GOOGLE_DARK_STYLE } from '../../theme/googleMapStyle';
+import { GOOGLE_DARK_STYLE, GOOGLE_MAP_ID } from '../../theme/googleMapStyle';
 import { mapStyles as ms } from '../../theme/mapStyles';
 import Pressable from '../../ui/Pressable';
 import BottomSheet, { type BottomSheetHandle } from '../../ui/BottomSheet';
@@ -946,6 +946,20 @@ export default function PlannerScreen() {
           style={ms.map}
           initialRegion={initialRegion}
           customMapStyle={GOOGLE_DARK_STYLE}
+          // Without the Map ID this screen was the one map still rendering on
+          // the default light basemap: the new Google renderer ignores
+          // `customMapStyle` outright and honours only the cloud style attached
+          // to the Map ID. The pair covers both renderers — see googleMapStyle.
+          googleMapId={GOOGLE_MAP_ID}
+          // The native map surface is a child view covering the full bounds, so
+          // it paints over the black RN background with its own loading colour —
+          // white by default, a flashbang in a pure-black UI. `loadingEnabled`
+          // is not redundant here: on Android the loading layout that carries
+          // `loadingBackgroundColor` only exists once loading is enabled, so
+          // dropping this prop silently restores the white flash.
+          loadingEnabled
+          loadingBackgroundColor={colors.bg}
+          loadingIndicatorColor={colors.primaryLight}
           mapPadding={mapPadding}
           showsUserLocation={false}
           showsMyLocationButton={false}
