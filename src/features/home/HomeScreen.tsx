@@ -67,7 +67,7 @@ import {
   getOfflineTimestamp,
 } from '../../services/storage';
 import { downloadAllOfflineData, removeAllOfflineData, type OfflineProgress } from '../../services/offlineData';
-import { useLines, useArrivalsPollAt, useArrivalsStatus, ARRIVALS_POLL_MS } from '../../hooks';
+import { useLines, usePrefetchLine, useArrivalsPollAt, useArrivalsStatus, ARRIVALS_POLL_MS } from '../../hooks';
 import { USER_MARKER_BASE64 } from '../../data/userMarker';
 import { useSettings } from '../settings/SettingsProvider';
 import { hapticImpact, hapticSelection } from '../../services/haptics';
@@ -945,6 +945,7 @@ export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const queryClient = useQueryClient();
+  const prefetchLine = usePrefetchLine();
   const { primaryColor, setPrimaryColor, iconStyle, setIconStyle } = useSettings();
   const reduced = useReduceMotion();
 
@@ -1280,11 +1281,14 @@ export default function HomeScreen() {
   }, []);
 
   const handleOpenLine = useCallback((fav: FavoriteLine) => {
+    // Start the request the map screen would otherwise wait to make, so it runs
+    // under the push transition instead of after it.
+    prefetchLine(fav.lineCode);
     router.push({
       pathname: '/map/[lineCode]',
       params: { lineCode: fav.lineCode, lineId: fav.lineId, lineDescr: fav.lineDescrEng },
     });
-  }, [router]);
+  }, [router, prefetchLine]);
 
   const handleRemoveStop = useCallback((stop: FavoriteStop) => {
     hapticImpact();

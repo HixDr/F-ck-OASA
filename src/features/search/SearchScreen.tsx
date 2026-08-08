@@ -26,7 +26,7 @@ import Pressable from '../../ui/Pressable';
 import { SkeletonListRow } from '../../ui/Skeleton';
 import { duration, easing, spring, useReduceMotion } from '../../ui/motion';
 import { hapticImpact } from '../../services/haptics';
-import { useLines } from '../../hooks';
+import { useLines, usePrefetchLine } from '../../hooks';
 import { addFavorite, isFavorite, removeFavorite, getFavorites, getSetting, setSetting } from '../../services/storage';
 import { useSettings } from '../settings/SettingsProvider';
 import type { OasaLine } from '../../types';
@@ -127,6 +127,7 @@ export default function SearchScreen() {
   const { data: lines, isLoading, isError, refetch, isFetching } = useLines();
   const [query, setQuery] = useState('');
   const { primaryColor } = useSettings();
+  const prefetchLine = usePrefetchLine();
 
   /* Favourites are read from storage's synchronous mirror, which React cannot
      see. This counter is the subscription: it invalidates the derived set and
@@ -183,6 +184,8 @@ export default function SearchScreen() {
 
   const handleSelect = useCallback((line: OasaLine) => {
     Keyboard.dismiss();
+    // Overlaps the map's gating request with the push transition.
+    prefetchLine(line.LineCode);
     const next = [line.LineCode, ...readRecents().filter((c) => c !== line.LineCode)].slice(0, RECENT_MAX);
     setSetting(RECENT_KEY, JSON.stringify(next));
     setRecents(next);
@@ -194,7 +197,7 @@ export default function SearchScreen() {
         lineDescr: line.LineDescrEng,
       },
     });
-  }, [router]);
+  }, [router, prefetchLine]);
 
   const toggleFav = useCallback((line: OasaLine) => {
     if (isFavorite(line.LineCode)) {

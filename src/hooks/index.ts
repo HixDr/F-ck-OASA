@@ -36,49 +36,105 @@ export function useLines() {
   });
 }
 
-/** Routes (directions) for a line — cached to file system for offline use. */
+const ROUTES_STALE_MS = 60 * 60 * 1000;
+/** Route topology changes about never, and the file cache is the offline story.
+ *  The global 5-minute gcTime would otherwise evict these between screen opens
+ *  and defeat their staleTime entirely. */
+const STATIC_GC_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Fetch a line's routes: cache first, then revalidate.
+ *
+ * This used to be network-first, consulting the file cache only inside `catch`
+ * — so a user carrying the entire offline bundle still waited on a live request
+ * before the map could do anything, and this request gates the whole screen:
+ * nothing else can start until a route code exists.
+ *
+ * The revalidation is deliberately fire-and-forget. Its result reaches the UI
+ * through `setQueryData`, and a failure is not worth surfacing when correct data
+ * is already on screen.
+ *
+ * Shared by the hook and by `usePrefetchLine`, so both paths cache alike.
+ */
+function routesQueryFn(lineCode: string, queryClient: QueryClient) {
+  return async (): Promise<OasaRoute[]> => {
+    const cached = await getCachedRoutes(lineCode);
+    if (cached && cached.length > 0) {
+      api.getRoutes(lineCode)
+        .then((fresh) => {
+          if (!fresh || fresh.length === 0) return;
+          setCachedRoutes(lineCode, fresh);
+          queryClient.setQueryData(['routes', lineCode], fresh);
+        })
+        .catch(() => { /* Cached routes are already showing. */ });
+      return cached;
+    }
+    const fresh = await api.getRoutes(lineCode);
+    if (fresh && fresh.length > 0) setCachedRoutes(lineCode, fresh);
+    return fresh;
+  };
+}
+
 export function useRoutes(lineCode: string | undefined) {
+  const queryClient = useQueryClient();
   return useQuery<OasaRoute[]>({
     queryKey: ['routes', lineCode],
-    queryFn: async () => {
-      try {
-        const fresh = await api.getRoutes(lineCode!);
-        if (fresh && fresh.length > 0) {
-          setCachedRoutes(lineCode!, fresh);
-        }
-        return fresh;
-      } catch (err) {
-        // Offline fallback
-        const cached = await getCachedRoutes(lineCode!);
-        if (cached) return cached;
-        throw err;
-      }
-    },
+    queryFn: routesQueryFn(lineCode!, queryClient),
     enabled: !!lineCode,
-    staleTime: 60 * 60 * 1000,
+    staleTime: ROUTES_STALE_MS,
+    gcTime: STATIC_GC_MS,
   });
 }
 
-/** Stops on a route — cached to AsyncStorage for offline use. */
+/**
+ * Warm a line's routes before its map mounts.
+ *
+ * Opening a line is a two-stage waterfall: nothing — stops, buses, the drawn
+ * shape — can start until the route list names a route code. Firing that first
+ * request from the tap instead of from the screen overlaps it with the push
+ * transition, which is most of the gap.
+ *
+ * `prefetchQuery` respects `staleTime`, so a line opened twice costs one
+ * request, and it resolves quietly: a failure here just means the screen fetches
+ * normally.
+ */
+export function usePrefetchLine(): (lineCode: string) => void {
+  const queryClient = useQueryClient();
+  return (lineCode: string) => {
+    if (!lineCode) return;
+    queryClient.prefetchQuery({
+      queryKey: ['routes', lineCode],
+      queryFn: routesQueryFn(lineCode, queryClient),
+      staleTime: ROUTES_STALE_MS,
+      gcTime: STATIC_GC_MS,
+    }).catch(() => { /* The map will fetch it itself. */ });
+  };
+}
+
+/** Stops on a route. Cache-first then revalidate, for the reasons in `useRoutes`. */
 export function useStops(routeCode: string | undefined) {
+  const queryClient = useQueryClient();
   return useQuery({
     queryKey: ['stops', routeCode],
     queryFn: async () => {
-      try {
-        const fresh = await api.getStops(routeCode!);
-        if (fresh && fresh.length > 0) {
-          setCachedStops(routeCode!, fresh);
-        }
-        return fresh;
-      } catch (err) {
-        // Offline fallback
-        const cached = await getCachedStops(routeCode!);
-        if (cached) return cached;
-        throw err;
+      const cached = await getCachedStops(routeCode!);
+      if (cached && cached.length > 0) {
+        api.getStops(routeCode!)
+          .then((fresh) => {
+            if (!fresh || fresh.length === 0) return;
+            setCachedStops(routeCode!, fresh);
+            queryClient.setQueryData(['stops', routeCode], fresh);
+          })
+          .catch(() => { /* Cached stops are already on the map. */ });
+        return cached;
       }
+      const fresh = await api.getStops(routeCode!);
+      if (fresh && fresh.length > 0) setCachedStops(routeCode!, fresh);
+      return fresh;
     },
     enabled: !!routeCode,
-    staleTime: 60 * 60 * 1000,
+    staleTime: ROUTES_STALE_MS,
+    gcTime: STATIC_GC_MS,
   });
 }
 
@@ -362,7 +418,14 @@ export function useMLInfo() {
  *  Cached to AsyncStorage for offline use.
  *  When offline data has been downloaded, always returns cached schedule
  *  (skipping TTL) and only refreshes from network if possible. */
-export function useSchedule(lineCode: string | undefined) {
+/**
+ * A line's timetable.
+ *
+ * `enabled` exists because the Live map used to fetch this on every open
+ * although its timetable overlay defaults to off, and nothing else needs a
+ * departure time until a stop is tapped.
+ */
+export function useSchedule(lineCode: string | undefined, enabled = true) {
   return useQuery<OasaDailySchedule>({
     queryKey: ['schedule', lineCode],
     queryFn: async () => {
@@ -391,8 +454,11 @@ export function useSchedule(lineCode: string | undefined) {
         throw err;
       }
     },
-    enabled: !!lineCode,
+    enabled: !!lineCode && enabled,
     staleTime: 24 * 60 * 60 * 1000,
+    // A timetable is valid for the day; the global 5-minute gcTime would
+    // throw it away between screens and re-fetch it for nothing.
+    gcTime: 24 * 60 * 60 * 1000,
   });
 }
 
