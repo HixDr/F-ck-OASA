@@ -432,9 +432,6 @@ const s = StyleSheet.create({
     marginBottom: spacing.xs + 2,
     borderWidth: 1,
     borderColor: colors.border,
-    /* Matches SkeletonListRow, so the placeholder and the real row are the
-       same object rather than two that swap. */
-    borderTopColor: colors.edge,
     minHeight: 60,
   },
   badge: {

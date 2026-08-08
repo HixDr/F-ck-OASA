@@ -16,7 +16,7 @@
  * drag handle it could not honour.
  */
 
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -39,6 +39,13 @@ import { colors, spacing, radius, font, onAccent, withAlpha } from '../theme';
 import BottomSheet, { type BottomSheetHandle } from '../ui/BottomSheet';
 import Pressable from '../ui/Pressable';
 import { exportUserData, importUserData } from '../services/storage';
+import {
+  checkForUpdate,
+  cancelUpdateDownload,
+  getCurrentVersion,
+  type UpdateProgress,
+  type UpdateCheckResult,
+} from '../services/updater';
 import { hapticSuccess, hapticError } from '../services/haptics';
 import { USER_MARKER_BASE64 } from '../data/userMarker';
 import AccentPicker from './AccentPicker';
@@ -46,6 +53,51 @@ import type { OfflineProgress } from '../services/offlineData';
 
 /** Resting height, and the height the restore form needs above a keyboard. */
 const SNAP_POINTS = [0.62, 0.94];
+
+/**
+ * What the update row says while `checkForUpdate` is still running.
+ *
+ * `idle` is not the absence of work: the updater reports it just before it
+ * raises its own "Update Available" dialog and again before each early exit,
+ * so a check that is still in flight legitimately sits at `idle`. The row is
+ * driven by whether the promise has settled, not by this phase — which is why
+ * `idle` and `checking` share a label.
+ */
+function updateBusyLabel(p: UpdateProgress | null): string {
+  if (!p) return 'Checking…';
+  const pct = Math.round(p.progress * 100);
+  switch (p.phase) {
+    case 'downloading': return `Downloading ${pct}%`;
+    case 'verifying': return `Verifying ${pct}%`;
+    case 'installing': return 'Opening installer…';
+    default: return 'Checking…';
+  }
+}
+
+/**
+ * What the update row says once the check has settled.
+ *
+ * Every outcome gets a sentence, including the boring one — a button that
+ * leaves the screen exactly as it found it reads as broken, and "no update"
+ * is the outcome it will produce almost every time.
+ *
+ * `update-available` says nothing about the version: the updater has just
+ * shown its own dialog naming it, and repeating that here would be the second
+ * time in two seconds. The line exists to explain why the dialog is gone.
+ */
+function updateNoticeFor(result: UpdateCheckResult): { text: string; tone: 'muted' | 'accent' | 'error' } {
+  switch (result) {
+    case 'up-to-date':
+      return { text: "You're on the latest version.", tone: 'muted' };
+    case 'update-available':
+      return { text: 'An update is available — check again to install it.', tone: 'accent' };
+    case 'unsupported':
+      return { text: 'Self-update is not available on this build.', tone: 'error' };
+    // `throttled` cannot land here: the check below always forces.
+    default:
+      return { text: "Couldn't reach GitHub. Check your connection and try again.", tone: 'error' };
+  }
+}
 
 interface Props {
   visible: boolean;
@@ -82,8 +134,19 @@ export default function SettingsModal({
   const [importing, setImporting] = useState(false);
   const [pasted, setPasted] = useState('');
   const [busy, setBusy] = useState(false);
+  /* Update-check state is local, and has to be: the shared `UpdateOverlay`
+     lives in the root layout and is fed by a `setUpdateProgress` this
+     component has no access to. See the comment on `handleCheckUpdate`. */
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<UpdateProgress | null>(null);
+  const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
   const sheetRef = useRef<BottomSheetHandle>(null);
   const insets = useSafeAreaInsets();
+
+  /* Read once: it is a native constant, and re-reading it on every keystroke
+     in the restore field would log a warning per render on builds that have
+     no version. */
+  const appVersion = useMemo(() => getCurrentVersion(), []);
 
   const errorMessage = !downloading && progress?.phase === 'error' ? progress.message : null;
 
@@ -139,10 +202,60 @@ export default function SettingsModal({
     );
   }, [pasted, onDataRestored, closeImport]);
 
+  /**
+   * Ask GitHub Releases for a newer build, right now.
+   *
+   * `force` lifts two separate silences, and both are the point of the button.
+   * The six-hour throttle means a release that shipped five minutes ago is
+   * invisible until this evening; and the skip list means a version the user
+   * once dismissed stays unmentioned forever. Someone tapping "check for
+   * updates" is asking about exactly that version, so `checkForUpdate` reads
+   * past `SKIPPED_KEY` rather than this component clearing it — the stored
+   * skip still governs the automatic checks, which is what the user asked for
+   * when they set it. Choosing "Later" here leaves it in place; installing
+   * makes it irrelevant.
+   *
+   * `checkForUpdate` owns the whole conversation from here — the prompt, the
+   * download, the digest check, the installer. All this does is drive the row
+   * and report the outcome, which cannot be inferred from the progress it
+   * emits (every path ends on `idle`).
+   */
+  const handleCheckUpdate = useCallback(async () => {
+    if (updateBusy) return;
+    setUpdateResult(null);
+    setUpdateProgress(null);
+    setUpdateBusy(true);
+    // Documented never to reject, but this is the one control whose entire job
+    // is to answer — a rejection must still produce a sentence, not a dead row.
+    const result = await checkForUpdate(setUpdateProgress, { force: true })
+      .catch((): UpdateCheckResult => 'failed');
+    setUpdateBusy(false);
+    setUpdateProgress(null);
+    setUpdateResult(result);
+    if (result === 'up-to-date' || result === 'update-available') hapticSuccess();
+    else hapticError();
+  }, [updateBusy]);
+
   const close = useCallback(() => {
     setImporting(false);
+    // A verdict is about the moment it was asked for. Leaving "You're on the
+    // latest version" on screen for the next time settings opens would make it
+    // a claim about then, which nothing has checked.
+    setUpdateResult(null);
     onClose();
   }, [onClose]);
+
+  /* Only the byte-counting phases have a denominator to draw a bar from;
+     `checking` and the installer hand-off get the spinner instead — the same
+     split the offline-download row above makes. */
+  const updateDeterminate =
+    updateProgress?.phase === 'downloading' || updateProgress?.phase === 'verifying';
+  const updatePct = Math.max(0, Math.min(100, Math.round((updateProgress?.progress ?? 0) * 100)));
+  const updateNotice = !updateBusy && updateResult ? updateNoticeFor(updateResult) : null;
+  const updateNoticeColor =
+    updateNotice?.tone === 'accent' ? primaryColor
+      : updateNotice?.tone === 'error' ? colors.danger
+        : colors.textMuted;
 
   const pad = { paddingBottom: insets.bottom + spacing.lg };
 
@@ -361,6 +474,77 @@ export default function SettingsModal({
                       <Text style={[s.outlineBtnText, { color: colors.text }]}>Restore</Text>
                     </Pressable>
                   </View>
+
+                  {/* App version + an explicit update check.
+                      Android-only, because that is the only platform the
+                      updater can act on — the app ships as an APK from GitHub
+                      Releases and `checkForUpdate` returns immediately
+                      anywhere else. A row that could never do anything is
+                      worse than no row, so iOS does not get one. */}
+                  {Platform.OS === 'android' && (
+                    <>
+                      <Text style={[s.label, { marginTop: spacing.md }]}>App Version</Text>
+                      {updateBusy ? (
+                        <View style={s.offlineRow}>
+                          <Text style={[s.status, s.num]}>{updateBusyLabel(updateProgress)}</Text>
+                          {updateDeterminate ? (
+                            <View style={s.progressBg}>
+                              <View
+                                style={[
+                                  s.progressFill,
+                                  { width: `${updatePct}%`, backgroundColor: primaryColor },
+                                ]}
+                              />
+                            </View>
+                          ) : (
+                            <ActivityIndicator size="small" color={primaryColor} />
+                          )}
+                          {/* The root layout's overlay — the one that normally
+                              carries this cancel — is a sibling of the app's
+                              screens, and this sheet lives in its own native
+                              Modal window on top of them. It cannot reach the
+                              user while settings is open, so the escape hatch
+                              from a ~40MB transfer on mobile data has to exist
+                              here too. */}
+                          {updateProgress?.phase === 'downloading' && (
+                            <Pressable
+                              style={s.inlineBtn}
+                              onPress={() => { cancelUpdateDownload().catch(() => {}); }}
+                              accessibilityRole="button"
+                              accessibilityLabel="Cancel this update download"
+                            >
+                              <Text style={[s.inlineBtnText, { color: colors.danger }]}>Cancel</Text>
+                            </Pressable>
+                          )}
+                        </View>
+                      ) : (
+                        <View style={s.offlineRow}>
+                          <Text style={[s.status, s.num]}>
+                            {appVersion ? `Version ${appVersion}` : 'Version unknown'}
+                          </Text>
+                          <Pressable
+                            style={s.inlineBtn}
+                            onPress={handleCheckUpdate}
+                            accessibilityRole="button"
+                            accessibilityLabel="Check for updates"
+                          >
+                            <Ionicons name="refresh" size={16} color={primaryColor} />
+                            <Text style={[s.inlineBtnText, { color: primaryColor }]}>
+                              Check for updates
+                            </Text>
+                          </Pressable>
+                        </View>
+                      )}
+                      {updateNotice && (
+                        <Text
+                          style={[s.status, { color: updateNoticeColor, marginTop: spacing.xs }]}
+                          accessibilityLiveRegion="polite"
+                        >
+                          {updateNotice.text}
+                        </Text>
+                      )}
+                    </>
+                  )}
 
                   <Pressable
                     style={[s.primaryBtn, { backgroundColor: primaryColor, marginTop: spacing.lg }]}

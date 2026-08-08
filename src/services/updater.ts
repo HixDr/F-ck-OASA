@@ -67,6 +67,31 @@ export interface UpdateProgress {
 
 type ProgressCallback = (p: UpdateProgress) => void;
 
+/**
+ * How a check ended, for callers that have to say something afterwards.
+ *
+ * The boot-time check ignores this — it either prompts or stays quiet, and
+ * silence is the correct output. An explicit "check for updates" cannot work
+ * that way: every branch below used to resolve as an indistinguishable `void`,
+ * and the progress callback is no help either because all of them report
+ * `idle` on the way out. A Settings button therefore had no way to tell "you
+ * are up to date" from "GitHub was unreachable", and both look like a button
+ * that does nothing.
+ */
+export type UpdateCheckResult =
+  /** No release newer than the installed build. */
+  | 'up-to-date'
+  /** A newer release exists. The user has already been prompted about it (or
+   *  deliberately silenced it earlier) — the caller must not prompt again. */
+  | 'update-available'
+  /** Inside `CHECK_INTERVAL_MS` of the last check, so no request was made.
+   *  Unreachable with `{ force: true }`. */
+  | 'throttled'
+  /** Not Android, or the running version is unknown: self-update is off. */
+  | 'unsupported'
+  /** GitHub was unreachable, or its latest release is not installable. */
+  | 'failed';
+
 const IDLE: UpdateProgress = { phase: 'idle', progress: 0 };
 
 /* ── Version comparison ───────────────────────────────────────── */
@@ -391,8 +416,13 @@ async function sweepCachedApks(keep?: string): Promise<void> {
 /* ── Public API ───────────────────────────────────────────────── */
 
 /** The installed binary's version. `expoConfig.version` is the JS bundle's
- *  idea of it and can be missing entirely. */
-function getCurrentVersion(): string | null {
+ *  idea of it and can be missing entirely.
+ *
+ *  Exported so the Settings row can label itself with the same number the
+ *  comparison below actually uses — showing the bundle version next to a
+ *  "you are up to date" that was decided on the native one invites a bug
+ *  report nobody can reproduce. */
+export function getCurrentVersion(): string | null {
   const native = Application.nativeApplicationVersion;
   if (native) return native;
   const fromConfig = Constants.expoConfig?.version;
@@ -433,7 +463,10 @@ function promptUpdate(remoteVersion: string, currentVersion: string): Promise<Up
  *
  * Throttled to one network check per `CHECK_INTERVAL_MS` and silent about any
  * version the user has skipped. Pass `{ force: true }` from an explicit
- * "check for updates" action.
+ * "check for updates" action: it lifts both, because someone who taps that
+ * button is asking about the very version they told us to stop mentioning.
+ *
+ * Resolves with how the check ended — see `UpdateCheckResult`. Never rejects.
  */
 /** In-flight APK download, so it can be cancelled from the UI. */
 let _activeDownload: ReturnType<typeof LegacyFileSystem.createDownloadResumable> | null = null;
@@ -463,11 +496,11 @@ export async function cancelUpdateDownload(): Promise<boolean> {
 export async function checkForUpdate(
   onProgress?: ProgressCallback,
   opts: { force?: boolean } = {},
-): Promise<void> {
-  if (Platform.OS !== 'android') return;
+): Promise<UpdateCheckResult> {
+  if (Platform.OS !== 'android') return 'unsupported';
 
   const currentVersion = getCurrentVersion();
-  if (!currentVersion) return;
+  if (!currentVersion) return 'unsupported';
 
   // Left over from the previous update, whether it installed or not. Awaited
   // so it can never race the download this run may be about to start.
@@ -477,7 +510,9 @@ export async function checkForUpdate(
     if (!opts.force) {
       const lastRaw = await AsyncStorage.getItem(LAST_CHECK_KEY);
       const last = Number(lastRaw);
-      if (Number.isFinite(last) && last > 0 && Date.now() - last < CHECK_INTERVAL_MS) return;
+      if (Number.isFinite(last) && last > 0 && Date.now() - last < CHECK_INTERVAL_MS) {
+        return 'throttled';
+      }
     }
   } catch {
     // AsyncStorage unavailable — fall through and just check.
@@ -491,44 +526,48 @@ export async function checkForUpdate(
       { headers: { Accept: 'application/vnd.github+json' } },
       CHECK_TIMEOUT_MS,
     );
-    if (!res.ok) { onProgress?.(IDLE); return; }
+    if (!res.ok) { onProgress?.(IDLE); return 'failed'; }
 
     const release = parseRelease(await res.json());
     if (!release) {
       console.warn('[updater] unexpected GitHub release payload');
       onProgress?.(IDLE);
-      return;
+      return 'failed';
     }
 
     AsyncStorage.setItem(LAST_CHECK_KEY, String(Date.now())).catch(() => {});
 
     const remoteVersion = release.tag_name.replace(/^v/, '');
-    if (!isNewer(remoteVersion, currentVersion)) { onProgress?.(IDLE); return; }
+    if (!isNewer(remoteVersion, currentVersion)) { onProgress?.(IDLE); return 'up-to-date'; }
 
     if (!opts.force) {
       const skipped = await AsyncStorage.getItem(SKIPPED_KEY).catch(() => null);
       const cmp = skipped ? compareVersions(remoteVersion, skipped) : null;
-      if (cmp !== null && cmp <= 0) { onProgress?.(IDLE); return; }
+      if (cmp !== null && cmp <= 0) { onProgress?.(IDLE); return 'update-available'; }
     }
 
+    /* Below here a newer release exists but cannot be installed. That is a
+       failed check, not "up to date": telling the user they are current when
+       we simply could not use what we found is the one answer that would send
+       them looking in the wrong place. The warnings say which case it was. */
     const apk = release.assets.find((a) => a.name.toLowerCase().endsWith('.apk'));
-    if (!apk) { onProgress?.(IDLE); return; }
+    if (!apk) { onProgress?.(IDLE); return 'failed'; }
 
     if (!isAllowedAssetUrl(apk.browser_download_url)) {
       console.warn('[updater] refusing off-GitHub asset URL:', apk.browser_download_url);
       onProgress?.(IDLE);
-      return;
+      return 'failed';
     }
     const filename = safeApkName(apk.name);
     if (!filename) {
       console.warn('[updater] refusing unusable asset name:', apk.name);
       onProgress?.(IDLE);
-      return;
+      return 'failed';
     }
     if (apk.size > MAX_APK_BYTES) {
       console.warn('[updater] refusing implausibly large asset:', apk.size);
       onProgress?.(IDLE);
-      return;
+      return 'failed';
     }
 
     onProgress?.(IDLE);
@@ -536,15 +575,19 @@ export async function checkForUpdate(
     const choice = await promptUpdate(remoteVersion, currentVersion);
     if (choice === 'skip') {
       await AsyncStorage.setItem(SKIPPED_KEY, remoteVersion).catch(() => {});
-      return;
+      return 'update-available';
     }
-    if (choice !== 'install') return;
+    if (choice !== 'install') return 'update-available';
 
     const expectedSha256 = await findExpectedSha256(release, apk.name);
     await downloadAndInstall(apk.browser_download_url, filename, apk.size, expectedSha256, onProgress);
+    // `downloadAndInstall` reports its own failures through Alert and never
+    // throws, so there is nothing left here for the caller to announce.
+    return 'update-available';
   } catch (err) {
     console.warn('[updater] update check failed:', err);
     onProgress?.(IDLE);
+    return 'failed';
   }
 }
 
