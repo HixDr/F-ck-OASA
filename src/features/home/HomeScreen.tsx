@@ -45,6 +45,7 @@ import {
   Image,
   ScrollView,
   RefreshControl,
+  AccessibilityInfo,
   Alert,
   useWindowDimensions,
   type AccessibilityActionEvent,
@@ -100,12 +101,16 @@ import {
   edgesY,
   fitAll,
   placeAll,
+  nudge,
+  resizeStep,
   resolveMove,
   resolveResize,
   snapAxis,
+  tierFor,
   CARD_MIN_H_DP,
   CARD_MIN_W_DP,
   SNAP_DP,
+  type CardTier,
   type PlacedCard,
   type Rect,
 } from './layout';
@@ -341,6 +346,37 @@ function carryTo(
   };
 }
 
+/* ── Arranging without a gesture ─────────────────────────────── */
+
+/**
+ * The screen reader's whole vocabulary for placing a card.
+ *
+ * Drag and resize are both unusable with a screen reader, and unlike the 1.2.1
+ * line grid there is no chevron equivalent for two-dimensional placement — a
+ * pair of arrows describes an order, and this is not an order. Six custom
+ * actions is the same answer the saved-line badges already use, for the same
+ * reason: the control has nowhere to put a visible affordance.
+ *
+ * Grow and shrink are two actions rather than four because the stored units
+ * already tie a card's height to its width, so scaling both together keeps the
+ * box the shape the user made it and halves the length of a menu that is
+ * already the longest in the app.
+ */
+const ARRANGE_ACTIONS: AccessibilityActionInfo[] = [
+  { name: 'moveUp', label: 'Move up' },
+  { name: 'moveDown', label: 'Move down' },
+  { name: 'moveLeft', label: 'Move left' },
+  { name: 'moveRight', label: 'Move right' },
+  { name: 'grow', label: 'Grow' },
+  { name: 'shrink', label: 'Shrink' },
+];
+
+const TIER_WORD: Record<CardTier, string> = {
+  compact: 'Compact',
+  standard: 'Standard',
+  detailed: 'Detailed',
+};
+
 /* ── A card on the canvas ────────────────────────────────────── */
 
 interface StopCardProps {
@@ -361,6 +397,7 @@ interface StopCardProps {
   onRemove: (stop: FavoriteStop) => void;
   onMoveUp: (stop: FavoriteStop) => void;
   onMoveDown: (stop: FavoriteStop) => void;
+  onArrangeAction: (index: number, action: string) => void;
 }
 
 /**
@@ -393,7 +430,13 @@ const StopCard = React.memo(function StopCard({
   onRemove,
   onMoveUp,
   onMoveDown,
+  onArrangeAction,
 }: StopCardProps) {
+  const onAction = useCallback(
+    (e: AccessibilityActionEvent) => onArrangeAction(index, e.nativeEvent.actionName),
+    [onArrangeAction, index],
+  );
+
   const measure = useCallback(
     (e: LayoutChangeEvent) => {
       onMeasure(stop.stopCode, e.nativeEvent.layout.height);
@@ -608,9 +651,29 @@ const StopCard = React.memo(function StopCard({
       // Only a flowing card's measurement means anything: a placed card would
       // just report back the height the canvas already told it to be.
       onLayout={card.flowing ? measure : undefined}
+      /* In arrange mode the card *is* the accessible element and its contents
+         are not. A screen reader wandering into an arrival row here would be
+         offered "opens the live map" in the middle of placing the card, and
+         would never find the six actions that are the only way to place it.
+         The position is in the label rather than announced on every step, so
+         it can be re-read on demand instead of narrating a nudge. */
+      accessible={arranging}
+      accessibilityLabel={
+        arranging
+          ? `${stop.stopName}. ${TIER_WORD[card.tier]} card, ${Math.round(
+              (card.rect.x + card.rect.w / 2) * 100,
+            )} percent across.`
+          : undefined
+      }
+      accessibilityHint={arranging ? 'Use the actions to move or resize this card' : undefined}
+      accessibilityActions={arranging ? ARRANGE_ACTIONS : undefined}
+      onAccessibilityAction={arranging ? onAction : undefined}
     >
       <GestureDetector gesture={gesture}>
-        <Animated.View entering={entering}>
+        <Animated.View
+          entering={entering}
+          importantForAccessibility={arranging ? 'no-hide-descendants' : 'auto'}
+        >
           <FavoriteStopCard
             stop={stop}
             primaryColor={primaryColor}
@@ -643,7 +706,11 @@ const StopCard = React.memo(function StopCard({
           right. */}
       {arranging && (
         <GestureDetector gesture={resize}>
-          <View style={s.resizeHandle}>
+          {/* Hidden from the screen reader rather than left focusable: it is
+              pure gesture, and the Grow and Shrink actions above are the path
+              that does the same job. A focusable control that cannot be
+              activated is worse than no control. */}
+          <View style={s.resizeHandle} importantForAccessibility="no-hide-descendants">
             <View style={[s.resizeGrip, { backgroundColor: primaryColor }]}>
               <Ionicons name="resize" size={13} color={onAccent(primaryColor)} />
             </View>
@@ -1400,6 +1467,10 @@ export default function HomeScreen() {
     [favoriteStops, canvasW, heightsVersion],
   );
 
+  /** True for the one frame between mount and the first `onLayout`, and only
+   *  when there is something on the canvas whose height is still a guess. */
+  const canvasWaiting = heightsVersion === 0 && placed.cards.some((c) => c.flowing);
+
   /* ── Drag state ────────────────────────────────────────────── */
 
   /* JS mirrors of what the auto-scroll tick needs sixty times a second.
@@ -1465,7 +1536,11 @@ export default function HomeScreen() {
     if (activeRef.current >= 0) return;
     placedRef.current = placed;
     uRef.current = canvasW;
-    rectsSV.value = placed.cards.map((c) => c.rect);
+    /* Copied rather than shared. Assigning an object to a shared value freezes
+       it, and `rect` for a placed card *is* the object sitting in the saved
+       stop — freezing that would quietly make the persisted layout immutable
+       for everything else that ever touches it. */
+    rectsSV.value = placed.cards.map((c) => ({ x: c.rect.x, y: c.rect.y, w: c.rect.w, h: c.rect.h }));
     uSV.value = canvasW;
   }, [favoriteStops, placed, canvasW, dropTick, rectsSV, uSV]);
 
@@ -1634,6 +1709,84 @@ export default function HomeScreen() {
     },
     [active, dx, dy, guideX, guideY],
   );
+
+  /**
+   * Move or resize a card by one step, without a gesture.
+   *
+   * This is the screen-reader path, and the reason `layout.ts` has no React in
+   * it: every one of these runs through the same `resolveMove` and
+   * `resolveResize` a drag ends in, so a card placed with TalkBack cannot come
+   * to rest anywhere a dragged card could not. A second, subtly different set
+   * of rules reachable only with a screen reader is the failure this shape
+   * exists to prevent.
+   *
+   * One write covers both the step and the freeze that a first touch implies,
+   * because a card cannot be nudged out of a stack that is still flowing behind
+   * it. `uRef` rather than `canvasW` keeps this callback stable, so a rotation
+   * does not re-render every card.
+   */
+  const arrangeAction = useCallback((index: number, action: string) => {
+    const cards = placedRef.current.cards;
+    const me = cards[index];
+    if (!me) return;
+    const u = uRef.current;
+    const others: Rect[] = [];
+    cards.forEach((c, i) => {
+      if (i !== index) others.push(c.rect);
+    });
+
+    let next: Rect;
+    switch (action) {
+      case 'moveUp': next = nudge(me.rect, others, 'y', -1, u); break;
+      case 'moveDown': next = nudge(me.rect, others, 'y', 1, u); break;
+      case 'moveLeft': next = nudge(me.rect, others, 'x', -1, u); break;
+      case 'moveRight': next = nudge(me.rect, others, 'x', 1, u); break;
+      case 'grow': next = resizeStep(me.rect, others, 1, u); break;
+      case 'shrink': next = resizeStep(me.rect, others, -1, u); break;
+      default: return;
+    }
+
+    const sizing = action === 'grow' || action === 'shrink';
+    const moved =
+      Math.abs(next.x - me.rect.x) > 0.001 ||
+      Math.abs(next.y - me.rect.y) > 0.001 ||
+      Math.abs(next.w - me.rect.w) > 0.001 ||
+      Math.abs(next.h - me.rect.h) > 0.001;
+
+    if (!moved) {
+      /* Silence would be indistinguishable from the action not having been
+         registered at all, which on a screen a user cannot see is the worst
+         possible answer. */
+      AccessibilityInfo.announceForAccessibility(
+        sizing
+          ? action === 'grow'
+            ? 'Already as large as it fits'
+            : 'Already at the smallest size'
+          : 'Blocked',
+      );
+      return;
+    }
+
+    const patches = new Map<string, Partial<FavoriteStop>>();
+    for (const c of cards) {
+      if (c.flowing) patches.set(c.stopCode, { layout: c.rect });
+    }
+    patches.set(me.stopCode, { layout: next });
+    const updated = updateFavoriteStops(patches);
+    stopsRef.current = updated;
+    /* Re-derived here rather than waiting for the render this write triggers.
+       Two actions in quick succession would otherwise both read the geometry
+       from before the first one, and the second would place the card as if the
+       first had not happened. */
+    placedRef.current = placeAll(updated, heightsRef.current, u);
+    setFavoriteStops(updated);
+    hapticSelection();
+    AccessibilityInfo.announceForAccessibility(
+      sizing
+        ? `${TIER_WORD[tierFor(next.w * u)]} card`
+        : `Moved. ${Math.round((next.x + next.w / 2) * 100)} percent across.`,
+    );
+  }, []);
 
   /**
    * A corner drag is a lift too, as far as the rest of the screen is concerned:
@@ -1898,8 +2051,11 @@ export default function HomeScreen() {
           <Text style={s.sectionLabel}>Saved Stops</Text>
           {/* The only advertisement a long press gets, and the only thing that
               says what arrange mode is for while it is on. */}
-          <Text style={s.sectionHint}>
-            {arranging ? 'Drag to move · Done when finished' : 'Hold a card to arrange'}
+          {/* Two lines at most: at a large font scale this shares a row with
+              the section label, and a hint that pushes the label off the screen
+              is worse than a hint that wraps. */}
+          <Text style={s.sectionHint} numberOfLines={2}>
+            {arranging ? 'Drag or resize' : 'Hold a card to arrange'}
           </Text>
         </View>
       ) : null,
@@ -2095,7 +2251,21 @@ export default function HomeScreen() {
               top of the stops. `placed.cards` is built from `favoriteStops` in
               the same pass, so the two are indexed alike by construction. */}
           {favoriteStops.length > 0 && (
-            <View style={[s.canvas, { height: placed.height }]} onLayout={onCanvasLayout}>
+            /* Held back until the first measurement lands.
+               A flowing card is positioned from its neighbours' measured
+               heights, and on the frame between mount and the first `onLayout`
+               there are none — so the stack is built on `FALLBACK_CARD_H_DP`
+               and any card whose real height differs sits over or under the one
+               below it. One invisible frame is not noticeable; a frame of
+               overlapping cards on every cold start is. Every card lays out in
+               the same pass, so this clears on the next render and cannot be
+               reopened by a stop saved later, because the counter only rises.
+               An install whose cards are all placed has nothing to measure and
+               is therefore never held back. */
+            <View
+              style={[s.canvas, { height: placed.height }, canvasWaiting && s.canvasWaiting]}
+              onLayout={onCanvasLayout}
+            >
               {favoriteStops.map((stop, i) => (
                 <StopCard
                   key={stop.stopCode}
@@ -2114,6 +2284,7 @@ export default function HomeScreen() {
                   onRemove={handleRemoveStop}
                   onMoveUp={moveStopUp}
                   onMoveDown={moveStopDown}
+                  onArrangeAction={arrangeAction}
                 />
               ))}
               {/* Painted last so they sit over the cards, and outside any of

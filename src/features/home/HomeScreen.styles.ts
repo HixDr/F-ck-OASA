@@ -145,6 +145,11 @@ export const s = StyleSheet.create({
     position: 'relative',
     marginBottom: CARD_GAP_DP,
   },
+  /** Invisible, not unmounted: the cards have to be laid out to be measured,
+   *  and unmounting them is how the measurement never arrives. */
+  canvasWaiting: {
+    opacity: 0,
+  },
   /** Wrapper for one card. `left`, `top`, `width` and (for a placed card)
    *  `height` come from the canvas geometry; `elevation` is animated from 0 and
    *  is what keeps a lifted card painted over the ones it travels across —

@@ -94,11 +94,15 @@ export const CARD_GAP_DP = spacing.sm;
 
 /**
  * Height assumed for a flowing card that has not reported a measurement yet.
- * Only the first frame after a cold start leans on it, and it is roughly a
- * two-line card, so the stack it produces is close enough that the correction a
- * frame later does not read as a jump.
+ *
+ * Only the frame between mount and the first `onLayout` leans on it, and on
+ * that frame every card is showing the cold-start placeholder: a 32dp header,
+ * three 62dp skeleton rows and 14dp of card padding. So the number is that,
+ * rather than an average of what cards eventually become — being right about
+ * the one frame it is actually used on is worth more than being right on
+ * average about frames where a real measurement exists.
  */
-export const FALLBACK_CARD_H_DP = 168;
+export const FALLBACK_CARD_H_DP = 232;
 
 /**
  * How far a "move left/right/up/down" accessibility action travels when there
@@ -257,7 +261,11 @@ export function snapAxis(origin: number, size: number, edges: readonly number[],
  */
 export function resolveMove(want: Rect, others: readonly Rect[]): Rect {
   'worklet';
-  const maxX = 1 - want.w;
+  /* `Math.max` because a card can be wider than the canvas — a layout authored
+     on a wider phone, widened to the dp floor on a narrow one. Without it the
+     clamp below drives `x` negative and the card leaves the screen on the left
+     as well as the right. */
+  const maxX = Math.max(0, 1 - want.w);
   const x = want.x < 0 ? 0 : want.x > maxX ? maxX : want.x;
   const y = want.y < 0 ? 0 : want.y;
   const base = { x, y, w: want.w, h: want.h };
@@ -266,14 +274,20 @@ export function resolveMove(want: Rect, others: readonly Rect[]): Rect {
   const xs: number[] = [x];
   const ys: number[] = [y];
   const bottom = bottomOf(others);
+  /* Every candidate is clamped into the canvas and pushed unconditionally.
+     Skipping the ones that fall outside looks tidier and quietly drops the
+     flush-against-the-margin positions — a blocker whose left edge is exactly
+     one card-width from the margin has "sit at x = 0" as its answer, and that
+     is precisely the case a `> 0` test throws away. Duplicates cost one
+     rejected comparison each. */
   for (let i = 0; i < others.length; i++) {
     const b = others[i];
     const left = b.x - want.w;
-    if (left > 0) xs.push(left > maxX ? maxX : left);
+    xs.push(left < 0 ? 0 : left > maxX ? maxX : left);
     const right = b.x + b.w;
-    if (right < maxX) xs.push(right < 0 ? 0 : right);
+    xs.push(right < 0 ? 0 : right > maxX ? maxX : right);
     const above = b.y - want.h;
-    if (above > 0) ys.push(above);
+    ys.push(above < 0 ? 0 : above);
     ys.push(b.y + b.h);
   }
   // Always available, always free. Without it a pathological arrangement could
@@ -335,6 +349,7 @@ export function resolveResize(
     }
   }
   if (w < minW) w = minW;
+  if (w > 1) w = 1;
 
   for (let i = 0; i < others.length; i++) {
     const b = others[i];
@@ -345,8 +360,13 @@ export function resolveResize(
   }
   if (h < minH) h = minH;
 
+  /* Widening up to the floor can put the right edge past the margin, when the
+     card was sitting closer to it than the minimum width. At that point this is
+     no longer a resize about a corner the user is holding still — the box has
+     to move — so the move resolver takes it, which is also the only code that
+     knows how to pull it back inside. */
   const box = { x: want.x, y: want.y, w, h };
-  return hitsAny(box, others) ? resolveMove(box, others) : box;
+  return box.x + box.w > 1 + EPS || hitsAny(box, others) ? resolveMove(box, others) : box;
 }
 
 /* ── Keyboard / screen-reader steps ──────────────────────────── */
