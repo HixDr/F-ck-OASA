@@ -371,6 +371,23 @@ const ARRANGE_ACTIONS: AccessibilityActionInfo[] = [
   { name: 'shrink', label: 'Shrink' },
 ];
 
+/**
+ * The same, plus the one control arrange mode takes away.
+ *
+ * A card in arrange mode hides its own contents from the screen reader, which
+ * is right — being offered "opens the live map" halfway through placing a card
+ * is worse than useless. But edit mode puts a remove button inside those
+ * contents, so hiding them silently removes the only way a screen reader has to
+ * delete a saved stop. It comes back as an action instead. The filter button
+ * and the reorder chevrons go the same way and do not come back: the arrange
+ * actions already do what the chevrons did, and choosing which lines to show is
+ * something to do when not in the middle of moving the card.
+ */
+const ARRANGE_EDIT_ACTIONS: AccessibilityActionInfo[] = [
+  ...ARRANGE_ACTIONS,
+  { name: 'removeStop', label: 'Remove this stop' },
+];
+
 const TIER_WORD: Record<CardTier, string> = {
   compact: 'Compact',
   standard: 'Standard',
@@ -433,8 +450,12 @@ const StopCard = React.memo(function StopCard({
   onArrangeAction,
 }: StopCardProps) {
   const onAction = useCallback(
-    (e: AccessibilityActionEvent) => onArrangeAction(index, e.nativeEvent.actionName),
-    [onArrangeAction, index],
+    (e: AccessibilityActionEvent) => {
+      const { actionName } = e.nativeEvent;
+      if (actionName === 'removeStop') onRemove(stop);
+      else onArrangeAction(index, actionName);
+    },
+    [onArrangeAction, onRemove, stop, index],
   );
 
   const measure = useCallback(
@@ -666,7 +687,9 @@ const StopCard = React.memo(function StopCard({
           : undefined
       }
       accessibilityHint={arranging ? 'Use the actions to move or resize this card' : undefined}
-      accessibilityActions={arranging ? ARRANGE_ACTIONS : undefined}
+      accessibilityActions={
+        arranging ? (editing ? ARRANGE_EDIT_ACTIONS : ARRANGE_ACTIONS) : undefined
+      }
       onAccessibilityAction={arranging ? onAction : undefined}
     >
       <GestureDetector gesture={gesture}>
