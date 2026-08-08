@@ -1,19 +1,34 @@
 /**
  * Home Screen — saved stops first, then saved lines.
  *
- * The saved stops are the answer to "when is my bus coming?", so they are the
- * list itself: a real virtualized FlatList, not a ScrollView wearing a FlatList
- * costume with everything crammed into ListHeaderComponent.
+ * The saved stops used to be a virtualized FlatList. They are a canvas now:
+ * every card is absolutely positioned on a surface that scrolls vertically and
+ * grows to fit the lowest card, because a card the user may put anywhere is not
+ * something a list can express. `features/home/layout` owns every number behind
+ * that — units, size tiers, magnets, overlap resolution — and contains no React
+ * on purpose, so the render pass, the gesture worklets and the accessibility
+ * actions cannot quietly become three layout engines that disagree.
+ *
+ * Virtualization is the price, and it is a real one: every saved stop renders
+ * at once and each card owns live arrival queries. That is fine at the 5-20
+ * stops people actually save, and it is what turns `active` — the focus gate
+ * handed to every card — from an optimisation into load-bearing code.
+ *
+ * A stop that has never been arranged *flows*: full width, sized by its own
+ * content, stacked in saved order beneath anything that has been placed. An
+ * install arriving from 1.2.4 has no saved placements at all, so every card
+ * flows and this canvas reproduces the old column exactly. That is the whole
+ * migration; see `layout.ts` for why it is expressed as a property of the
+ * geometry rather than as a one-off upgrade step.
  *
  * Two interactions are worth explaining up front.
  *
- * Reordering. Holding a card — or a saved-line badge — lifts it and the
- * neighbours open a gap. Both are backed by an accessible equivalent, because a
- * drag is not operable with a screen reader: chevrons in edit mode for the
- * cards, `moveLeft` / `moveRight` accessibility actions for the badges, which
- * are 44dp and have no room for chevrons. Those are the accessible path, not a
- * leftover. The maths behind the two is not shared — a list is one-dimensional
- * and a wrapping grid is not; see the geometry section below.
+ * Reordering. Holding a saved-line badge lifts it and the neighbours open a
+ * gap, with `moveLeft` / `moveRight` accessibility actions as the equivalent a
+ * screen reader can drive — a drag announces nothing, and a 44dp badge has
+ * nowhere to put chevrons. That geometry is the grid's own and is shared with
+ * nothing: see the section below for why a wrapping grid of content-sized
+ * badges cannot borrow anything from the stop canvas.
  *
  * Removal. Nothing here asks "are you sure?" any more. Removing a saved stop or
  * line is one storage write and trivially reversible, so it happens at once and
@@ -28,16 +43,13 @@ import {
   View,
   Text,
   Image,
-  FlatList,
+  ScrollView,
   RefreshControl,
   Alert,
+  useWindowDimensions,
   type AccessibilityActionEvent,
   type AccessibilityActionInfo,
-  type CellRendererProps,
   type LayoutChangeEvent,
-  type ListRenderItemInfo,
-  type NativeScrollEvent,
-  type NativeSyntheticEvent,
 } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import Animated, {
@@ -63,6 +75,7 @@ import {
   removeFavoriteStop,
   addFavoriteStop,
   reorderFavoriteStops,
+  updateFavoriteStops,
   isOfflineDataDownloaded,
   getOfflineTimestamp,
 } from '../../services/storage';
@@ -79,6 +92,7 @@ import { duration, easing, liftSpring, spring, useReduceMotion } from '../../ui/
 import FavoriteStopCard from '../../components/FavoriteStopCard';
 import SettingsModal from '../../components/SettingsModal';
 import { s, LINE_GRID_GAP } from './HomeScreen.styles';
+import { fitAll, placeAll, type PlacedCard } from './layout';
 import type { FavoriteLine, FavoriteStop } from '../../types';
 
 /* ── Order persistence ───────────────────────────────────────── */
@@ -124,256 +138,115 @@ function restoreLines(before: FavoriteLine[]): FavoriteLine[] {
   return getFavorites();
 }
 
-/* ── Drag-to-reorder ─────────────────────────────────────────── */
+/* ── Lift vocabulary ─────────────────────────────────────────── */
 
-/** Hold before a card lifts. Long enough not to fire mid-scroll, short enough
- *  that the lift reads as a response rather than a delay. */
+/** Hold before a card or a saved-line badge lifts. Long enough not to fire
+ *  mid-scroll, short enough that the lift reads as a response, not a delay. */
 const LIFT_MS = 260;
 const LIFT_SCALE = 1.03;
-
-/** Row pitch assumed for a card the list has not mounted yet. Only the drop
- *  maths for off-screen rows leans on it, and it self-corrects to the mean of
- *  the measured cards as soon as anything has been laid out. */
-const FALLBACK_PITCH = 168;
-
-/** A held card near the edge of the list scrolls it, so a stop can be moved
- *  further than one screenful without putting it down. */
-const EDGE_BAND = 96;
-const EDGE_MAX_STEP = 16;
-const EDGE_TICK_MS = 16;
 
 /** Cards below this index get the first-paint entrance; the rest are scrolled
  *  to, and an animation on arrival would read as lag. */
 const ENTRANCE_CARDS = 8;
 
-/**
- * Where a card lifted from index `a` comes to rest if it is dropped at `k`.
- *
- * Stated in the *original* layout, which is what the drag maths has: dropping
- * at k puts the card after the first k cards of the list-with-it-removed, so
- * everything past its old slot has already closed the gap it left behind.
- */
-function restingTop(k: number, a: number, tops: number[], pitches: number[]): number {
-  'worklet';
-  return k <= a ? tops[k] : tops[k] + pitches[k] - pitches[a];
-}
+/* ── A card on the canvas ────────────────────────────────────── */
 
-/** The slot a card lifted from `a` is closest to, given its current top.
- *  Nearest-candidate rather than counting crossed midpoints, because the cards
- *  are of wildly different heights — a two-line stop next to an eight-line one. */
-function slotFor(top: number, a: number, tops: number[], pitches: number[]): number {
-  'worklet';
-  let best = a;
-  let bestDist = Number.POSITIVE_INFINITY;
-  for (let k = 0; k < tops.length; k++) {
-    const d = Math.abs(restingTop(k, a, tops, pitches) - top);
-    if (d < bestDist) {
-      bestDist = d;
-      best = k;
-    }
-  }
-  return best;
-}
-
-/** Keep a lifted card inside the run of stop cards. */
-function clampOffset(
-  a: number,
-  raw: number,
-  tops: number[],
-  pitches: number[],
-  contentH: number,
-): number {
-  'worklet';
-  const min = -tops[a];
-  const max = contentH - pitches[a] - tops[a];
-  return raw < min ? min : raw > max ? max : raw;
-}
-
-/**
- * Everything a cell needs to take part in a drag. One object, created once —
- * see the warning where it is built.
- */
-interface DragCtl {
-  /** Index of the lifted card, -1 when nothing is held. */
-  active: SharedValue<number>;
-  /** Index the lifted card would land on if dropped now. */
-  target: SharedValue<number>;
-  /** The lifted card's travel from its laid-out position, in content px. */
-  offset: SharedValue<number>;
-  /** Raw gesture translation, kept separately so the edge auto-scroll can add
-   *  its own contribution without the finger having moved. */
-  pan: SharedValue<number>;
-  lift: SharedValue<number>;
-  /** Finger position in window coordinates — drives the edge auto-scroll. */
-  pointerY: SharedValue<number>;
-  scrollY: SharedValue<number>;
-  scrollAt: SharedValue<number>;
-  tops: SharedValue<number[]>;
-  pitches: SharedValue<number[]>;
-  contentH: SharedValue<number>;
-  /** For worklets. Anything reading this on the React side wants `reducedRef`:
-   *  `sv.value` from JS is a synchronous hop into the UI runtime, and doing it
-   *  during a render also trips reanimated's own warning. */
-  reduced: SharedValue<boolean>;
-  reducedRef: React.RefObject<boolean>;
-  /** True for the first moment after mount — gates the entrance stagger so a
-   *  card scrolled into view later does not fade in as if it were new. */
-  entrance: React.RefObject<boolean>;
-  onLift: (index: number) => void;
-  /** A drop target was crossed. Mirrors it back to JS so the auto-scroll tick
-   *  does not have to read the shared value to know where it stands. */
-  onTarget: (index: number) => void;
-  onDrop: (from: number, to: number) => void;
+interface StopCardProps {
+  stop: FavoriteStop;
+  index: number;
+  count: number;
+  /** Where the canvas has decided this card sits, in pixels. */
+  card: PlacedCard;
+  primaryColor: string;
+  focused: boolean;
+  editing: boolean;
+  /** First paint only — a card mounting later must not fade in as if new. */
+  entrance: boolean;
+  reduced: boolean;
   onMeasure: (stopCode: string, height: number) => void;
+  onRemove: (stop: FavoriteStop) => void;
+  onMoveUp: (stop: FavoriteStop) => void;
+  onMoveDown: (stop: FavoriteStop) => void;
 }
 
 /**
- * Build the FlatList cell wrapper.
+ * One absolutely positioned card.
  *
- * The transform has to live on the cell, not inside `renderItem`: a lifted card
- * travels across its neighbours, and only the cell view is a sibling of the
- * cells it needs to be painted over.
+ * The wrapper carries the geometry and the card carries the content, which is
+ * the split that lets a card be moved and resized without anything inside it
+ * knowing. A *flowing* card is given no height at all so it can size itself
+ * from its content exactly as it did in 1.2.4, and reports what that came to —
+ * the canvas needs the measurement both to stack the card below it and to know
+ * what box to freeze it at the moment it is first picked up.
  */
-function createStopCell(ctl: DragCtl) {
-  return function StopCell({
-    index,
-    item,
-    style,
-    onLayout,
-    children,
-  }: CellRendererProps<FavoriteStop>) {
-    const measure = useCallback(
-      (e: LayoutChangeEvent) => {
-        // VirtualizedList's own metrics come first — dropping this breaks
-        // scrollToIndex and the windowing maths.
-        onLayout?.(e);
-        ctl.onMeasure(item.stopCode, e.nativeEvent.layout.height);
-      },
-      [onLayout, item.stopCode],
-    );
+const StopCard = React.memo(function StopCard({
+  stop,
+  index,
+  count,
+  card,
+  primaryColor,
+  focused,
+  editing,
+  entrance,
+  reduced,
+  onMeasure,
+  onRemove,
+  onMoveUp,
+  onMoveDown,
+}: StopCardProps) {
+  const measure = useCallback(
+    (e: LayoutChangeEvent) => {
+      onMeasure(stop.stopCode, e.nativeEvent.layout.height);
+    },
+    [onMeasure, stop.stopCode],
+  );
 
-    const gesture = useMemo(
-      () =>
-        Gesture.Pan()
-          .activateAfterLongPress(LIFT_MS)
-          .maxPointers(1)
-          .onStart((e) => {
-            // One saved stop cannot be reordered; leave the card alone rather
-            // than lifting it to nowhere.
-            if (ctl.pitches.value.length < 2 || index >= ctl.pitches.value.length) return;
-            /* The previous card is still settling into its slot and has not
-               committed yet. Lifting a second one now would let that pending
-               commit clear `active` out from under this drag. */
-            if (ctl.active.value >= 0) return;
-            ctl.active.value = index;
-            ctl.target.value = index;
-            ctl.pan.value = 0;
-            ctl.offset.value = 0;
-            ctl.scrollAt.value = ctl.scrollY.value;
-            ctl.pointerY.value = e.absoluteY;
-            ctl.lift.value = ctl.reduced.value ? 1 : withSpring(LIFT_SCALE, liftSpring);
-            runOnJS(ctl.onLift)(index);
-          })
-          .onUpdate((e) => {
-            if (ctl.active.value !== index) return;
-            const tops = ctl.tops.value;
-            const pitches = ctl.pitches.value;
-            if (index >= tops.length) return;
-            ctl.pan.value = e.translationY;
-            ctl.pointerY.value = e.absoluteY;
-            /* The card's travel is the gesture *plus* however far the list has
-               auto-scrolled: the finger holding still while the content moves
-               under it is still the card moving through the list. */
-            ctl.offset.value = clampOffset(
-              index,
-              e.translationY + (ctl.scrollY.value - ctl.scrollAt.value),
-              tops,
-              pitches,
-              ctl.contentH.value,
-            );
-            const k = slotFor(tops[index] + ctl.offset.value, index, tops, pitches);
-            if (k !== ctl.target.value) {
-              ctl.target.value = k;
-              runOnJS(ctl.onTarget)(k);
-            }
-          })
-          /* onFinalize rather than onEnd: a gesture cancelled from outside — a
-             call arriving, a navigation — must still put the card down, and
-             must still commit where the user had already moved it to. */
-          .onFinalize(() => {
-            if (ctl.active.value !== index) return;
-            const k = ctl.target.value;
-            const tops = ctl.tops.value;
-            const rest =
-              index < tops.length ? restingTop(k, index, tops, ctl.pitches.value) - tops[index] : 0;
-            ctl.lift.value = withSpring(1, liftSpring);
-            if (ctl.reduced.value) {
-              ctl.offset.value = rest;
-              runOnJS(ctl.onDrop)(index, k);
-            } else {
-              /* Commit once the card has physically landed. The neighbours are
-                 already sitting in the new order by then, so the data swap that
-                 follows changes nothing on screen. */
-              ctl.offset.value = withSpring(rest, liftSpring, () => {
-                runOnJS(ctl.onDrop)(index, k);
-              });
-            }
-          }),
-      [index],
-    );
+  const entering =
+    entrance && !reduced && index < ENTRANCE_CARDS
+      ? FadeInDown.duration(duration.slow).delay(index * 45).easing(easing.out)
+      : undefined;
 
-    /** How far this card slides to open (or close) the gap. */
-    const shift = useDerivedValue(() => {
-      const a = ctl.active.value;
-      if (a < 0 || a === index) return 0;
-      const k = ctl.target.value;
-      const pitch = ctl.pitches.value[a] ?? 0;
-      const to = a < index && index <= k ? -pitch : k <= index && index < a ? pitch : 0;
-      return ctl.reduced.value ? to : withSpring(to, spring);
-    });
-
-    const animStyle = useAnimatedStyle(() => {
-      const held = ctl.active.value === index;
-      return {
-        transform: [
-          { translateY: held ? ctl.offset.value : shift.value },
-          { scale: held ? ctl.lift.value : 1 },
-        ],
-        zIndex: held ? 2 : 0,
-        elevation: held ? 10 : 0,
-      };
-    });
-
-    /* Read during render on purpose: cells mount over the first few frames, so
-       whether a given card is part of the first paint is a question only its
-       own mount can answer. */
-    const entering =
-      ctl.entrance.current && !ctl.reducedRef.current && index < ENTRANCE_CARDS
-        ? FadeInDown.duration(duration.slow).delay(index * 45).easing(easing.out)
-        : undefined;
-
-    return (
-      <Animated.View style={[style, s.stopCell, animStyle]} onLayout={measure}>
-        <GestureDetector gesture={gesture}>
-          <Animated.View entering={entering}>{children}</Animated.View>
-        </GestureDetector>
-      </Animated.View>
-    );
-  };
-}
+  return (
+    <Animated.View
+      style={[
+        s.stopCard,
+        { left: card.left, top: card.top, width: card.width },
+        // A placed card is a fixed box; a flowing one is whatever it measures.
+        card.flowing ? null : { height: card.height },
+      ]}
+      // Only a flowing card's measurement means anything: a placed card would
+      // just report back the height the canvas already told it to be.
+      onLayout={card.flowing ? measure : undefined}
+      entering={entering}
+    >
+      <FavoriteStopCard
+        stop={stop}
+        primaryColor={primaryColor}
+        active={focused}
+        editing={editing}
+        onRemove={onRemove}
+        onMoveUp={onMoveUp}
+        onMoveDown={onMoveDown}
+        canMoveUp={index > 0}
+        canMoveDown={index < count - 1}
+      />
+    </Animated.View>
+  );
+});
 
 /* ── Saved lines: the grid's own geometry ────────────────────── */
 
 /**
- * None of the stop drag's maths transfers here.
+ * None of the stop canvas's maths transfers here, and it is worth saying why
+ * before someone tries to share it.
  *
- * A list is one-dimensional: every card has the same width, so a neighbour only
- * ever moves by one row pitch and `restingTop` can be a scalar. The line grid
- * wraps, and its badges are content-sized — a 2-digit line and a 4-digit one are
- * different widths, and both grow with the system font scale. Inserting a badge
- * mid-grid reflows the tail *across row boundaries*, so every other badge's
- * travel is a different (dx, dy), and "which slot am I over?" is a nearest-point
- * search in two dimensions rather than a count of crossed midpoints.
+ * The canvas is free placement: a card is wherever the user put it, `layout.ts`
+ * only has to say whether that position is legal, and no other card moves when
+ * one does. This grid is the opposite — the badges have no positions of their
+ * own at all. They are content-sized, wrapping flex children (a 2-digit line and
+ * a 4-digit one are different widths, and both grow with the system font scale),
+ * so inserting one mid-grid reflows the tail *across row boundaries* and every
+ * other badge's travel is a different (dx, dy).
  *
  * So the grid's wrapping is re-run here, from measured widths, for the
  * hypothetical order. Everything is stated as a *difference* against the
@@ -960,10 +833,8 @@ export default function HomeScreen() {
   /** Home stays mounted under /search, /map/* and /planner, so cards must be
    *  told to stop polling rather than relying on unmount. */
   const [focused, setFocused] = useState(true);
-  /** A card is being carried. The list must not scroll under it by touch. */
-  const [dragging, setDragging] = useState(false);
-  /** The same, for a saved-line badge. Separate state so the two drags cannot
-   *  clear each other's flag. */
+  /** A saved-line badge is being carried. The canvas must not scroll under it
+   *  by touch. */
   const [linesDragging, setLinesDragging] = useState(false);
 
   // Offline data download state
@@ -975,52 +846,81 @@ export default function HomeScreen() {
   // Preload lines cache in background
   useLines();
 
-  /* ── Drag state ────────────────────────────────────────────── */
+  /* ── Canvas geometry ───────────────────────────────────────── */
 
-  const listRef = useRef<FlatList<FavoriteStop>>(null);
-  /** The list as the drag maths sees it, readable from a gesture callback
-   *  without waiting for a render. */
-  const stopsRef = useRef<FavoriteStop[]>(favoriteStops);
-  /** Measured cell heights by stop code. Cards vary from two rows to ten, and
-   *  grow again when a timetable is expanded, so nothing here can assume a
-   *  fixed row height. */
+  /** Measured heights of the cards that still size themselves, by stop code —
+   *  not by index, because saving or removing a stop renumbers every index and
+   *  resizes nothing. Cards run from two rows to ten and grow again when a
+   *  timetable is expanded, so nothing here may assume a fixed height. */
   const heightsRef = useRef<Map<string, number>>(new Map());
-  const pitchesRef = useRef<number[]>([]);
-  const topsRef = useRef<number[]>([]);
-  const contentHRef = useRef(0);
-  const scrollRef = useRef(0);
-  const scrollMaxRef = useRef(0);
-  const viewportRef = useRef({ top: 0, height: 0 });
-  const edgeTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Bumped when a measurement actually changes, purely to re-run `placeAll`.
+   *  The map stays a ref: a card reporting the height it reported last frame
+   *  must not cost a render, and there are up to twenty of them each doing it
+   *  on every poll. */
+  const [heightsVersion, setHeightsVersion] = useState(0);
   const entranceRef = useRef(true);
-  const reducedRef = useRef(false);
-  /* JS mirrors of the three drag values the auto-scroll tick needs 60 times a
-     second. Reading a shared value from JS is a *synchronous* hop into the UI
-     runtime — cheap once, not cheap in a frame loop competing with the drag it
-     is meant to serve. `pointerY` and `pan` still have to be read, so the tick
-     reads `pointerY` first and bails before touching `pan` unless it is
-     actually going to scroll. */
-  const activeRef = useRef(-1);
-  const targetRef = useRef(-1);
-  const scrollAtRef = useRef(0);
 
-  const active = useSharedValue(-1);
-  const target = useSharedValue(-1);
-  const offset = useSharedValue(0);
-  const pan = useSharedValue(0);
-  const lift = useSharedValue(1);
-  const pointerY = useSharedValue(0);
-  const scrollY = useSharedValue(0);
-  const scrollAt = useSharedValue(0);
-  const topsSV = useSharedValue<number[]>([]);
-  const pitchesSV = useSharedValue<number[]>([]);
-  const contentHSV = useSharedValue(0);
-  const reducedSV = useSharedValue(false);
+  /* The canvas's usable width — the unit every stored layout number is a
+     fraction of. Seeded from the window rather than left at zero until the
+     first onLayout: frame 1 would otherwise stack every card at width zero,
+     and this screen has already been through one round of the first frame
+     lying to existing users. */
+  const { width: windowW } = useWindowDimensions();
+  const [measuredW, setMeasuredW] = useState(0);
+  const canvasW = measuredW > 0 ? measuredW : Math.max(1, windowW - spacing.lg * 2);
 
+  /* Rotation. Without this the stale measurement places one frame of cards at
+     the previous orientation's width, which at 90° is a visible lurch. */
   useEffect(() => {
-    reducedRef.current = reduced;
-    reducedSV.value = reduced;
-  }, [reduced, reducedSV]);
+    setMeasuredW(0);
+  }, [windowW]);
+
+  const onCanvasLayout = useCallback((e: LayoutChangeEvent) => {
+    const { width } = e.nativeEvent.layout;
+    setMeasuredW((prev) => (Math.abs(prev - width) < 1 ? prev : width));
+  }, []);
+
+  const onMeasure = useCallback((stopCode: string, height: number) => {
+    const prev = heightsRef.current.get(stopCode);
+    // Sub-pixel churn from a re-render is not a new measurement.
+    if (prev != null && Math.abs(prev - height) < 1) return;
+    heightsRef.current.set(stopCode, height);
+    setHeightsVersion((v) => v + 1);
+  }, []);
+
+  /**
+   * Where every card sits.
+   *
+   * `heightsVersion` rather than the map itself is the dependency: the map is
+   * mutated in place so its identity never changes, and the counter is the only
+   * honest signal that its contents did.
+   */
+  const placed = useMemo(
+    () => placeAll(favoriteStops, heightsRef.current, canvasW),
+    [favoriteStops, canvasW, heightsVersion],
+  );
+
+  /**
+   * Re-fit placed cards to the canvas.
+   *
+   * Fractions carry an arrangement across devices and orientations on their
+   * own; what they cannot carry is the 120dp legibility floor, so a narrower
+   * screen may need a card widened and everything it then collides with moved.
+   * The other way in is an imported backup, which can carry an arrangement from
+   * a phone of any size, so this watches the stops as well as the width.
+   *
+   * `fitAll` returns only what actually changed, which is what stops this from
+   * chasing its own tail: the write it triggers re-runs the effect, the second
+   * pass finds nothing to do, and the overwhelmingly common case — same phone,
+   * same orientation, every launch — writes nothing at all.
+   */
+  useEffect(() => {
+    const changed = fitAll(favoriteStops, canvasW);
+    if (changed.size === 0) return;
+    const patches = new Map<string, Partial<FavoriteStop>>();
+    changed.forEach((rect, stopCode) => patches.set(stopCode, { layout: rect }));
+    setFavoriteStops(updateFavoriteStops(patches));
+  }, [favoriteStops, canvasW]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -1028,204 +928,6 @@ export default function HomeScreen() {
     }, 900);
     return () => clearTimeout(t);
   }, []);
-
-  useEffect(() => () => {
-    if (edgeTimer.current) clearInterval(edgeTimer.current);
-  }, []);
-
-  /**
-   * Rebuild the row geometry the drag maths runs on, in both a JS copy (for the
-   * auto-scroll tick) and a shared copy (for the gesture worklets).
-   *
-   * Skipped while a card is up: an arrival landing and growing a row mid-drag
-   * would slide every drop target out from under the user's finger.
-   */
-  const syncGeometry = useCallback(() => {
-    if (activeRef.current >= 0) return;
-    const stops = stopsRef.current;
-    const known = [...heightsRef.current.values()];
-    const fallback =
-      known.length > 0 ? known.reduce((a, b) => a + b, 0) / known.length : FALLBACK_PITCH;
-    const pitches: number[] = [];
-    const tops: number[] = [];
-    let acc = 0;
-    for (const st of stops) {
-      const p = heightsRef.current.get(st.stopCode) ?? fallback;
-      pitches.push(p);
-      tops.push(acc);
-      acc += p;
-    }
-    pitchesRef.current = pitches;
-    topsRef.current = tops;
-    contentHRef.current = acc;
-    pitchesSV.value = pitches;
-    topsSV.value = tops;
-    contentHSV.value = acc;
-  }, [pitchesSV, topsSV, contentHSV]);
-
-  const onMeasure = useCallback(
-    (stopCode: string, height: number) => {
-      const prev = heightsRef.current.get(stopCode);
-      // Sub-pixel churn from a re-render is not a new measurement.
-      if (prev != null && Math.abs(prev - height) < 1) return;
-      heightsRef.current.set(stopCode, height);
-      syncGeometry();
-    },
-    [syncGeometry],
-  );
-
-  useEffect(() => {
-    stopsRef.current = favoriteStops;
-    syncGeometry();
-  }, [favoriteStops, syncGeometry]);
-
-  const onScroll = useCallback(
-    (e: NativeSyntheticEvent<NativeScrollEvent>) => {
-      const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-      scrollRef.current = contentOffset.y;
-      scrollY.value = contentOffset.y;
-      scrollMaxRef.current = Math.max(0, contentSize.height - layoutMeasurement.height);
-    },
-    [scrollY],
-  );
-
-  const onListLayout = useCallback((e: LayoutChangeEvent) => {
-    const { y, height } = e.nativeEvent.layout;
-    // The list's parent fills the screen from the top, so its own y doubles as
-    // the window coordinate the gesture's absoluteY is measured against.
-    viewportRef.current = { top: y, height };
-  }, []);
-
-  /**
-   * One tick of the edge auto-scroll. Runs on a timer rather than off the pan
-   * callback, because the case it exists for is a finger held still at the edge
-   * of the screen — which produces no pan updates at all.
-   */
-  const edgeTick = useCallback(() => {
-    const a = activeRef.current;
-    const vp = viewportRef.current;
-    const tops = topsRef.current;
-    if (a < 0 || a >= tops.length || vp.height <= 0) return;
-
-    const y = pointerY.value;
-    const top = vp.top + EDGE_BAND;
-    const bottom = vp.top + vp.height - EDGE_BAND;
-    let step = 0;
-    if (y < top) step = -EDGE_MAX_STEP * Math.min(1, (top - y) / EDGE_BAND);
-    else if (y > bottom) step = EDGE_MAX_STEP * Math.min(1, (y - bottom) / EDGE_BAND);
-    if (step === 0) return;
-
-    const next = Math.max(0, Math.min(scrollMaxRef.current, scrollRef.current + step));
-    if (Math.abs(next - scrollRef.current) < 0.5) return;
-    /* Written optimistically: the onScroll event confirming this offset lands a
-       frame later, and the card must not lag behind the content by that frame. */
-    scrollRef.current = next;
-    scrollY.value = next;
-    listRef.current?.scrollToOffset({ offset: next, animated: false });
-
-    /* The finger has not moved, so nothing else will recompute the carried
-       card: from its point of view the whole list just slid past it. */
-    const pitches = pitchesRef.current;
-    const carried = clampOffset(
-      a,
-      pan.value + (next - scrollAtRef.current),
-      tops,
-      pitches,
-      contentHRef.current,
-    );
-    offset.value = carried;
-    const k = slotFor(tops[a] + carried, a, tops, pitches);
-    if (k !== targetRef.current) {
-      targetRef.current = k;
-      target.value = k;
-      hapticSelection();
-    }
-  }, [pointerY, scrollY, offset, pan, target]);
-
-  const onLift = useCallback((index: number) => {
-    activeRef.current = index;
-    targetRef.current = index;
-    scrollAtRef.current = scrollRef.current;
-    hapticImpact();
-    setDragging(true);
-    if (!edgeTimer.current) edgeTimer.current = setInterval(edgeTick, EDGE_TICK_MS);
-  }, [edgeTick]);
-
-  const onTarget = useCallback((index: number) => {
-    targetRef.current = index;
-    hapticSelection();
-  }, []);
-
-  const onDrop = useCallback(
-    (from: number, to: number) => {
-      if (edgeTimer.current) {
-        clearInterval(edgeTimer.current);
-        edgeTimer.current = null;
-      }
-      activeRef.current = -1;
-      targetRef.current = -1;
-      setDragging(false);
-
-      const stops = stopsRef.current;
-      if (from !== to && from >= 0 && from < stops.length && to >= 0 && to < stops.length) {
-        const next = stops.slice();
-        const [moved] = next.splice(from, 1);
-        next.splice(to, 0, moved);
-        stopsRef.current = next;
-        setFavoriteStops(next);
-        // Outside the state updater: updaters must be pure, React may replay them.
-        persistStopOrder(next);
-        hapticImpact();
-      }
-
-      /* Cleared in the same JS frame as the reorder. Both the reordered rows
-         and the zeroed transforms then reach the UI thread on the same frame;
-         deferring either one shows the other alone for a frame, which reads as
-         the card snapping back before it settles. */
-      active.value = -1;
-      target.value = -1;
-      offset.value = 0;
-      pan.value = 0;
-
-      // Heights measured while the card was up were held back; take them now.
-      syncGeometry();
-    },
-    [active, target, offset, pan, syncGeometry],
-  );
-
-  /**
-   * Every field here is stable, and it has to be: this object is baked into the
-   * `CellRendererComponent` identity below, and a new component type there
-   * remounts every card — tearing down the live arrival queries they own.
-   */
-  const drag = useMemo<DragCtl>(
-    () => ({
-      active,
-      target,
-      offset,
-      pan,
-      lift,
-      pointerY,
-      scrollY,
-      scrollAt,
-      tops: topsSV,
-      pitches: pitchesSV,
-      contentH: contentHSV,
-      reduced: reducedSV,
-      reducedRef,
-      entrance: entranceRef,
-      onLift,
-      onTarget,
-      onDrop,
-      onMeasure,
-    }),
-    [
-      active, target, offset, pan, lift, pointerY, scrollY, scrollAt,
-      topsSV, pitchesSV, contentHSV, reducedSV, onLift, onTarget, onDrop, onMeasure,
-    ],
-  );
-
-  const StopCell = useMemo(() => createStopCell(drag), [drag]);
 
   /* ── Favorites ─────────────────────────────────────────────── */
 
@@ -1367,37 +1069,13 @@ export default function HomeScreen() {
     ]);
   }, []);
 
-  /* ── List plumbing ─────────────────────────────────────────── */
+  /* ── Canvas plumbing ───────────────────────────────────────── */
 
-  const listExtra = useMemo(
-    () => ({ primaryColor, focused, editing, count: favoriteStops.length }),
-    [primaryColor, focused, editing, favoriteStops.length],
-  );
-
-  const renderStop = useCallback(
-    ({ item, index }: ListRenderItemInfo<FavoriteStop>) => (
-      <FavoriteStopCard
-        stop={item}
-        primaryColor={primaryColor}
-        active={focused}
-        editing={editing}
-        onRemove={handleRemoveStop}
-        onMoveUp={moveStopUp}
-        onMoveDown={moveStopDown}
-        canMoveUp={index > 0}
-        canMoveDown={index < favoriteStops.length - 1}
-      />
-    ),
-    [primaryColor, focused, editing, handleRemoveStop, moveStopUp, moveStopDown, favoriteStops.length],
-  );
-
-  const listHeader = useMemo(
+  const stopsHeader = useMemo(
     () =>
       favoriteStops.length > 0 ? (
         <View style={s.sectionRow}>
           <Text style={s.sectionLabel}>Saved Stops</Text>
-          {/* The only advertisement a long press gets. */}
-          {favoriteStops.length > 1 && <Text style={s.sectionHint}>Hold a card to reorder</Text>}
         </View>
       ) : null,
     [favoriteStops.length],
@@ -1552,27 +1230,11 @@ export default function HomeScreen() {
           </View>
         </View>
       ) : (
-        <FlatList
-          ref={listRef}
-          data={favoriteStops}
-          keyExtractor={(item) => item.stopCode}
-          renderItem={renderStop}
-          extraData={listExtra}
-          CellRendererComponent={StopCell}
-          ListHeaderComponent={listHeader}
-          ListFooterComponent={listFooter}
+        <ScrollView
           contentContainerStyle={[s.list, { paddingBottom: insets.bottom + spacing.xl * 2 }]}
-          initialNumToRender={4}
-          windowSize={5}
-          // Cards contain nested ScrollViews (timetable grid, line filter),
-          // which Android blanks out when their cell is clipped.
-          removeClippedSubviews={false}
-          // A carried card — or badge — would otherwise fight the list for the
+          // A carried saved-line badge would otherwise fight the canvas for the
           // same finger.
-          scrollEnabled={!dragging && !linesDragging}
-          onScroll={onScroll}
-          scrollEventThrottle={16}
-          onLayout={onListLayout}
+          scrollEnabled={!linesDragging}
           refreshControl={
             <RefreshControl
               refreshing={refreshing}
@@ -1582,7 +1244,37 @@ export default function HomeScreen() {
             />
           }
           showsVerticalScrollIndicator={false}
-        />
+        >
+          {stopsHeader}
+          {/* Every card is absolutely positioned inside this box, so the box
+              has to be told how tall it is — nothing inside it contributes to
+              its height, and without that the saved lines below would sit on
+              top of the stops. `placed.cards` is built from `favoriteStops` in
+              the same pass, so the two are indexed alike by construction. */}
+          {favoriteStops.length > 0 && (
+            <View style={[s.canvas, { height: placed.height }]} onLayout={onCanvasLayout}>
+              {favoriteStops.map((stop, i) => (
+                <StopCard
+                  key={stop.stopCode}
+                  stop={stop}
+                  index={i}
+                  count={favoriteStops.length}
+                  card={placed.cards[i]}
+                  primaryColor={primaryColor}
+                  focused={focused}
+                  editing={editing}
+                  entrance={entranceRef.current}
+                  reduced={reduced}
+                  onMeasure={onMeasure}
+                  onRemove={handleRemoveStop}
+                  onMoveUp={moveStopUp}
+                  onMoveDown={moveStopDown}
+                />
+              ))}
+            </View>
+          )}
+          {listFooter}
+        </ScrollView>
       )}
 
       <SettingsModal

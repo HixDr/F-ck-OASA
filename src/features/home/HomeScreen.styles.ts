@@ -1,5 +1,6 @@
 import { StyleSheet } from 'react-native';
 import { colors, spacing, radius, font, HIT_SIZE } from '../../theme';
+import { CARD_GAP_DP } from './layout';
 
 /** Gap between saved-line badges, both ways.
  *
@@ -133,10 +134,23 @@ export const s = StyleSheet.create({
   list: {
     paddingHorizontal: spacing.lg,
   },
-  /** Wrapper the drag gesture transforms. `elevation` is animated from 0, and
-   *  is what keeps a lifted card painted over the cells it travels across —
-   *  sibling FlatList cells otherwise paint in list order. */
-  stopCell: {
+  /** The saved-stop canvas. Its children are all absolutely positioned, so it
+   *  contributes no height of its own and is given one explicitly.
+   *
+   *  The margin is the gap *after* the last card. The canvas's own height stops
+   *  at the lowest card's bottom edge, which is right — but in 1.2.4 every card
+   *  carried a trailing `marginBottom`, including the last, so without this the
+   *  saved lines below would ride 8dp higher than they used to. */
+  canvas: {
+    position: 'relative',
+    marginBottom: CARD_GAP_DP,
+  },
+  /** Wrapper for one card. `left`, `top`, `width` and (for a placed card)
+   *  `height` come from the canvas geometry; `elevation` is animated from 0 and
+   *  is what keeps a lifted card painted over the ones it travels across —
+   *  Android otherwise paints siblings in declaration order. */
+  stopCard: {
+    position: 'absolute',
     elevation: 0,
   },
   linesSection: {

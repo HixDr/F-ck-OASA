@@ -5,7 +5,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { File, Directory, Paths } from 'expo-file-system';
-import type { FavoriteLine, FavoriteStop, OasaLine, MapStamp, OasaDailySchedule, OasaStop, OasaBulkStop, OasaRoute, OasaArrival } from '../types';
+import type { FavoriteLine, FavoriteStop, StopLayout, OasaLine, MapStamp, OasaDailySchedule, OasaStop, OasaBulkStop, OasaRoute, OasaArrival } from '../types';
 import { getDailySchedule, isUsableSchedule } from './api';
 import { onAppActiveChange } from './appState';
 
@@ -330,6 +330,27 @@ export function updateFavoriteStop(stopCode: string, patch: Partial<FavoriteStop
   _favoriteStops = _favoriteStops.map((s) =>
     s.stopCode === stopCode ? { ...s, ...patch } : s,
   );
+  persistFavoriteStops();
+  return _favoriteStops;
+}
+
+/**
+ * The same, for several stops at once.
+ *
+ * Home's canvas needs this: the first time a card is picked up, every stop that
+ * had no saved placement is frozen at the box it is currently occupying, so one
+ * gesture writes the whole set. Calling `updateFavoriteStop` in a loop would
+ * rebuild the array once per stop and enqueue a flush each time, for a single
+ * user action.
+ */
+export function updateFavoriteStops(
+  patches: ReadonlyMap<string, Partial<FavoriteStop>>,
+): FavoriteStop[] {
+  if (patches.size === 0) return _favoriteStops;
+  _favoriteStops = _favoriteStops.map((s) => {
+    const patch = patches.get(s.stopCode);
+    return patch ? { ...s, ...patch } : s;
+  });
   persistFavoriteStops();
   return _favoriteStops;
 }
@@ -980,6 +1001,24 @@ function validFavorite(v: unknown): FavoriteLine | null {
   };
 }
 
+/**
+ * A card placement from an imported backup.
+ *
+ * Rejected rather than repaired when anything is off: a NaN or a negative width
+ * reaching the canvas is a card that cannot be seen, cannot be hit and cannot be
+ * dragged back, and dropping the field just makes the stop flow full-width like
+ * a newly saved one. `x + w <= 1` is the invariant the whole geometry rests on,
+ * so it is checked here rather than trusted.
+ */
+function validStopLayout(v: unknown): StopLayout | null {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as Record<string, unknown>;
+  if (!isNum(o.x) || !isNum(o.y) || !isNum(o.w) || !isNum(o.h)) return null;
+  if (o.x < 0 || o.y < 0 || o.w <= 0 || o.h < 0) return null;
+  if (o.x + o.w > 1.001) return null;
+  return { x: o.x, y: o.y, w: o.w, h: o.h };
+}
+
 function validFavoriteStop(v: unknown): FavoriteStop | null {
   if (!v || typeof v !== 'object') return null;
   const o = v as Record<string, unknown>;
@@ -991,6 +1030,7 @@ function validFavoriteStop(v: unknown): FavoriteStop | null {
     lat: o.lat,
     lng: o.lng,
     visibleLines: lines,
+    layout: validStopLayout(o.layout),
   };
 }
 
