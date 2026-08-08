@@ -24,7 +24,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import * as SplashScreen from 'expo-splash-screen';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { colors, font, spacing, radius, withAlpha, HIT_SIZE } from '../src/theme';
+import { colors, font, spacing, radius, withAlpha, onAccent, HIT_SIZE } from '../src/theme';
 import { UndoHost } from '../src/ui/UndoBar';
 import { MapWarmup } from '../src/ui/MapWarmup';
 import { initStorage, prefetchFavoriteSchedules } from '../src/services/storage';
@@ -76,6 +76,10 @@ SplashScreen.preventAutoHideAsync().catch(() => {});
 
 /** After this, tell the user something is wrong rather than spinning mutely. */
 const BOOT_SLOW_MS = 4_000;
+/** How long the offline banner stays up before retiring itself. Long enough to
+ *  read without hunting for it, short enough not to become furniture. */
+const OFFLINE_NOTICE_MS = 6_000;
+
 /** Hard cap. `initStorage()` rejecting is handled; `initStorage()` *hanging*
  *  used to leave the app on a spinner forever with no way out. */
 const BOOT_TIMEOUT_MS = 12_000;
@@ -108,6 +112,9 @@ function BootScreen({ slow }: { slow: boolean }) {
 interface BannerSpec {
   text: string;
   background: string;
+  /** Ink for `background`. Derived, so a lighter banner colour cannot end up
+   *  with the white text the bar used to hardcode. */
+  foreground: string;
   onPress?: () => void;
 }
 
@@ -158,7 +165,7 @@ function TopBanner({ banner }: { banner: BannerSpec | null }) {
         accessibilityRole={shown.onPress ? 'button' : 'alert'}
         accessibilityLiveRegion="polite"
       >
-        <Text style={ls.bannerText} numberOfLines={2}>{shown.text}</Text>
+        <Text style={[ls.bannerText, { color: shown.foreground }]} numberOfLines={2}>{shown.text}</Text>
       </TouchableOpacity>
     </Animated.View>
   );
@@ -284,8 +291,8 @@ const ls = StyleSheet.create({
     paddingHorizontal: spacing.md,
     alignItems: 'center',
   },
+  /** Colour comes from `shown.foreground`. */
   bannerText: {
-    color: '#FFF',
     fontSize: font.size.xs,
     fontWeight: '700',
     textAlign: 'center',
@@ -557,17 +564,54 @@ export default function RootLayout() {
   const offline = useSettledOffline();
   const dismissLocationNotice = useCallback(() => setLocationNotice(null), []);
 
+  /**
+   * The offline banner retires itself.
+   *
+   * It used to sit there for the whole outage. That is the one state a transit
+   * app is *most* likely to be in — a tunnel, a basement, the metro — so a
+   * permanent bar became wallpaper the user learns to ignore, on top of the
+   * screens that already say it where it matters: the Home header reads
+   * "Offline · times from 12m ago", and each card says whether its numbers are
+   * live. Announce it once, then get out of the way.
+   */
+  const [offlineNoticeDone, setOfflineNoticeDone] = useState(false);
+  const retireOfflineNotice = useCallback(() => setOfflineNoticeDone(true), []);
+
+  useEffect(() => {
+    // Re-arm on each genuine drop, so a second outage is announced again.
+    if (offline) setOfflineNoticeDone(false);
+  }, [offline]);
+
+  useEffect(() => {
+    if (!offline || offlineNoticeDone) return;
+    const id = setTimeout(retireOfflineNotice, OFFLINE_NOTICE_MS);
+    return () => clearTimeout(id);
+  }, [offline, offlineNoticeDone, retireOfflineNotice]);
+
   // Offline is the more urgent of the two, and stacking banners would put us
   // right back to shoving content around.
   const banner = useMemo<BannerSpec | null>(() => {
-    if (offline) {
-      return { text: 'You are offline — showing cached data', background: '#B91C1C' };
+    if (offline && !offlineNoticeDone) {
+      /* Amber, not the alarm red this used to be. Losing signal is an advisory,
+         not a failure — the app keeps working from cache, and a red bar across
+         the top says something has gone wrong. */
+      return {
+        text: "You're offline — showing your saved times",
+        background: colors.warning,
+        foreground: onAccent(colors.warning),
+        onPress: retireOfflineNotice,
+      };
     }
     if (locationNotice) {
-      return { text: `${locationNotice} Tap to dismiss.`, background: '#B45309', onPress: dismissLocationNotice };
+      return {
+        text: `${locationNotice} Tap to dismiss.`,
+        background: '#B45309',
+        foreground: onAccent('#B45309'),
+        onPress: dismissLocationNotice,
+      };
     }
     return null;
-  }, [offline, locationNotice, dismissLocationNotice]);
+  }, [offline, offlineNoticeDone, retireOfflineNotice, locationNotice, dismissLocationNotice]);
 
   if (!ready) return <BootScreen slow={bootSlow} />;
 

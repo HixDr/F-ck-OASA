@@ -13,6 +13,7 @@ import {
 } from '@tanstack/react-query';
 import * as api from '../services/api';
 import { getCachedLines, setCachedLines, getCachedSchedule, setCachedSchedule, getCachedStops, setCachedStops, getCachedRoutes, setCachedRoutes, getCachedRoutesForStop, setCachedRoutesForStop, getCachedArrivals, setCachedArrivals, getAllCachedStops, isOfflineDataDownloaded } from '../services/storage';
+import { isOnlineConfirmed } from '../services/network';
 import { haversineM } from '../utils/geo';
 import type { OasaArrival, OasaLine, OasaMLInfo, OasaDailySchedule, OasaNearbyStop, OasaRoute } from '../types';
 
@@ -55,7 +56,13 @@ export function useLines() {
  * report, with the Retry the user actually needs.
  */
 function retryUnlessOffline(failureCount: number): boolean {
-  return onlineManager.isOnline() && failureCount < 2;
+  /* `isOnlineConfirmed`, not `onlineManager.isOnline()`. The latter is
+     optimistic until NetInfo answers, so on a cold start with the radio
+     already off the first failure still looks online, a retry is scheduled,
+     and *that* retry parks once the truth arrives — the query then sits
+     `pending` with no error and no data, which the map reads as still
+     loading. Unknown connectivity counts as offline for retry purposes. */
+  return isOnlineConfirmed() && failureCount < 2;
 }
 
 const ROUTES_STALE_MS = 60 * 60 * 1000;
