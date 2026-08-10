@@ -748,6 +748,15 @@ const StopCard = React.memo(function StopCard({
             active={focused}
             editing={editing}
             tier={card.tier}
+            span={card.span}
+            /* Both halves of "one rule, not three sizes", handed over as
+               numbers the card does not have to derive: the span picks its bus
+               layout, and how many buses fit is arithmetic the geometry already
+               did in `busCapacity` when it worked out this card's floor. A card
+               that counted its own rows would be a second copy of that
+               arithmetic, and the two would disagree the first time either
+               changed. */
+            maxBuses={card.maxBuses}
             boxHeight={card.flowing ? null : card.height}
             onRemove={onRemove}
             onMoveUp={onMoveUp}

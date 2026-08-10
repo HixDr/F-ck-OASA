@@ -167,10 +167,15 @@ export const s = StyleSheet.create({
     borderWidth: 2,
     borderRadius: radius.lg,
   },
-  /** The corner target. Its 32dp is a compromise the tier boundaries force: at
-   *  `HIT_SIZE` it would cover a third of a 120dp card and sit on top of the
-   *  arrival figure, and it only exists while arrange mode is on, when nothing
-   *  underneath it is being read. */
+  /** The corner target. Its 32dp is a compromise the column width forces: at
+   *  `HIT_SIZE` it would cover more than a third of a one-column card and sit on
+   *  top of the arrival figure.
+   *
+   *  What it covers instead is the right-hand end of the card's controls footer,
+   *  and that is acceptable rather than accidental: it exists only while arrange
+   *  mode is on, and arrange mode is not when the user is reaching for a
+   *  timetable. Outside it the handle is not rendered at all, so the control
+   *  underneath is never actually obstructed. */
   resizeHandle: {
     position: 'absolute',
     right: 0,

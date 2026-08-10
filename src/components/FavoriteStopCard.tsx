@@ -11,27 +11,44 @@
  * from when it was *observed*. That is only honest as long as the card never
  * dresses it up as live — hence `isStale` and the footer.
  *
- * ## Tiers
+ * ## One rule, not three sizes
  *
- * The card no longer decides how big it is. Home's canvas hands it a `tier` and
- * the exact `boxHeight` it must fill; this file's job is to decide what fits.
- * `detailed` is this card unchanged and is the default, so a caller that passes
- * neither prop — and a stop the user has never arranged — gets what it always
- * got.
+ * The card no longer decides how big it is, or how much it holds. Home's canvas
+ * hands it four numbers and this file only renders them: `span` picks the bus
+ * layout, `maxBuses` says how many buses fit, `tier` is `span` said as a word,
+ * and `boxHeight` is the exact box to fill. Every one of them defaults to what
+ * this card was before the canvas existed — three columns, uncapped, detailed,
+ * self-measured — so a caller that passes none of them, and a stop the user has
+ * never arranged, renders unchanged.
  *
- * There are two tiers, and the reason there are two is that there are two bus
- * layouts. The tier comes from the card's column *span* rather than from a
- * measured width: three columns is the detailed row below, one or two is the
- * compact stack, and a width between two columns is not something the canvas can
- * hand out. The middle tier of the free-width design existed only to describe
- * such a width, so it went with it.
+ * There are two bus layouts, which is why there are two tiers. Three columns is
+ * the detailed row from 1.2.4, badge and destination and figure and bell across
+ * 364dp. One and two columns are the *same* compact bus, badge stacked over
+ * figure; the only difference between them is that two columns fits two of it
+ * across. A width between two columns is not something a three-column grid can
+ * hand out, so the middle tier of the free-width design went with the fractions
+ * that produced it.
  *
  * Content is dropped around the arrival figure rather than the figure being
- * shrunk: `compact` keeps the badge and the number and drops the destination,
- * the timetable pill and the bell. The one place the figure itself is shrunk is
- * called out where it happens.
+ * shrunk: the compact bus keeps the badge and the number and drops the
+ * destination, the timetable pill and the per-line bell. The one place the figure
+ * itself is shrunk is called out where it happens.
  *
- * Nothing above this line varies by tier. The polling, the decay, the alert
+ * ## The controls are not part of that
+ *
+ * Schedule, alarm and filter sit in a footer row at **every** span. They used to
+ * be scattered — the schedule inside a row that only existed at three columns,
+ * the filter in the header, both of them opening panels *inside* the card. So a
+ * card the user had made small had no schedule at all, and a card that had one
+ * grew when it was opened, which a fixed-width tile cannot absorb and which is
+ * why the bottom-most row's timetable used to render off-screen.
+ *
+ * The footer is a fixed place, and both panels are now sheets
+ * (`StopControlsSheet`), which are size-independent. A control that is
+ * unavailable is dimmed and stays where it is, because a footer whose buttons
+ * move is a footer the user has to re-read.
+ *
+ * Nothing above the layout varies by tier. The polling, the decay, the alert
  * switching and the visibility filter are the card's contract with the rest of
  * the app, not its appearance, and a tier that quietly skipped one of them
  * would be a second, subtly different stop card.
@@ -80,7 +97,7 @@ import {
 } from '../services/notifications';
 import { hapticSuccess, hapticError } from '../services/haptics';
 import { parseSchedule, athensNowMin, type LineSchedule } from '../utils/scheduleUtils';
-import ScheduleGrid from './ScheduleGrid';
+import StopControlsSheet, { type StopSheetMode } from './StopControlsSheet';
 import AlertPickerModal from './AlertPickerModal';
 import { s } from './FavoriteStopCard.styles';
 /* Type-only, so this does not tie a presentational component to the canvas's
@@ -124,10 +141,28 @@ interface Props {
    */
   tier?: CardTier;
   /**
+   * Columns this card covers, 1-3.
+   *
+   * Decides how many compact buses sit across a row; `tier` already covers which
+   * layout, and the two are the same fact — one and two columns are `compact`,
+   * three is `detailed`. Defaults to 3, so a caller that knows nothing about the
+   * canvas gets the full-width card.
+   */
+  span?: number;
+  /**
+   * How many buses fit in the box the canvas gave this card, or null while the
+   * card is still allowed to show all of them.
+   *
+   * The null case is not a fallback, it is the migration: a stop the user has
+   * never arranged sizes itself to its content, so an install with no saved
+   * layout shows every line of every stop and looks like 1.2.4.
+   */
+  maxBuses?: number | null;
+  /**
    * The exact height in px the canvas has given this card, or null/undefined
    * while the card is still allowed to size itself to its content.
    *
-   * The second case is not a fallback, it is the migration: an install with no
+   * The second case is the other half of the same migration: an install with no
    * saved arrangement has no heights, so every card flows and the screen is
    * byte-for-byte the single column it was.
    */
@@ -168,6 +203,34 @@ interface DecayedLine {
   minutes: number | null;
 }
 
+/**
+ * Indices into `lines`, most imminent bus first.
+ *
+ * The card's ranking, in one place, because two things need it and they must
+ * agree: which buses survive a cap, and which line the footer's schedule button
+ * opens. A stop that truncated to one bus and then offered a *different* bus's
+ * timetable would be describing two buses at once with nothing on screen to say
+ * so.
+ *
+ * A line with no live estimate sorts last rather than first — a null is "we do
+ * not know", not "very soon" — and ties, including the case where nothing has an
+ * estimate at all, fall back to the stop's own order. The index tiebreak is
+ * explicit rather than left to `Array.sort` being stable: it is, everywhere this
+ * runs, but "the bus the card shows" is not a thing to settle by engine
+ * behaviour.
+ */
+function byArrival(lines: readonly DecayedLine[]): number[] {
+  const order = lines.map((_, i) => i);
+  order.sort((a, b) => {
+    const ma = lines[a].minutes;
+    const mb = lines[b].minutes;
+    if (ma == null) return mb == null ? a - b : 1;
+    if (mb == null) return -1;
+    return ma === mb ? a - b : ma - mb;
+  });
+  return order;
+}
+
 /* ── Cold start ──────────────────────────────────────────────── */
 
 /**
@@ -184,34 +247,47 @@ interface DecayedLine {
 const LoadingRows = React.memo(function LoadingRows({
   stopName,
   tier,
+  span,
+  count,
 }: {
   stopName: string;
   tier: CardTier;
+  span: number;
+  count: number;
 }) {
-  /* The placeholder follows the tier for the reason it exists at all. A grey
-     description bar at `standard`, or three grey rows in a compact card that
-     will resolve to one stacked figure, is the jump this component was written
-     to remove, reintroduced one tier down. */
+  /* The placeholder follows the tier, the span *and* the count, for the reason
+     the component exists at all: it is standing in for a specific layout, and a
+     grey shape that is replaced by a different number of real shapes is the jump
+     this was written to remove, reintroduced one size down. Three grey rows in a
+     box the canvas sized for one bus would scroll on the first frame and then
+     not on the second. */
   if (tier === 'compact') {
+    const tile = span === 2 ? s.busTileHalf : s.busTile;
     return (
-      <View style={s.compactBody} accessible accessibilityLabel={`Loading arrivals for ${stopName}`}>
-        {/* The badge's own stacked-layout margin, so the grey pair sits at the
-            spacing the real pair will. */}
-        <SkeletonBox width={46} height={22} radius={radius.sm} style={s.compactBadge} />
-        <SkeletonBox width={44} height={26} radius={radius.sm} />
+      <View style={s.busGrid} accessible accessibilityLabel={`Loading arrivals for ${stopName}`}>
+        {Array.from({ length: count }, (_, i) => (
+          <View key={i} style={tile}>
+            {/* The badge's own stacked-layout margin, so the grey pair sits at
+                the spacing the real pair will. */}
+            <SkeletonBox width={46} height={22} radius={radius.sm} style={s.compactBadge} />
+            <SkeletonBox width={44} height={26} radius={radius.sm} />
+          </View>
+        ))}
       </View>
     );
   }
   return (
     <View accessible accessibilityLabel={`Loading arrivals for ${stopName}`}>
-      {SKELETON_WIDTHS.map((w, i) => (
+      {Array.from({ length: count }, (_, i) => (
         <View key={i} style={s.skeletonRow}>
           <SkeletonBox width={46} height={22} radius={radius.sm} />
           {/* Percentage of the flexible middle, not of the row: measured
               against the row it would overflow once the badge, the number
-              block and three gaps are subtracted from a 360dp screen. */}
+              block and three gaps are subtracted from a 360dp screen. The three
+              widths cycle rather than run out, so a tall card gets varied rows
+              instead of identical ones. */}
           <View style={s.skeletonGrow}>
-            <SkeletonBox width={w} height={12} />
+            <SkeletonBox width={SKELETON_WIDTHS[i % SKELETON_WIDTHS.length]} height={12} />
           </View>
           <SkeletonBox width={40} height={26} radius={radius.sm} />
         </View>
@@ -233,11 +309,10 @@ interface RowProps {
   nextDeparture: string | null;
   nextIsTomorrow: boolean;
   hasTimetable: boolean;
-  scheduleOpen: boolean;
   alertActive: boolean;
   primaryColor: string;
   onPress: (lineCode: string) => void;
-  onToggleSchedule: (lineCode: string) => void;
+  onOpenSchedule: (lineCode: string) => void;
   onToggleAlert: (lineCode: string) => void;
 }
 
@@ -251,11 +326,10 @@ const LineRow = React.memo(function LineRow({
   nextDeparture,
   nextIsTomorrow,
   hasTimetable,
-  scheduleOpen,
   alertActive,
   primaryColor,
   onPress,
-  onToggleSchedule,
+  onOpenSchedule,
   onToggleAlert,
 }: RowProps) {
   const arrivalText =
@@ -278,24 +352,26 @@ const LineRow = React.memo(function LineRow({
 
         <View style={s.lineMain}>
           <Text style={s.lineDescr} numberOfLines={1}>{label}</Text>
+          {/* The pill survived the schedule's move into a sheet because it was
+              never only a control: it prints the next scheduled departure, which
+              is the one piece of information a stop with no live estimate still
+              has. What it lost is the expanded state — there is no longer
+              anything of it on the card to expand, so there is no `expanded` to
+              announce and no accent state to paint. */}
           {hasTimetable && (
             <Pressable
               style={s.schedPill}
-              onPress={() => onToggleSchedule(lineCode)}
+              onPress={() => onOpenSchedule(lineCode)}
               accessibilityRole="button"
-              accessibilityState={{ expanded: scheduleOpen }}
               accessibilityLabel={
                 nextDeparture
                   ? `Timetable, next departure ${nextDeparture}${nextIsTomorrow ? ' tomorrow' : ''}`
                   : 'Timetable'
               }
+              accessibilityHint="Opens the full timetable for this line"
             >
-              <Ionicons
-                name={scheduleOpen ? 'time' : 'time-outline'}
-                size={12}
-                color={scheduleOpen ? primaryColor : colors.textMuted}
-              />
-              <Text style={[s.schedPillText, scheduleOpen && { color: primaryColor }]}>
+              <Ionicons name="time-outline" size={12} color={colors.textMuted} />
+              <Text style={s.schedPillText}>
                 {nextDeparture
                   ? nextIsTomorrow ? `${nextDeparture} tomorrow` : nextDeparture
                   : 'Timetable'}
@@ -342,10 +418,10 @@ const LineRow = React.memo(function LineRow({
   );
 });
 
-/* ── The compact tier's one arrival ──────────────────────────── */
+/* ── The compact tier's bus ──────────────────────────────────── */
 
 /**
- * A stacked badge and figure — everything a ~88dp card has room to say.
+ * A stacked badge and figure — everything a ~98dp card has room to say.
  *
  * Its own component rather than a branch inside `LineRow`, because it is not a
  * narrower row: the badge moves from beside the number to above it, the
@@ -353,9 +429,14 @@ const LineRow = React.memo(function LineRow({
  * to reserve against, and there is no description, pill or bell to hide. A
  * shared component would have been two layouts sharing a name.
  *
- * It is a button for the same reason a row is: tapping the stop's next bus
- * opens that line's map, and losing that at the smallest size would make the
- * compact card the only place in the app where the arrival is not a way in.
+ * One component for both compact spans, and that is the design rather than a
+ * saving: two columns is *this* bus twice across, not a third layout. `half` is
+ * therefore the only thing it knows about the span, and all it does with it is
+ * pick which of two registered styles it occupies.
+ *
+ * It is a button for the same reason a row is: tapping the bus opens that line's
+ * map, and losing that at the smallest size would make the compact card the only
+ * place in the app where the arrival is not a way in.
  */
 interface CompactProps {
   lineId: string;
@@ -369,6 +450,10 @@ interface CompactProps {
   stale: boolean;
   nextDeparture: string | null;
   nextIsTomorrow: boolean;
+  /** Two of these across, i.e. a two-column card. A boolean and not a style,
+   *  because a composed style array would be a new identity on every arrival
+   *  poll and would defeat this component's `memo`. */
+  half: boolean;
   primaryColor: string;
   onPress: (lineCode: string) => void;
 }
@@ -382,6 +467,7 @@ const CompactArrival = React.memo(function CompactArrival({
   stale,
   nextDeparture,
   nextIsTomorrow,
+  half,
   primaryColor,
   onPress,
 }: CompactProps) {
@@ -389,7 +475,7 @@ const CompactArrival = React.memo(function CompactArrival({
 
   return (
     <Pressable
-      style={s.compactBody}
+      style={half ? s.busTileHalf : s.busTile}
       onPress={() => onPress(lineCode)}
       accessibilityRole="button"
       accessibilityLabel={`Line ${lineId}, ${label}, ${spoken}${stale ? ', data may be out of date' : ''}`}
@@ -426,6 +512,12 @@ function FavoriteStopCard({
   active = true,
   editing = false,
   tier = 'detailed',
+  /* Three, matching `tier`'s default, because the two are one fact said twice.
+     Written as a literal rather than imported as `COLS`: the type-only import
+     below is what keeps this presentational component from depending on the
+     canvas's geometry at runtime, and a default is not worth spending that on. */
+  span = 3,
+  maxBuses = null,
   boxHeight = null,
   onRemove,
   onMoveUp,
@@ -475,16 +567,22 @@ function FavoriteStopCard({
 
   const [labels, setLabels] = useState<ReadonlyMap<string, string>>(EMPTY_LABELS);
   const [rawSchedules, setRawSchedules] = useState<ReadonlyMap<string, RawSchedule>>(EMPTY_RAW_SCHEDULES);
-  const [filtering, setFiltering] = useState(false);
   const [visibleSet, setVisibleSet] = useState<Set<string> | null>(() =>
     stop.visibleLines ? new Set(stop.visibleLines) : null,
   );
-  const [expandedScheduleLine, setExpandedScheduleLine] = useState<string | null>(null);
 
-  // Home's edit mode owns the header while it is on, so the per-card line
-  // filter cannot stay open underneath it.
+  /* Which sheet is up, and — for the schedule — on which line. Two pieces of
+     state rather than a tagged union: `sheetLine` outlives the sheet closing,
+     which costs nothing and means reopening the schedule from the footer does
+     not have to re-derive a line the user already chose. */
+  const [sheet, setSheet] = useState<StopSheetMode | null>(null);
+  const [sheetLine, setSheetLine] = useState<string | null>(null);
+
+  // Home's edit mode owns the header while it is on, and a sheet is over the
+  // whole screen — including that header — so it cannot be left up underneath
+  // it. Same rule the inline filter panel had, now that the panel is a sheet.
   useEffect(() => {
-    if (editing) setFiltering(false);
+    if (editing) setSheet(null);
   }, [editing]);
 
   const [arrivalAlert, setArrivalAlert] = useState<AlertConfig | null>(null);
@@ -596,11 +694,11 @@ function FavoriteStopCard({
   /**
    * Every visible line with the age of the data already taken off its estimate.
    *
-   * This used to be two lines inside the row loop. It is hoisted because the
-   * compact tier has to choose the soonest of these, and a card that decided
-   * which bus was next by a second, hand-copied version of the rule below would
-   * eventually disagree with the rows it replaces — the same stop showing a
-   * different bus at two widths, with nothing in the UI to explain it.
+   * This used to be two lines inside the row loop. It is hoisted because the cap
+   * below has to rank these, and a card that decided which bus was next by a
+   * second, hand-copied version of the rule below would eventually disagree with
+   * the rows it replaces — the same stop showing a different bus at two widths,
+   * with nothing in the UI to explain it.
    */
   const decayed = useMemo<DecayedLine[] | null>(() => {
     if (!displayLines) return null;
@@ -618,25 +716,71 @@ function FavoriteStopCard({
   }, [displayLines, decayMin]);
 
   /**
-   * The one arrival a compact card has room for.
+   * The buses this card actually shows, and the order it shows them in. Those
+   * are two different questions and they get two different answers.
    *
-   * Falls back to the first visible line when nothing has a live estimate, so
-   * the card still says *which* bus it is talking about and shows an em dash
-   * for it — a compact card that blanked itself the moment its estimates
-   * expired would be indistinguishable from one that had failed to load.
+   * **Which** is by arrival: a card with room for two out of five buses must drop
+   * the three least imminent, not the last three in the list, or the cap would be
+   * deciding what the user sees by an accident of how OASA orders routes.
+   *
+   * **In what order** is the stop's own. Rendering in arrival order instead would
+   * reshuffle the rows every fifteen seconds as the estimates move past each
+   * other, and a card whose rows swap places while you are reading it is worse
+   * than one that shows a bus you did not need — you cannot re-find the row you
+   * were looking at, and the one you tap is not the one you aimed for. So the cap
+   * picks a *set* and the set is drawn in place.
+   *
+   * When the cap admits everything, both questions have the same answer and this
+   * returns `decayed` untouched — which is what makes an unarranged, uncapped
+   * card byte-for-byte 1.2.4.
+   *
+   * A one-bus card is the degenerate case of the same rule, and it inherits the
+   * fallback that used to be written out here: with nothing ranked above it, a
+   * stop where no line has a live estimate keeps its first line and shows an em
+   * dash for it, because a compact card that blanked itself the moment its
+   * estimates expired would be indistinguishable from one that failed to load.
    */
-  const soonest = useMemo<DecayedLine | null>(() => {
-    if (!decayed || decayed.length === 0) return null;
-    let best: DecayedLine | null = null;
-    let bestMin = Number.POSITIVE_INFINITY;
-    for (const d of decayed) {
-      if (d.minutes != null && d.minutes < bestMin) {
-        bestMin = d.minutes;
-        best = d;
-      }
+  const shown = useMemo<DecayedLine[] | null>(() => {
+    if (!decayed) return null;
+    if (maxBuses == null || decayed.length <= maxBuses) return decayed;
+    const keep = byArrival(decayed).slice(0, maxBuses);
+    // Back into the stop's own order, which is what `decayed`'s indices are.
+    keep.sort((a, b) => a - b);
+    return keep.map((i) => decayed[i]);
+  }, [decayed, maxBuses]);
+
+  /**
+   * The line the footer's schedule button opens, or null if there is nothing to
+   * open.
+   *
+   * The most imminent bus that *has* a timetable, rather than simply the most
+   * imminent one: a fixed control that opened an empty sheet would be worse than
+   * one that is visibly dead, and "no visible line has a timetable" is exactly
+   * the condition that dims it.
+   *
+   * Ranked over every visible line rather than only the ones on screen, because
+   * the button is about the stop and not about the rows the card had room for.
+   */
+  const scheduleLine = useMemo<string | null>(() => {
+    if (!decayed) return null;
+    for (const i of byArrival(decayed)) {
+      const sched = schedules.get(decayed[i].line.lineCode);
+      if (sched && sched.times.length > 0) return decayed[i].line.lineCode;
     }
-    return best ?? decayed[0];
-  }, [decayed]);
+    return null;
+  }, [decayed, schedules]);
+
+  /** Every line the stop serves, in card order, flattened for the sheet — which
+   *  needs all of them and not just the visible ones, since choosing what is
+   *  visible is one of the things it is for. */
+  const sheetLines = useMemo(
+    () => (allLineGroups ?? []).map((l) => ({
+      lineCode: l.lineCode,
+      lineId: l.lineId,
+      label: labels.get(l.lineCode) ?? l.lineDescrEng,
+    })),
+    [allLineGroups, labels],
+  );
 
   /* ── Handlers ──────────────────────────────────────────────── */
 
@@ -654,9 +798,19 @@ function FavoriteStopCard({
     });
   }, [linesMap, router]);
 
-  const toggleSchedule = useCallback((lineCode: string) => {
-    setExpandedScheduleLine((prev) => (prev === lineCode ? null : lineCode));
+  /* One way in to every sheet, so the mode and the line it applies to are always
+     set together. `openSchedule` exists because a row's pill hands over only a
+     line code and `LineRow` is memoized — it needs one stable callback, not a
+     closure rebuilt per row. */
+  const openSheet = useCallback((mode: StopSheetMode, line: string | null = null) => {
+    setSheetLine(line);
+    setSheet(mode);
   }, []);
+  const openSchedule = useCallback(
+    (lineCode: string) => openSheet('schedule', lineCode),
+    [openSheet],
+  );
+  const closeSheet = useCallback(() => setSheet(null), []);
 
   const alertHere = arrivalAlert?.stopCode === stop.stopCode ? arrivalAlert : null;
 
@@ -676,6 +830,43 @@ function FavoriteStopCard({
     setPickerError(null);
     setPickerLine(lineCode);
   }, [alertHere]);
+
+  /**
+   * The footer's alarm button, which is one control standing in for a column of
+   * per-line bells that only three columns has room for.
+   *
+   * It has to answer for the whole stop, so it takes the shortest true path:
+   * something armed *here* → stop it, whichever of the stop's lines it is on,
+   * because the button is the stop's and only one watch exists app-wide anyway.
+   * Exactly one line visible → there is no choice to offer, so go straight to the
+   * threshold picker the bell would have opened. Otherwise the choice is real and
+   * the sheet is where it is made.
+   *
+   * The middle case is the one worth keeping: at one column a stop the user has
+   * filtered down to a single line is the common shape, and making them pick that
+   * line out of a sheet of one would be a tap that answers nothing.
+   */
+  const handleAlarmPress = useCallback(() => {
+    if (alertHere) {
+      stopAlertWatch();
+      return;
+    }
+    const only = displayLines?.length === 1 ? displayLines[0].lineCode : null;
+    if (only) {
+      handleAlertToggle(only);
+      return;
+    }
+    openSheet('alarm');
+  }, [alertHere, displayLines, handleAlertToggle, openSheet]);
+
+  /* From the sheet's own list. The sheet closes *first*: the threshold picker is
+     a modal, and leaving a sheet under it would put two dismissable layers over
+     the card with the lower one still holding the list the user just finished
+     with. */
+  const handlePickAlarm = useCallback((lineCode: string) => {
+    setSheet(null);
+    handleAlertToggle(lineCode);
+  }, [handleAlertToggle]);
 
   const handleAlertConfirm = useCallback(async () => {
     const line = groupsRef.current.find((l) => l.lineCode === pickerLine);
@@ -747,20 +938,23 @@ function FavoriteStopCard({
   const hasLines = !!allLineGroups && allLineGroups.length > 0;
   const failed = (linesError || routesQuery.isError) && !hasLines;
   const loading = !failed && !allLineGroups && (linesLoading || routesQuery.isLoading);
-  /* "Is the line filter on screen", which is not the same as `filtering`: the
-     only control that closes the list is a header button, and `compact` has no
-     room for it. A card resized while the list was open would otherwise strand
-     the user in a list they cannot dismiss with the arrivals hidden behind it.
-     Deriving it also means the body no longer disappears in the one state where
-     `filtering` was true and the lines had gone — the list needs `hasLines` and
-     the body did not, so that combination used to render an empty card. */
-  const filterOpen = filtering && hasLines && !compact;
+  /* Two buses across, i.e. a two-column card. The only thing `span` decides. */
+  const pair = span === 2;
+  /* How many grey shapes the cold start draws. The cap, because that is how many
+     real ones will replace them; three when there is no cap, which is what an
+     unarranged card has always shown and is a fair guess at a stop's line count.
+     Getting this wrong is not cosmetic in a fixed box: too many and the
+     placeholder scrolls on the first frame and then does not. */
+  const placeholderCount = maxBuses ?? SKELETON_WIDTHS.length;
   /* An armed alert whose line the filter hides would otherwise be unreachable —
-     at `detailed`. Below it this banner goes the way of the bell it belongs to,
-     and for the same reason: it is a row of chrome competing with the number
-     the card exists to show. Nothing is stranded, because only one alert watch
-     exists app-wide and `app/_layout.tsx` renders a pill with a "Stop alert"
-     button on every screen for as long as `subscribeAlertConfig` reports one. */
+     at `detailed`. Below it this banner is left out because the geometry does not
+     count it: a compact card's box is exactly chrome, header, its buses and the
+     controls row, so a banner here would not be added to the card, it would be
+     taken out of a bus. Nothing is stranded. The footer's alarm button stops an
+     alert armed at this stop at every span, whether or not the filter is hiding
+     the line it is on; and only one watch exists app-wide, so `app/_layout.tsx`
+     renders a pill with a "Stop alert" button on every screen for as long as
+     `subscribeAlertConfig` reports one. */
   const orphanAlert =
     tier === 'detailed'
     && alertHere
@@ -777,12 +971,20 @@ function FavoriteStopCard({
    * No height at all is the other half of the migration. A stop the user has
    * never arranged still measures itself, so an install with no saved layout
    * renders the column it always did.
+   *
+   * `cardCompact` narrows the *side* padding only, and it is here rather than in
+   * `card` because it is only worth it where width is scarce: it is 10dp of a
+   * 116dp column handed back to the three footer controls, and 10dp of 364 that
+   * three columns has no use for.
    */
   const cardStyle = useMemo(
-    () => (boxHeight == null
-      ? s.card
-      : [s.card, { height: boxHeight, overflow: 'hidden' as const }]),
-    [boxHeight],
+    () => {
+      const base = compact ? [s.card, s.cardCompact] : [s.card];
+      return boxHeight == null
+        ? base
+        : [...base, { height: boxHeight, overflow: 'hidden' as const }];
+    },
+    [boxHeight, compact],
   );
 
   /* The arrival region, built as a value because the two placements it can have
@@ -806,47 +1008,30 @@ function FavoriteStopCard({
       </Pressable>
     </View>
   ) : loading ? (
-    <LoadingRows stopName={stop.stopName} tier={tier} />
-  ) : decayed && decayed.length > 0 ? (
-    decayed.map(({ line, minutes }) => {
+    <LoadingRows stopName={stop.stopName} tier={tier} span={span} count={placeholderCount} />
+  ) : shown && shown.length > 0 ? (
+    shown.map(({ line, minutes }) => {
       const sched = schedules.get(line.lineCode);
       return (
-        <React.Fragment key={line.lineCode}>
-          <LineRow
-            lineId={line.lineId}
-            lineCode={line.lineCode}
-            label={labels.get(line.lineCode) ?? line.lineDescrEng}
-            minutes={minutes}
-            // Recomputed from the decayed value: a 4-minute amber that
-            // has since aged into "1 minute" must read as urgent.
-            color={minutes != null ? getArrivalColor(minutes) : line.color}
-            stale={isStale && minutes != null}
-            nextDeparture={sched?.nextDeparture ?? null}
-            nextIsTomorrow={!!sched?.nextIsTomorrow}
-            hasTimetable={!!sched && sched.times.length > 0}
-            scheduleOpen={expandedScheduleLine === line.lineCode}
-            alertActive={!!alertHere && alertHere.lineId === line.lineId}
-            primaryColor={primaryColor}
-            onPress={handleLinePress}
-            onToggleSchedule={toggleSchedule}
-            onToggleAlert={handleAlertToggle}
-          />
-          {/* Gated on the tier and not only on the state: the pill that opens
-              this grid exists at `detailed` alone, so a card narrowed while a
-              timetable was open would otherwise carry a panel with nothing left
-              on screen to close it. Resizing back reopens it, which is the
-              behaviour the state was already describing. */}
-          {tier === 'detailed' && expandedScheduleLine === line.lineCode && sched && (
-            <View style={s.schedExpandContainer}>
-              <ScheduleGrid
-                times={sched.times}
-                nextDeparture={sched.nextDeparture}
-                accentColor={primaryColor}
-                maxHeight={120}
-              />
-            </View>
-          )}
-        </React.Fragment>
+        <LineRow
+          key={line.lineCode}
+          lineId={line.lineId}
+          lineCode={line.lineCode}
+          label={labels.get(line.lineCode) ?? line.lineDescrEng}
+          minutes={minutes}
+          // Recomputed from the decayed value: a 4-minute amber that
+          // has since aged into "1 minute" must read as urgent.
+          color={minutes != null ? getArrivalColor(minutes) : line.color}
+          stale={isStale && minutes != null}
+          nextDeparture={sched?.nextDeparture ?? null}
+          nextIsTomorrow={!!sched?.nextIsTomorrow}
+          hasTimetable={!!sched && sched.times.length > 0}
+          alertActive={!!alertHere && alertHere.lineId === line.lineId}
+          primaryColor={primaryColor}
+          onPress={handleLinePress}
+          onOpenSchedule={openSchedule}
+          onToggleAlert={handleAlertToggle}
+        />
       );
     })
   ) : hasLines ? (
@@ -876,30 +1061,49 @@ function FavoriteStopCard({
       <Text style={s.compactNote}>{isOnline ? 'Tap to retry' : 'Offline'}</Text>
     </Pressable>
   ) : loading ? (
-    <LoadingRows stopName={stop.stopName} tier={tier} />
-  ) : soonest ? (
-    <CompactArrival
-      lineId={soonest.line.lineId}
-      lineCode={soonest.line.lineCode}
-      label={labels.get(soonest.line.lineCode) ?? soonest.line.lineDescrEng}
-      minutes={soonest.minutes}
-      color={soonest.minutes != null ? getArrivalColor(soonest.minutes) : soonest.line.color}
-      stale={isStale && soonest.minutes != null}
-      nextDeparture={schedules.get(soonest.line.lineCode)?.nextDeparture ?? null}
-      nextIsTomorrow={!!schedules.get(soonest.line.lineCode)?.nextIsTomorrow}
-      primaryColor={primaryColor}
-      onPress={handleLinePress}
-    />
+    <LoadingRows stopName={stop.stopName} tier={tier} span={span} count={placeholderCount} />
+  ) : shown && shown.length > 0 ? (
+    /* One tile per bus, wrapping. The container is the only place the two compact
+       spans differ, and even there it is the tiles that carry the width — a grid
+       that knew about spans would be the measured-breakpoint layout this rework
+       replaced, wearing a new name. */
+    <View style={s.busGrid}>
+      {shown.map(({ line, minutes }) => {
+        const sched = schedules.get(line.lineCode);
+        return (
+          <CompactArrival
+            key={line.lineCode}
+            lineId={line.lineId}
+            lineCode={line.lineCode}
+            label={labels.get(line.lineCode) ?? line.lineDescrEng}
+            minutes={minutes}
+            // The row's rule, for the row's reason: an amber that has aged into
+            // one minute must read as urgent.
+            color={minutes != null ? getArrivalColor(minutes) : line.color}
+            stale={isStale && minutes != null}
+            nextDeparture={sched?.nextDeparture ?? null}
+            nextIsTomorrow={!!sched?.nextIsTomorrow}
+            half={pair}
+            primaryColor={primaryColor}
+            onPress={handleLinePress}
+          />
+        );
+      })}
+    </View>
   ) : (
     <View style={s.compactBody}>
-      {/* "Tap the filter to choose lines" is the wider card's wording and would
-          be a lie here, where that button does not exist. */}
+      {/* The wider card's "Tap ⚙ to choose lines" is a sentence, and this is not
+          a card with room for one — but the button it points at is now in the
+          footer at every span, so the instruction is true here and belongs in
+          the label, where it costs no width. It used to say "make this card
+          wider", which was the honest answer while the filter lived in a header
+          that only three columns had room for. */}
       <Text
         style={s.compactNote}
         numberOfLines={2}
         accessibilityLabel={
           hasLines
-            ? 'No lines are shown. Make this card wider to choose which lines to show.'
+            ? 'No lines are shown. Use the filter button below to choose which lines to show.'
             : 'No lines serve this stop.'
         }
       >
@@ -908,11 +1112,90 @@ function FavoriteStopCard({
     </View>
   );
 
+  /**
+   * Schedule, alarm and filter. The point of the rework: one row, in the same
+   * place, at every span.
+   *
+   * Built as a value because it is the same three controls either way — only the
+   * row's height and the icons' size change — and because it renders below both
+   * body branches, which are otherwise structurally different.
+   *
+   * It renders in *every* state, including `failed`, and unavailable controls are
+   * dimmed rather than dropped. The height is already spent: the canvas subtracted
+   * a controls row when it decided how many buses this card gets, so hiding the
+   * row would not give the card anything, it would only move the buttons — and a
+   * footer whose contents move between a stop that has timetables and one that
+   * does not is a footer that has to be re-read every time.
+   */
+  const iconSize = compact ? 18 : 20;
+  const controls = (
+    <View style={[s.controls, !compact && s.controlsWide]}>
+      <Pressable
+        style={s.controlBtn}
+        disabled={!scheduleLine}
+        onPress={() => openSheet('schedule', scheduleLine)}
+        accessibilityRole="button"
+        accessibilityState={{ disabled: !scheduleLine }}
+        accessibilityLabel="Timetable"
+        accessibilityHint={
+          scheduleLine ? 'Opens the timetable for this stop' : 'No timetable for the lines shown'
+        }
+      >
+        <Ionicons
+          name="time-outline"
+          size={iconSize}
+          color={scheduleLine ? colors.textMuted : colors.border}
+        />
+      </Pressable>
+
+      {/* A switch rather than a button, because from the user's side that is what
+          it is: the stop's alert is on or off, and the line-and-threshold
+          question the off→on direction asks is a step on the way rather than a
+          different control. `disabled` spares a sheet that could only offer an
+          empty list — but never while an alert is armed, or the one control that
+          can stop it would go dead exactly when it is needed. */}
+      <Pressable
+        style={s.controlBtn}
+        disabled={!hasLines && !alertHere}
+        onPress={handleAlarmPress}
+        accessibilityRole="switch"
+        accessibilityState={{ checked: !!alertHere, disabled: !hasLines && !alertHere }}
+        accessibilityLabel={
+          alertHere ? `Arrival alert on for line ${alertHere.lineId}` : 'Arrival alert'
+        }
+        accessibilityHint={alertHere ? 'Turns the alert off' : 'Choose a line and how early to be warned'}
+      >
+        <Ionicons
+          name={alertHere ? 'notifications' : 'notifications-outline'}
+          size={iconSize}
+          color={alertHere ? colors.warning : hasLines ? colors.textMuted : colors.border}
+        />
+      </Pressable>
+
+      <Pressable
+        style={s.controlBtn}
+        disabled={!hasLines}
+        onPress={() => openSheet('lines')}
+        accessibilityRole="button"
+        accessibilityState={{ disabled: !hasLines }}
+        accessibilityLabel="Choose which lines to show"
+        accessibilityHint={hasLines ? undefined : 'No lines serve this stop'}
+      >
+        <Ionicons
+          name="options-outline"
+          size={iconSize}
+          color={hasLines ? colors.textMuted : colors.border}
+        />
+      </Pressable>
+    </View>
+  );
+
   return (
     <View style={cardStyle}>
       <View style={[s.header, compact && s.headerCompact]}>
-        {/* The pin is 20dp of a 146dp row at `standard` — a decoration charging
-            the stop's own name for the space it takes. */}
+        {/* Three columns only. The pin is 20dp of the ~98dp a one-column card
+            has, which is a decoration charging the stop's own name a fifth of
+            the width — and the name is the only thing in a compact header. */}
         {tier === 'detailed' && <Ionicons name="location" size={16} color={primaryColor} />}
         <Text
           style={[s.stopName, compact && s.stopNameCompact]}
@@ -934,8 +1217,11 @@ function FavoriteStopCard({
              arrange mode is on.
 
              `detailed` only: two 40dp buttons beside the 40dp remove button are
-             120 of a 146dp row, which leaves the stop's name 26dp and offers to
-             reorder a stop the user can no longer identify. */
+             120dp, and a one-column card has ~98dp of content in total — the
+             chevrons would push the stop's name out of the card altogether and
+             offer to reorder something the user can no longer identify. The
+             remove button stays at every span, because a stop that could only be
+             deleted after being resized would be a size that traps data. */
           <>
             {tier === 'detailed' && (
               <>
@@ -970,70 +1256,32 @@ function FavoriteStopCard({
               <Ionicons name="remove-circle" size={22} color={colors.danger} />
             </Pressable>
           </>
-        ) : hasLines && !compact ? (
-          <Pressable
-            style={s.headerBtn}
-            onPress={() => setFiltering((v) => !v)}
-            accessibilityRole="button"
-            accessibilityState={{ expanded: filtering }}
-            accessibilityLabel={filtering ? 'Done choosing lines' : 'Choose which lines to show'}
-          >
-            <Ionicons
-              name={filtering ? 'checkmark-circle' : 'options-outline'}
-              size={20}
-              color={filtering ? primaryColor : colors.textMuted}
-            />
-          </Pressable>
         ) : null}
+        {/* Nothing else up here. The line filter used to be a header button, and
+            it is in the controls footer now — at every span, which is the whole
+            point, and one control in one place rather than a button that existed
+            only where there was room for it. What the header gets back is the
+            width, which goes to the stop's name. */}
       </View>
 
-      {/* Line visibility */}
-      {filterOpen && (
-        <ScrollView style={s.editScroll} showsVerticalScrollIndicator={false} nestedScrollEnabled>
-          {allLineGroups!.map((line) => {
-            const isVisible = !visibleSet || visibleSet.has(line.lineCode);
-            return (
-              <Pressable
-                key={line.lineCode}
-                style={s.editRow}
-                onPress={() => toggleLineVisibility(line.lineCode)}
-                accessibilityRole="checkbox"
-                accessibilityState={{ checked: isVisible }}
-                accessibilityLabel={`Show line ${line.lineId}, ${line.lineDescrEng}`}
-              >
-                <Ionicons
-                  name={isVisible ? 'checkbox' : 'square-outline'}
-                  size={20}
-                  color={isVisible ? primaryColor : colors.textMuted}
-                />
-                <View style={[s.lineBadge, { backgroundColor: isVisible ? primaryColor : colors.border }]}>
-                  {/* A hidden line's badge is neutral grey, where the accent's
-                      own legible-text choice does not apply. */}
-                  <Text style={[s.lineBadgeText, { color: isVisible ? onAccent(primaryColor) : colors.text }]}>
-                    {line.lineId}
-                  </Text>
-                </View>
-                <Text style={[s.lineDescrMuted, { flex: 1 }, !isVisible && { opacity: 0.4 }]} numberOfLines={1}>
-                  {line.lineDescrEng}
-                </Text>
-              </Pressable>
-            );
-          })}
-        </ScrollView>
-      )}
+      {/* The compact grid is never wrapped in a scroll view. It centres itself in
+          the exact box the canvas gave the card, and a scroll view would move
+          that centring into a content container that knows nothing about the box.
+          It does not need one either: the tiles are floored at the same
+          `BUS_TILE_H_DP` the capacity arithmetic divided by, so the number of
+          buses is chosen to fit rather than scrolled to.
 
-      {/* The compact tier is never wrapped: it holds one arrival, so there is
-          nothing to scroll, and a scroll view would take the centring below it
-          out of the box the card was given and into a content container that
-          knows nothing about that box. */}
-      {!filterOpen && (
-        compact ? compactBody
+          The residual failure mode, stated so it is not a surprise: a system font
+          scale near the figure's 1.3 cap grows a tile past 66dp, and the card
+          clips what will not fit. Centred, that costs the top and bottom rows
+          equally. The detailed rows keep their scroll view because they have the
+          width to be worth scrolling. */}
+      {compact ? compactBody
         : boxHeight != null ? (
           <ScrollView style={s.bodyScroll} nestedScrollEnabled showsVerticalScrollIndicator={false}>
             {rows}
           </ScrollView>
-        ) : rows
-      )}
+        ) : rows}
 
       {orphanAlert && (
         <View style={s.alertBanner}>
@@ -1078,7 +1326,7 @@ function FavoriteStopCard({
           needs a sentence: the shortest honest wording here is wider than the
           whole card. The dimming survives, so a compact card still shows that
           its number is not to be trusted even where it cannot say why. */}
-      {!filterOpen && !compact && !failed && hasLines
+      {!compact && !failed && hasLines
         && ((fromCache && isStale) || arrivalsQuery.isError || (!isOnline && !updatedAt)) && (
         <View style={s.footer}>
           <View style={[s.dot, { backgroundColor: colors.warning }]} />
@@ -1093,6 +1341,29 @@ function FavoriteStopCard({
           </Text>
         </View>
       )}
+
+      {/* Last, so the hairline above it reads as the card's own bottom rule and
+          the notices above stay inside the body they are describing. */}
+      {controls}
+
+      {/* Both panels that used to grow the card, now one sheet. It renders
+          nothing while `sheet` is null, so it costs a closed card nothing but the
+          props it is handed. `visibleLines` and `alertLineId` are the same values
+          the rows above read, so the sheet cannot show a different answer than
+          the card behind it. */}
+      <StopControlsSheet
+        mode={sheet}
+        stopName={stop.stopName}
+        accentColor={primaryColor}
+        lines={sheetLines}
+        schedules={schedules}
+        initialLine={sheetLine}
+        visibleLines={visibleSet}
+        alertLineId={alertHere?.lineId ?? null}
+        onToggleLine={toggleLineVisibility}
+        onPickAlarm={handlePickAlarm}
+        onClose={closeSheet}
+      />
 
       <AlertPickerModal
         visible={!!pickerLine}
