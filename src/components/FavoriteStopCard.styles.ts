@@ -109,6 +109,24 @@ export const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  /**
+   * The remove button at one and two columns, sized to the header the geometry
+   * counted rather than to the button.
+   *
+   * A 40dp control in a row `busCapacity` costed at 22 grows the header by 18dp,
+   * and in a fixed box that 18dp does not come from the card — it comes out of
+   * the bus. Centred, it clips half the badge and all of the caption, so turning
+   * on edit mode would visibly damage every small card on the screen. At exactly
+   * the header's height it costs nothing at all, and the shared Pressable's
+   * hitSlop still tops the target up to the full 44: it is the only control in
+   * this row, so there is no neighbour for the slop to overlap.
+   */
+  headerBtnCompact: {
+    width: CARD_HEADER_COMPACT_H_DP,
+    height: CARD_HEADER_COMPACT_H_DP,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
 
   /* ── Arrival row ───────────────────────────────────────────── */
   /**

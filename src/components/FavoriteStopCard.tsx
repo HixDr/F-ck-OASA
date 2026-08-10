@@ -1248,12 +1248,12 @@ function FavoriteStopCard({
               </>
             )}
             <Pressable
-              style={s.headerBtn}
+              style={compact ? s.headerBtnCompact : s.headerBtn}
               onPress={() => onRemove(stop)}
               accessibilityRole="button"
               accessibilityLabel={`Remove ${stop.stopName} from saved stops`}
             >
-              <Ionicons name="remove-circle" size={22} color={colors.danger} />
+              <Ionicons name="remove-circle" size={compact ? 20 : 22} color={colors.danger} />
             </Pressable>
           </>
         ) : null}

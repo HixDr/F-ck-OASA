@@ -547,6 +547,11 @@ const StopCard = React.memo(function StopCard({
             ctl.edgeY.value,
           );
           ctl.dy.value = next.dy;
+          /* Both axes can land on something in the same frame — a card carried
+             diagonally into a corner does exactly that — and the haptic fires
+             once for the pair. Two selection ticks in one frame is not two
+             confirmations, it is one confirmation played twice. */
+          let caught = false;
           /* Only on a change of column, and animated rather than assigned: the
              card has three positions on this axis, so following the finger
              would show a place it cannot be put down. The spring is what makes
@@ -556,14 +561,15 @@ const StopCard = React.memo(function StopCard({
              is against where it is going, and would re-target on every frame. */
           if (next.col !== ctl.heldCol.value) {
             ctl.heldCol.value = next.col;
-            const tx = (colLeftPx(next.col, ctl.u.value) - colLeftPx(base.col, ctl.u.value));
+            const tx = colLeftPx(next.col, ctl.u.value) - colLeftPx(base.col, ctl.u.value);
             ctl.dx.value = ctl.reduced.value ? tx : withSpring(tx, liftSpring);
-            runOnJS(ctl.onSnap)();
+            caught = true;
           }
           if (next.gy !== ctl.guideY.value) {
             ctl.guideY.value = next.gy;
-            if (next.gy >= 0) runOnJS(ctl.onSnap)();
+            if (next.gy >= 0) caught = true;
           }
+          if (caught) runOnJS(ctl.onSnap)();
         })
         /* onFinalize rather than onEnd: a gesture cancelled from outside — a
            call arriving, a navigation — must still put the card down, and must
@@ -1506,11 +1512,11 @@ export default function HomeScreen() {
   const [heightsVersion, setHeightsVersion] = useState(0);
   const entranceRef = useRef(true);
 
-  /* The canvas's usable width — the unit every stored layout number is a
-     fraction of. Seeded from the window rather than left at zero until the
-     first onLayout: frame 1 would otherwise stack every card at width zero,
-     and this screen has already been through one round of the first frame
-     lying to existing users. */
+  /* The canvas's usable width: what the three columns are cut from, and the unit
+     `y` and `h` are fractions of. Seeded from the window rather than left at
+     zero until the first onLayout: frame 1 would otherwise stack every card at
+     width zero, and this screen has already been through one round of the first
+     frame lying to existing users. */
   const { width: windowW } = useWindowDimensions();
   const [measuredW, setMeasuredW] = useState(0);
   const canvasW = measuredW > 0 ? measuredW : Math.max(1, windowW - spacing.lg * 2);
@@ -1745,33 +1751,26 @@ export default function HomeScreen() {
     scrollRef.current?.scrollTo({ y: next, animated: false });
 
     /* The finger has not moved, so nothing else will recompute the carried
-       card: from its point of view the whole canvas just slid past it. */
-    const base = cards[a].rect;
-    const u = uRef.current;
+       card: from its point of view the whole canvas just slid past it.
+       Vertically only, and that is not an omission — a card's column is a
+       function of `panX` and nothing else, so an auto-scroll that moves the
+       canvas up cannot change which column the card is over. `dx` and `heldCol`
+       are the gesture's to write; this tick would only ever write back the value
+       it read. */
     const carried = carryTo(
-      base,
+      cards[a].rect,
       panX.value,
       panY.value + (next - scrollAtRef.current),
-      u,
+      uRef.current,
       edgeYRef.current,
     );
     dy.value = carried.dy;
-    /* The column can change without the finger moving — the auto-scroll only
-       moves the canvas vertically, but a card carried past the bottom of a
-       neighbour may find a column it could not take before. Same spring as the
-       gesture path, and the same guard: `dx` is animated, `heldCol` is not. */
-    if (carried.col !== heldCol.value) {
-      heldCol.value = carried.col;
-      const tx = colLeftPx(carried.col, u) - colLeftPx(base.col, u);
-      dx.value = reducedSV.value ? tx : withSpring(tx, liftSpring);
-      hapticSelection();
-    }
     if (carried.gy !== guideRef.current) {
       guideRef.current = carried.gy;
       guideY.value = carried.gy;
       if (carried.gy >= 0) hapticSelection();
     }
-  }, [pointerY, scrollY, panX, panY, dx, dy, heldCol, guideY, reducedSV]);
+  }, [pointerY, scrollY, panX, panY, dy, guideY]);
 
   const onLift = useCallback(
     (index: number) => {
