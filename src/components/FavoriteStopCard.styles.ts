@@ -1,12 +1,16 @@
 import { StyleSheet } from 'react-native';
 import { colors, spacing, radius, font, HIT_SIZE } from '../theme';
 /* The rendered heights of the card's parts are the canvas's numbers, not this
-   file's. `busCapacity` divides a box by them to decide how many buses this card
-   may show, so a `minHeight` here that had drifted a few points from the number
-   it divided by would produce a card whose last bus is half visible — with
-   nothing in either file looking wrong. Importing them is what makes the two
-   sides the same arithmetic rather than two similar arithmetics. Runtime, unlike
-   the card's type-only `CardTier` import: a number cannot be erased. */
+   file's. `hDpForBuses` adds them up to decide how tall this card is — the box is
+   the header plus a row per bus plus the controls footer, and nothing else — so a
+   `minHeight` here that had drifted a few points from the number the canvas added
+   would produce a card whose last bus is half visible, with nothing in either file
+   looking wrong. `busCapacity` divides the same box back down for the cap the card
+   is handed, so a drift shows up twice.
+
+   Importing them is what makes the two sides the same arithmetic rather than two
+   similar arithmetics. Runtime, unlike the card's type-only `CardTier` import: a
+   number cannot be erased. */
 import {
   BUS_ROW_H_DP,
   BUS_TILE_H_DP,
