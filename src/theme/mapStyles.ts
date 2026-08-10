@@ -10,9 +10,22 @@ export const mapStyles = StyleSheet.create({
     flex: 1,
     backgroundColor: colors.bg,
   },
-  map: {
+  /**
+   * Composed over `container` once the shared map is revealed through this
+   * screen — see `src/ui/MapHost.tsx`. The one map lives *behind* the navigator,
+   * so a map screen is a hole rather than a container: opaque while its push
+   * animation runs, then transparent for as long as it holds the surface.
+   */
+  containerClear: {
+    backgroundColor: 'transparent',
+  },
+  /**
+   * Where the map shows through. Laid out exactly where each screen's own
+   * `<MapView>` used to be, and deliberately without a background — a colour
+   * here would paint over the map it is supposed to reveal.
+   */
+  mapSlot: {
     flex: 1,
-    backgroundColor: colors.bg,
   },
   topControls: {
     position: 'absolute',

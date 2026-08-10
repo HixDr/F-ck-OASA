@@ -38,10 +38,12 @@
  *
  * ── What each mark answers now ──
  *
- *  map host armed / armed (already on a map)
+ *  map host armed / armed (a screen is waiting for it)
  *      When the one and only MapView was created. Normally ~250ms after the
- *      first screen paints; immediately if a deep link put a map on screen
- *      first. Everything below it should happen once per process, never again.
+ *      first screen paints. The second form is the fallback for someone who
+ *      opened a map before that — and it deliberately fires only once that
+ *      screen's push animation is over, so even then construction never lands on
+ *      the animation. Everything below happens once per process, never again.
  *
  *  map host onMapReady / map host onMapLoaded
  *      The construction that used to be paid per screen, paid once. `onMapReady`
@@ -56,10 +58,10 @@
  *  <screen> screen mounted
  *      The screen's React mount. The clock for everything below starts here.
  *
- *  <screen> claimed the surface (Δ…)
- *      The screen took ownership of the shared map: camera handed over, its
- *      markers and polylines queued. Δ from mount should be single-digit ms —
- *      it is a JS state change and nothing else.
+ *  <screen> claimed the surface
+ *      The screen took ownership of the shared map. Should land in the same
+ *      breath as `screen mounted` — it is a JS state change and nothing else. A
+ *      gap here would mean focus is arriving late.
  *
  *  <screen> camera set / camera restored (Δ…)
  *      `set` is a first visit taking its `initialRegion`; `restored` is a pop
@@ -69,21 +71,23 @@
  *
  *  <screen> map usable (why, host=phase) Δ…
  *      **This is the number the whole exercise is about.** The moment the shared
- *      map is showing through this screen and can be touched. Δ is measured from
- *      `screen mounted`.
+ *      map is showing through this screen and can be touched. Δ runs from the
+ *      screen *appearing* — its mount on a first visit, its refocus on a pop back
+ *      — which is exactly the gap the user experiences as "waiting for the map".
  *
- *      Δ should be one push animation and nothing more — ~400ms on stock
- *      Android, ~800ms at a 2× animator scale — because the only thing between
- *      mount and reveal is the transition we deliberately wait for. What must
- *      NOT be in there any more is the ~259ms of native construction: before
- *      this refactor the equivalent gap was transition + 259ms.
+ *      Δ should be one push animation and nothing more: ~400ms on stock Android,
+ *      ~800ms at a 2× animator scale. That is the transition we deliberately wait
+ *      out, and it is now the *whole* wait. What must not be in there any more is
+ *      the ~259ms of native construction — before this refactor the equivalent
+ *      gap was one transition plus that 259ms plus the tile fetch.
  *
  *      `why` should read `transitionEnd` every time. `CAP — no transitionEnd`
  *      means react-native-screens never told us the animation finished and the
  *      reveal degenerated into a plain 900ms timer — a bug to fix, not a result
  *      to keep. `host=` must read `loaded`: it says the surface was already
  *      drawing tiles when the screen claimed it. `host=creating` means the user
- *      beat the boot arming — the only case left where anyone waits for a map.
+ *      beat the boot arming — the only case left where anyone waits for a map,
+ *      and the Δ there will carry the ~260ms of construction honestly.
  *
  *  <screen> released the surface
  *      The screen lost focus and gave the map back. Its markers come off and its
