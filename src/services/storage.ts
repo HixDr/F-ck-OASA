@@ -8,6 +8,13 @@ import { File, Directory, Paths } from 'expo-file-system';
 import type { FavoriteLine, FavoriteStop, StopLayout, OasaLine, MapStamp, OasaDailySchedule, OasaStop, OasaBulkStop, OasaRoute, OasaArrival } from '../types';
 import { getDailySchedule, isUsableSchedule } from './api';
 import { onAppActiveChange } from './appState';
+/* The canvas's geometry defines which placements are legal, so it also owns
+   turning a stored one into a legal one. Importing it here rather than
+   reimplementing the quantisation means there is no path — disk, import, or a
+   record written by a future build — by which a layout this app cannot draw
+   reaches the screen. The module is deliberately free of React and of
+   react-native, so this costs nothing at load. */
+import { migrateLayout } from '../features/home/layout';
 
 /* ── Keys ────────────────────────────────────────────────────── */
 
@@ -69,6 +76,27 @@ function parseJson<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
+/**
+ * Bring every saved stop's placement into the shape the canvas can draw.
+ *
+ * 1.2.5 is unreleased, so in practice this is a no-op for everyone: no stored
+ * layout means the stop flows, full span, in order. What it exists for is the
+ * layout written during 1.2.5's own development, when the horizontal axis was a
+ * fraction of the width rather than a column — `migrateLayout` quantises those
+ * to the nearest column, and drops anything it cannot read at all, which leaves
+ * the stop flowing exactly like a newly saved one.
+ *
+ * Done on the way out of the JSON rather than lazily at the point of use,
+ * because "the parsed mirror is always legal" is an invariant every reader here
+ * and on the canvas already assumes.
+ */
+function migrateStopLayouts(stops: FavoriteStop[]): FavoriteStop[] {
+  if (!Array.isArray(stops)) return [];
+  return stops.map((st) =>
+    st && st.layout ? { ...st, layout: migrateLayout(st.layout) } : st,
+  );
+}
+
 /** Must be called once at app start (e.g. in _layout). */
 export async function initStorage(): Promise<void> {
   if (_initialized) return;
@@ -86,7 +114,9 @@ export async function initStorage(): Promise<void> {
     ]);
     const blob = new Map(pairs);
     _favorites = parseJson(blob.get(FAVORITES_KEY), [] as FavoriteLine[]);
-    _favoriteStops = parseJson(blob.get(FAVORITE_STOPS_KEY), [] as FavoriteStop[]);
+    _favoriteStops = migrateStopLayouts(
+      parseJson(blob.get(FAVORITE_STOPS_KEY), [] as FavoriteStop[]),
+    );
     _stamps = parseJson(blob.get(STAMPS_KEY), [] as MapStamp[]);
     _toggles = parseJson(blob.get(TOGGLES_KEY), {} as Record<string, boolean>);
     _settings = parseJson(blob.get(SETTINGS_KEY), {} as Record<string, string>);
@@ -1004,19 +1034,16 @@ function validFavorite(v: unknown): FavoriteLine | null {
 /**
  * A card placement from an imported backup.
  *
- * Rejected rather than repaired when anything is off: a NaN or a negative width
- * reaching the canvas is a card that cannot be seen, cannot be hit and cannot be
- * dragged back, and dropping the field just makes the stop flow full-width like
- * a newly saved one. `x + w <= 1` is the invariant the whole geometry rests on,
- * so it is checked here rather than trusted.
+ * The same funnel the disk path uses, for the same reason: a backup can carry a
+ * placement from any build of this app, including the fractional one 1.2.5 was
+ * developed with, and the canvas has exactly one legal shape. `migrateLayout`
+ * rejects rather than repairs whatever it cannot read — a NaN or a negative
+ * height reaching the canvas is a card that cannot be seen, cannot be hit and
+ * cannot be dragged back, and dropping the field just makes the stop flow full
+ * span like a newly saved one.
  */
 function validStopLayout(v: unknown): StopLayout | null {
-  if (!v || typeof v !== 'object') return null;
-  const o = v as Record<string, unknown>;
-  if (!isNum(o.x) || !isNum(o.y) || !isNum(o.w) || !isNum(o.h)) return null;
-  if (o.x < 0 || o.y < 0 || o.w <= 0 || o.h < 0) return null;
-  if (o.x + o.w > 1.001) return null;
-  return { x: o.x, y: o.y, w: o.w, h: o.h };
+  return migrateLayout(v);
 }
 
 function validFavoriteStop(v: unknown): FavoriteStop | null {

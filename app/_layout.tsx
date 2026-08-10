@@ -645,10 +645,11 @@ export default function RootLayout() {
       <TopBanner banner={banner} />
       <AlertPill />
       <UpdateOverlay progress={updateProgress} />
-      {/* Brings the Google Maps SDK up in the background a moment after the
-          first screen paints, so the first map open is not also the first time
-          Play Services loads maps_core. Draws nothing and is parked offscreen;
-          it is an overlay in the strictest sense. */}
+      {/* Brings the Google Maps SDK up a quarter-second after the first screen
+          paints, so the first map open is not also the first time Play Services
+          loads maps_core. All but one row of pixels of it sits offscreen and it
+          takes no part in layout — an overlay in the strictest sense. That last
+          row is deliberate; MapWarmup.tsx explains what it is hedging against. */}
       <MapWarmup />
       {/* Undo toasts. Last sibling so it draws above every other overlay, and
           an overlay itself — it must never take part in layout. */}

@@ -1,6 +1,18 @@
 /**
- * Google Maps warm-up — a hidden `<MapView>` mounted once per process so the
- * first *real* map screen does not pay for the SDK coming up.
+ * When map surfaces get created — the two levers on a first map open.
+ *
+ *  1. `MapWarmup`, below: a hidden `<MapView>` mounted once per process so the
+ *     first *real* map screen does not pay for the SDK coming up.
+ *  2. `useDeferredMapMount`, further down: holds a screen's own `<MapView>` back
+ *     until that screen's push animation has finished, so whatever native setup
+ *     is left does not land on the UI thread while the animation is running.
+ *
+ * They attack different halves of the same complaint — "the transition freezes
+ * for half a second on the first line I open" — and they are independent bets:
+ * (1) makes the work happen earlier, (2) makes it happen somewhere it cannot be
+ * seen. `MAP_WARMUP_ENABLED` kills the first, `MAP_MOUNT_AFTER_TRANSITION` the
+ * second, and either can be reverted without touching the other. Which one
+ * actually helps is a question for the `mapPerf` marks, not for reading.
  *
  * ── What opening a map for the first time actually costs ──
  *
@@ -37,7 +49,7 @@
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { InteractionManager, Platform, StyleSheet, View } from 'react-native';
-import { usePathname } from 'expo-router';
+import { usePathname, useNavigation } from 'expo-router';
 import MapView, { PROVIDER_GOOGLE } from 'react-native-maps';
 import { mapPerf } from '../utils/mapPerf';
 import { useInitialRegion } from '../hooks/useInitialRegion';
@@ -58,16 +70,27 @@ export const MAP_WARMUP_ENABLED = Platform.OS === 'android';
 /**
  * How long after the first screen has settled before the warm-up mounts.
  *
- * The point is to not compete with the boot it exists to help: the dynamite load
- * blocks the UI thread for a few hundred ms, and doing that while the user is
- * reading (or scrolling) the favourites list would be a visible stutter in
- * exchange for a saving they cannot see yet. `runAfterInteractions` alone is not
- * enough — with no animation in flight it fires almost immediately — so the
- * delay does the real work. Long enough to clear the first paint and the boot's
- * own follow-up work (location init, schedule prefetch, update check), short
- * enough to still be ahead of a user who taps a line straight away.
+ * This was 1,500ms, and that is the most likely reason the warm-up was reported
+ * as doing nothing at all. The case it exists for is a user who opens a saved
+ * line seconds after launch — and at 1.5s the warm-up had not even armed by the
+ * time they tapped. A warm-up that arms after the event it is warming for is
+ * dead code that owns a GL surface.
+ *
+ * It cannot be zero either. The dynamite load blocks the UI thread for a few
+ * hundred ms, and mounting in the same commit as Home's first frame would spend
+ * that block between `SplashScreen.hideAsync()` and Home actually appearing — a
+ * stall the user certainly *would* see, traded for one they might not.
+ *
+ * So: long enough for the first paint to have landed, short enough to be ahead
+ * of any realistic tap. The old comment here defended 1.5s as "do not stutter a
+ * screen the user is scrolling", and that concern is real — but it is not this
+ * window. A quarter-second after first paint the favourites list is static and
+ * nobody has reached it yet, and a UI-thread block on a screen with nothing
+ * moving on it has nothing to stutter. What is left is a tap landing *inside*
+ * the load (roughly 250-650ms in), and that is an argument for arming early
+ * rather than merely earlier: the sooner it starts, the sooner it is over.
  */
-const WARMUP_DELAY_MS = 1_500;
+const WARMUP_DELAY_MS = 250;
 
 /**
  * Hard cap on how long the hidden map may stay mounted. `onMapLoaded` needs
@@ -90,11 +113,51 @@ const WARMUP_LINGER_MS = 500;
  */
 const WARMUP_SIZE = 256;
 
+/**
+ * How much of the warm-up map is allowed to overlap the screen, in dp.
+ *
+ * HYPOTHESIS — not a measurement. adb is unavailable in the environment this was
+ * written in, so `warmup torn down (CAP — never loaded)` has never actually been
+ * read and the mechanism below is reasoning, not evidence.
+ *
+ * The reasoning: the map's GL output lives in a SurfaceView, i.e. its own
+ * SurfaceFlinger layer rather than pixels in our view hierarchy. A layer lying
+ * entirely outside the display bounds is not composited, so its buffers are
+ * never latched, and a producer whose buffers are never released eventually
+ * blocks in `eglSwapBuffers`. That would look exactly like the symptom on file:
+ * `onMapReady` fires (SDK init, which is the expensive permanent half and needs
+ * no pixels), `onMapLoaded` never does, the hard cap tears the warm-up down, and
+ * the cloud style and tile cache were never warmed.
+ *
+ * Leaving one row of pixels on screen makes the layer intersect the display, so
+ * it is composited and the queue keeps draining. One dp of dark basemap at 1%
+ * opacity, behind the status bar, over a near-black UI is not something a person
+ * can see. If this is ever measured and `onMapLoaded` proves to fire reliably
+ * from fully offscreen, it can go back to being wholly offscreen.
+ */
+const WARMUP_SLIVER = 1;
+
 /** Once per process, not once per mount — Fast Refresh and any remount of the
  *  root layout must not warm a second time. */
 let warmed = false;
 
 type Phase = 'idle' | 'warming' | 'loaded' | 'done';
+
+/** Live phase, mirrored out of React state for `warmupPhase()`. */
+let livePhase: Phase = 'idle';
+
+/**
+ * Where the warm-up has got to, for the timing marks.
+ *
+ * The one thing the marks could not answer before: when a map screen opened, was
+ * the warm-up finished, still mid dynamite-load, or never armed? A tap that
+ * lands while the warm-up is blocking the UI thread has the same symptom as no
+ * warm-up at all, and lowering `WARMUP_DELAY_MS` makes that collision more
+ * likely, not less — so it has to be visible in the log.
+ */
+export function warmupPhase(): Phase | 'off' {
+  return MAP_WARMUP_ENABLED ? livePhase : 'off';
+}
 
 export function MapWarmup() {
   const [phase, setPhase] = useState<Phase>(() => (warmed ? 'done' : 'idle'));
@@ -107,6 +170,10 @@ export function MapWarmup() {
   // Same region the map screens open at (user's position, else Athens centre),
   // so whatever basemap data this does pull is data they can reuse.
   const region = useInitialRegion(0.05);
+
+  // Mirror the phase out for `warmupPhase()`. In an effect rather than beside
+  // each `setPhase` so it cannot drift from what actually rendered.
+  useEffect(() => { livePhase = phase; }, [phase]);
 
   useEffect(() => {
     if (!MAP_WARMUP_ENABLED || phase !== 'idle') return;
@@ -128,6 +195,14 @@ export function MapWarmup() {
     };
   }, [phase]);
 
+  /* Teardown stays on a timer and is deliberately NOT triggered by navigating to
+     a map route, tempting as that is now that arming at 250ms makes an overlap
+     with a real map screen likely. `pathname` changes when the route is *pushed*,
+     which is the start of the transition — so a navigation-driven teardown would
+     destroy a GL surface on the UI thread during exactly the animation
+     `useDeferredMapMount` exists to keep clear. Two live maps for a second is the
+     cheaper of the two evils, and the native stack already keeps both real map
+     screens mounted at once. */
   useEffect(() => {
     if (phase !== 'warming' && phase !== 'loaded') return;
     const t = setTimeout(
@@ -152,15 +227,21 @@ export function MapWarmup() {
   if (phase !== 'warming' && phase !== 'loaded') return null;
 
   return (
-    /* Offscreen but still laid out, exactly as BusMarkerRenderer and
-       StopMarkerCaptureHost do it — a map that is never laid out is a map that
+    /* Laid out but not visible — a map that is never laid out is a map that
        never initialises anything. Absolute, so it takes no part in layout and
        cannot resize the screen underneath it. Hidden from screen readers too:
        a Google map is full of focusable native content and TalkBack would
-       otherwise be able to land on a map nobody can see. */
+       otherwise be able to land on a map nobody can see.
+
+       This used to claim it did this "exactly as BusMarkerRenderer and
+       StopMarkerCaptureHost do it" and then omitted the one prop that matters:
+       `collapsable={false}`. The wrapper has no visual of its own, so RN's view
+       flattening is entitled to remove it — and with it the pointer-event and
+       accessibility props above. The SVG hosts both set it; this did not. */
     <View
       style={ws.hidden}
       pointerEvents="none"
+      collapsable={false}
       accessibilityElementsHidden
       importantForAccessibility="no-hide-descendants"
     >
@@ -193,12 +274,141 @@ export function MapWarmup() {
   );
 }
 
+/* ── Lever 2: keeping a screen's MapView off the transition ──── */
+
+/**
+ * Kill switch for the deferred mount. Separate from `MAP_WARMUP_ENABLED` because
+ * these are two independent bets and at most one of them is the actual fix.
+ *
+ * Not restricted to Android, unlike the warm-up: the mechanism here is not a
+ * Play Services one. Creating a native map view costs UI-thread time on any
+ * platform, and a native-stack transition is animated on that same thread.
+ */
+export const MAP_MOUNT_AFTER_TRANSITION = true;
+
+/**
+ * Fallback for a `transitionEnd` that never arrives.
+ *
+ * It has to exist — a screen that never emits the event would otherwise be a
+ * screen whose map is never created, a permanently blank map rather than a slow
+ * one — but it should never actually fire, and the marks say so if it does.
+ * react-native-screens dispatches `onAppear` (which `NativeStackView` turns into
+ * `transitionEnd`) from the fragment's `Animation.AnimationListener`, and it goes
+ * out of its way to always have an animation to listen to: `StackAnimation.NONE`
+ * is implemented as a real 20ms `rns_no_animation_20`, and the *first* screen
+ * pushed onto a stack is given exactly that. So a deep link straight to a map
+ * gets the event too.
+ *
+ * Size: `slide_from_right` is `rns_slide_in_from_right`, i.e.
+ * `config_mediumAnimTime` — 400ms on stock Android, and 800ms for anyone running
+ * a 2× animator scale. Short is the dangerous direction: a cap that beats the
+ * transition silently puts the MapView back on the animation's critical path,
+ * which is the one thing this exists to avoid, and nothing in the log would say
+ * so. A cap that fires late only costs first-paint time on a path we do not
+ * expect to reach at all. Hence generous.
+ */
+const MAP_MOUNT_CAP_MS = 900;
+
+/**
+ * The slice of the route-scoped navigation object this needs.
+ *
+ * `transitionEnd` is a native-stack event and is not in the event map of
+ * expo-router's default `useNavigation` type, so it is named here rather than
+ * reached for through `any`. `NativeStackView` emits it from
+ * react-native-screens' `onAppear`/`onDisappear`, targeted at this route's key.
+ */
+interface TransitionAwareNavigation {
+  addListener(
+    type: 'transitionEnd',
+    listener: (e: { data?: { closing?: boolean } }) => void,
+  ): () => void;
+}
+
+/**
+ * `false` until this screen's push animation has finished, then `true` for the
+ * rest of the screen's life. Gate the screen's `<MapView>` on it.
+ *
+ * Why: expo-router's stack is `react-native-screens`, so the push animation runs
+ * natively on the UI thread. JS work cannot freeze it — but native view creation
+ * can, and building a Google MapView is precisely that: a classloader load, a
+ * `dlopen`, `MapsInitializer`, an EGL surface. Doing it while the animation is in
+ * flight is two pieces of UI-thread work competing, and the animation is the one
+ * the user is looking at. Waiting turns a frozen transition into a smooth
+ * transition with the map arriving a beat later, which is what "seamless" asks
+ * for even though it is strictly *later*.
+ *
+ * What it costs, honestly: the map is now definitively created later. If the
+ * stall turns out not to have been on the UI thread, this buys nothing and
+ * pushes first tiles out by the length of one transition — so it is a hypothesis
+ * with a price, and `MAP_MOUNT_AFTER_TRANSITION` is how you take it back.
+ *
+ * Nothing else is deferred. The route, stop, shape and bus requests are JS and
+ * network, they never touched the UI thread, and they still start at mount — so
+ * by the time the map exists its data is usually already in hand. That is also
+ * why the screens must keep rendering their dark background and `MapStatus`
+ * while this is false: during the transition a mounted map would have shown
+ * `loadingBackgroundColor` (the same colour) and a spinner anyway, so there is
+ * nothing new to look at, only something missing that was never visible.
+ *
+ * Deliberately NOT `InteractionManager.runAfterInteractions`: it resolves when
+ * no JS interaction handle is pending and knows nothing about a native
+ * transition, so with no JS-driven animation in flight it fires almost at once
+ * and would defer nothing at all. The timer above is the fallback instead.
+ */
+export function useDeferredMapMount(label: string): boolean {
+  const [mounted, setMounted] = useState(!MAP_MOUNT_AFTER_TRANSITION);
+  const navigation = useNavigation<TransitionAwareNavigation>();
+  /* Through a ref: React Navigation rebuilds the per-route navigation object
+     whenever the stack's state changes, and an effect keyed on it would
+     resubscribe — and restart the cap timer — on every navigation. */
+  const navRef = useRef(navigation);
+  navRef.current = navigation;
+
+  useEffect(() => {
+    if (mounted) return;
+    let released = false;
+    const release = (why: string) => {
+      if (released) return;
+      released = true;
+      /* `warmup=` is the other half of the diagnosis: a tap that lands while the
+         warm-up is still blocking the UI thread looks identical to no warm-up. */
+      mapPerf(`${label} mount released (${why}, warmup=${warmupPhase()})`);
+      setMounted(true);
+    };
+
+    const unsubscribe = navRef.current.addListener('transitionEnd', (e) => {
+      // `closing: true` is this screen going *away* — popped, or covered by a
+      // push on top of it. Neither is our cue.
+      if (e?.data?.closing) return;
+      release('transitionEnd');
+    });
+    const cap = setTimeout(() => release('CAP — no transitionEnd'), MAP_MOUNT_CAP_MS);
+
+    return () => {
+      unsubscribe();
+      clearTimeout(cap);
+    };
+  }, [mounted, label]);
+
+  return mounted;
+}
+
 const ws = StyleSheet.create({
   hidden: {
     position: 'absolute',
-    top: -9999,
-    left: -9999,
-    opacity: 0,
+    /* Almost entirely offscreen — see WARMUP_SLIVER for why "almost" and not
+       the `top: -9999, left: -9999` the SVG capture hosts use. An SVG only has
+       to be laid out for `toDataURL` to work; a map has to be composited before
+       it will admit to being loaded. */
+    top: -(WARMUP_SIZE - WARMUP_SLIVER),
+    left: 0,
+    /* Not `opacity: 0`. Android's draw path has fast-outs for a fully
+       transparent view, and a SurfaceView propagates alpha straight to its own
+       layer — so zero opacity is a second, independent way for the warm map to
+       never be composited, which is the same failure WARMUP_SLIVER hedges
+       against. 0.01 is indistinguishable from 0 to a person and is not zero to
+       the compositor. Also a hypothesis, for the same reason: unmeasured. */
+    opacity: 0.01,
   },
   map: { width: WARMUP_SIZE, height: WARMUP_SIZE },
 });
