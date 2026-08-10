@@ -38,7 +38,7 @@ import StampModal from '../../components/StampModal';
 import ScheduleGrid from '../../components/ScheduleGrid';
 import UserLocationMarker from '../../components/UserLocationMarker';
 import Pressable from '../../ui/Pressable';
-import { MapSurfaceSlot, useMapSurface } from '../../ui/MapHost';
+import { MAP_SCREEN_CONTENT_STYLE, MapSurfaceSlot, useMapSurface } from '../../ui/MapHost';
 import MapControls, { type MapToggle } from '../../ui/MapControls';
 import StopSheet, { useStopSheetInset, type StopSheetLine } from '../../ui/StopSheet';
 import RefreshTimer from './components/RefreshTimer';
@@ -663,7 +663,7 @@ export default function LiveMapScreen() {
        lives behind the navigator — is hidden by the navigator's own background
        before this screen's root view even gets a say. The root view below is what
        keeps the screen opaque until the push animation has finished. */
-    contentStyle: { backgroundColor: 'transparent' },
+    contentStyle: MAP_SCREEN_CONTENT_STYLE,
     headerTitle: () => (
       // `disabled` is deliberately not used: our Pressable dims a disabled
       // target, and a single-direction line's header is not "unavailable".

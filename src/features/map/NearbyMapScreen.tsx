@@ -26,7 +26,7 @@ import { useSettings } from '../settings/SettingsProvider';
 import StampModal from '../../components/StampModal';
 import UserLocationMarker from '../../components/UserLocationMarker';
 import MapControls, { type MapToggle } from '../../ui/MapControls';
-import { MapSurfaceSlot, useMapSurface } from '../../ui/MapHost';
+import { MAP_SCREEN_CONTENT_STYLE, MapSurfaceSlot, useMapSurface } from '../../ui/MapHost';
 import StopSheet, { useStopSheetInset, type StopSheetLine } from '../../ui/StopSheet';
 import MapStatus from './components/MapStatus';
 import StampLayer from './components/StampLayer';
@@ -330,7 +330,7 @@ export default function NearbyMapScreen() {
        lives behind the navigator — is hidden by the navigator's own background
        before this screen's root view even gets a say. The root view below is what
        keeps the screen opaque until the push animation has finished. */
-    contentStyle: { backgroundColor: 'transparent' },
+    contentStyle: MAP_SCREEN_CONTENT_STYLE,
     headerTitle: 'Nearby Stops',
     headerTitleStyle: { color: colors.text, fontWeight: '700' as const },
   }), []);

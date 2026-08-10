@@ -668,6 +668,14 @@ export default function RootLayout() {
            * and `SafeAreaProviderCompat` — the one wrapper above this that is
            * not reachable from here — is patched to match (see
            * `patches/@react-navigation+elements+*.patch`).
+           *
+           * This is only the default, and on its own it fixed nothing: options
+           * merge *shallowly*, so a screen that sets `contentStyle` replaces
+           * this object rather than adding to it — and every map screen must
+           * set one to go transparent. They pass `MAP_SCREEN_CONTENT_STYLE`,
+           * which carries both properties together for exactly that reason.
+           * Kept here anyway, so a screen that borrows the map and forgets is
+           * merely inheriting the right thing instead of a dead map.
            */
           contentStyle: { backgroundColor: colors.bg, pointerEvents: 'box-none' },
           animation: 'slide_from_right',
