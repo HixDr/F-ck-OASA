@@ -1,0 +1,57 @@
+diff --git a/node_modules/@react-navigation/elements/lib/module/SafeAreaProviderCompat.js b/node_modules/@react-navigation/elements/lib/module/SafeAreaProviderCompat.js
+index 9d08b91..c2cee80 100644
+--- a/node_modules/@react-navigation/elements/lib/module/SafeAreaProviderCompat.js
++++ b/node_modules/@react-navigation/elements/lib/module/SafeAreaProviderCompat.js
+@@ -45,6 +45,12 @@ export function SafeAreaProviderCompat({
+         return /*#__PURE__*/_jsx(View, {
+           ref: ref,
+           onLayout: onLayout,
++          // PATCH: box-none. This wrapper has no touch handling of its own, but
++          // an RN view with pointerEvents:auto returns true from onTouchEvent
++          // unconditionally, so it swallowed every touch no screen child wanted
++          // and nothing could reach the shared MapView sibling *below* the
++          // navigator. box-none leaves child touches untouched.
++          pointerEvents: 'box-none',
+           style: [styles.container, style],
+           children: children
+         });
+@@ -54,7 +60,10 @@ export function SafeAreaProviderCompat({
+       // So we only pass onLayout to it
+       return /*#__PURE__*/_jsx(SafeAreaProvider, {
+         initialMetrics: initialMetrics,
+-        style: style,
++        // PATCH: see above.
++        style: [{
++          pointerEvents: 'box-none'
++        }, style],
+         onLayout: onLayout,
+         children: children
+       });
+diff --git a/node_modules/@react-navigation/elements/src/SafeAreaProviderCompat.tsx b/node_modules/@react-navigation/elements/src/SafeAreaProviderCompat.tsx
+index 26bf1a6..05e6957 100644
+--- a/node_modules/@react-navigation/elements/src/SafeAreaProviderCompat.tsx
++++ b/node_modules/@react-navigation/elements/src/SafeAreaProviderCompat.tsx
+@@ -48,6 +48,13 @@ export function SafeAreaProviderCompat({ children, style }: Props) {
+             <View
+               ref={ref}
+               onLayout={onLayout}
++              // PATCH: box-none. This wrapper has no touch handling of its own,
++              // but an RN view with pointerEvents:auto returns true from
++              // onTouchEvent unconditionally, so it swallowed every touch no
++              // screen child wanted and nothing could reach the shared MapView
++              // sibling *below* the navigator. box-none leaves child touches
++              // untouched.
++              pointerEvents="box-none"
+               style={[styles.container, style]}
+             >
+               {children}
+@@ -60,7 +67,8 @@ export function SafeAreaProviderCompat({ children, style }: Props) {
+         return (
+           <SafeAreaProvider
+             initialMetrics={initialMetrics}
+-            style={style}
++            // PATCH: see above.
++            style={[{ pointerEvents: 'box-none' }, style]}
+             onLayout={onLayout}
+           >
+             {children}
