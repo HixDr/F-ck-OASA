@@ -83,6 +83,13 @@ Scan the QR code with Expo Go on your phone.
 `GOOGLE_MAPS_API_KEY` must be set (see below) — `app.config.ts` now fails loudly rather than
 silently producing a blank grey map.
 
+### Testing on a real phone from WSL2
+
+See **[docs/device-testing-wsl2.md](docs/device-testing-wsl2.md)**. Read it before debugging adb
+rather than after: three unrelated problems all present as "adb is hanging", including two adb
+binaries fighting over one server — which looks exactly like the phone dropping its wireless
+connection every few minutes.
+
 ### Keeping Expo packages in sync
 
 Several packages drifted behind their SDK 54 pins. `package.json` carries the expected ranges;
