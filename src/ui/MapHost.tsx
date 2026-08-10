@@ -51,12 +51,46 @@
  * attached at once — which is exactly why a screen stays opaque until its
  * animation has finished (see the reveal effect in `useMapSurface`).
  *
- * Touches reach the map by ordinary Android dispatch. `ReactRootView`
- * only observes touches (`onInterceptTouchEvent` returns false), `ScreenContainer`
- * and `Screen` do not consume them, and a ViewGroup whose subtree declines an
- * event lets its parent try the next sibling — which is this. RN's own
- * `pointerEvents` is a JS-dispatch concept and does not stop that, so an
- * unrevealed map is kept out of the way by turning its gestures off instead.
+ * ── How touches reach a map that is underneath everything ──
+ *
+ * By ordinary Android dispatch, but only because every view above it declines
+ * the event. `ReactRootView` merely observes touches (`onInterceptTouchEvent`
+ * returns false) and react-native-screens' `ScreenContainer`/`Screen` do not
+ * consume them, so a ViewGroup whose subtree declines an event lets its parent
+ * try the next sibling — which is this host.
+ *
+ * The part that is easy to get wrong, and did break this for two releases:
+ * **`pointerEvents` is not only a JS concept on Android.** `ReactViewGroup`
+ * implements it natively in both directions — `onInterceptTouchEvent` returns
+ * true when children may not be targets, and `onTouchEvent` returns
+ * `canBeTouchTarget(pointerEvents)`. The default being `auto`, *every* plain RN
+ * `<View>` returns true from `onTouchEvent` whether or not any handler exists;
+ * its own comment is "the root view always assumes any view that was tapped
+ * wants the touch". One full-screen `auto` view anywhere above the map is
+ * therefore enough to make the map completely inert — it still draws, still
+ * animates, still shows markers, and receives not one event. Panning, zooming
+ * and marker taps all die together, which reads like a broken MapView and is
+ * not one.
+ *
+ * So the whole chain from the root down to the hole has to be `box-none`:
+ *
+ *   GestureHandlerRootView      auto — the parent, tried last, fine
+ *     └ SafeAreaProviderCompat  box-none via patches/@react-navigation+elements
+ *        └ ScreenStack/Screen   native, do not consume
+ *           └ contentContainer  box-none via the Stack's `contentStyle`
+ *              └ map screen     box-none while revealed (each map screen)
+ *                 └ the hole    `MapSurfaceSlot`, pointerEvents="none"
+ *
+ * Two of those are third-party wrappers with no touch handling of their own, so
+ * `box-none` changes nothing for anybody else: children are still targets, and
+ * only touches nothing claimed keep falling — to this.
+ *
+ * The same mechanism is what keeps an *unrevealed* map out of the way, and it is
+ * stronger than turning gestures off: `pointerEvents="none"` on the host makes
+ * the whole subtree decline events, so a map behind an opaque screen cannot
+ * intercept a drag meant for the screen. Gestures are disabled as well, because
+ * `scrollEnabled` is what stops the *revealed but unfocused* map — the one
+ * travelling out with a screen being popped — from moving under the finger.
  *
  * ── What this replaced ──
  *
