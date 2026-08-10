@@ -356,6 +356,13 @@ const s = StyleSheet.create({
   chipRow: {
     gap: spacing.sm,
     paddingBottom: spacing.md,
+    /* Without this the chips are tall, narrow slivers. This is a horizontal
+       ScrollView's content container, so it is a row whose default
+       `alignItems` is `stretch` — every chip grew to the container's full
+       height, turning a 44dp pill into something portrait-shaped. Centring
+       lets each one size to its own content and keep the `minHeight` below as
+       a floor rather than a starting point. */
+    alignItems: 'center',
   },
   /* `minWidth`/`minHeight` rather than fixed padding: a sheet has no width
      pressure the way a three-column card does, so every radio here can clear

@@ -19,12 +19,17 @@
  * stops people actually save, and it is what turns `active` — the focus gate
  * handed to every card — from an optimisation into load-bearing code.
  *
- * A stop that has never been arranged *flows*: full span, sized by its own
- * content, stacked in saved order beneath anything that has been placed. An
- * install arriving from 1.2.4 has no saved placements at all, so every card
- * flows and this canvas reproduces the old column exactly. That is the whole
- * migration; see `layout.ts` for why it is expressed as a property of the
- * geometry rather than as a one-off upgrade step.
+ * A stop that has never been arranged *flows*: full span, stacked in saved order
+ * beneath anything that has been placed. An install arriving from 1.2.4 has no
+ * saved placements at all, so every card flows and this canvas reproduces the old
+ * column. That is the whole migration; see `layout.ts` for why it is expressed as
+ * a property of the geometry rather than as a one-off upgrade step.
+ *
+ * No card decides how tall it is, arranged or not. A card is exactly as tall as
+ * the buses its stop is showing, so the only thing a card reports upwards is that
+ * count, and the only thing a resize can set is a width. Height is changed by
+ * changing the line filter, which is a control in the card's own footer at every
+ * span.
  *
  * Two interactions are worth explaining up front.
  *
@@ -103,13 +108,13 @@ import FavoriteStopCard from '../../components/FavoriteStopCard';
 import SettingsModal from '../../components/SettingsModal';
 import { s, LINE_GRID_GAP } from './HomeScreen.styles';
 import {
-  busCapacity,
+  busesFor,
   colAtPx,
   colLeftPx,
   edgesY,
   fitAll,
-  heightStep,
-  minHFor,
+  gapFor,
+  hForBuses,
   nudgeCol,
   nudgeY,
   placeAll,
@@ -119,9 +124,9 @@ import {
   spanAtPx,
   spanStep,
   spanWidthPx,
-  CARD_GAP_DP,
   COLS,
   SNAP_DP,
+  type EdgesY,
   type PlacedCard,
   type Rect,
 } from './layout';
@@ -215,10 +220,14 @@ interface CanvasCtl {
   guideY: SharedValue<number>;
   /** Every card's box, in stored units, in render order. */
   rects: SharedValue<Rect[]>;
+  /** How many buses each card is showing, in render order. A resize needs it:
+   *  the height is the count's to decide, so the only thing a corner drag can
+   *  offer is a width, and the box that width implies. */
+  buses: SharedValue<number[]>;
   /** The same minus the carried one, plus its edges — built once per lift,
    *  because the alternative is rebuilding both on every frame of the drag. */
   others: SharedValue<Rect[]>;
-  edgeY: SharedValue<number[]>;
+  edgeY: SharedValue<EdgesY>;
   /** Canvas usable width. Every conversion between stored units and pixels
    *  goes through it. */
   u: SharedValue<number>;
@@ -251,54 +260,35 @@ interface CanvasCtl {
 interface Sized {
   /** Columns the corner is currently describing. */
   span: number;
+  /** The height that many columns implies for this card's bus count. Not
+   *  something the gesture chose — see below. */
   h: number;
-  /** Snapped horizontal edge in canvas pixels, or -1. */
-  gy: number;
 }
 
 /**
  * The box a corner drag is describing, in stored units.
  *
- * The top-left is fixed, so only the trailing edges move. Horizontally that is
- * now a column count rather than a width: there are at most three answers, the
- * nearest one is taken, and the whole class of bug the free-width version had
- * here — a floor and a margin fighting over the order of two ternaries, and a
- * preview promising a width the drop then refused — is gone with it.
+ * The top-left is fixed and **only the width moves**. Horizontally that is a
+ * column count rather than a width: there are at most three answers and the
+ * nearest one is taken.
+ *
+ * Vertically there is nothing for the gesture to say. A card is exactly as tall
+ * as the buses its stop is showing, so the height that comes back is the one that
+ * many columns implies for this card's count — one column stacks its buses one to
+ * a row, two columns fits two, three switches to the taller detailed row — and
+ * `panY` is not a parameter at all. It used to be, along with a magnet on the
+ * trailing edge and a floor to clamp it against; all three described a height the
+ * user is no longer allowed to choose, and a preview that offers one is a promise
+ * the drop has to break.
  *
  * Pure and argument-taking for the same reason as `carryTo`, and because the
- * accessibility size actions have to reach the same answer through `spanStep`
- * and `heightStep` without a gesture anywhere in sight.
+ * accessibility width actions have to reach the same answer through `spanStep`
+ * without a gesture anywhere in sight.
  */
-function sizeTo(
-  base: Rect,
-  panX: number,
-  panY: number,
-  u: number,
-  edgeY: readonly number[],
-): Sized {
+function sizeTo(base: Rect, panX: number, buses: number, u: number): Sized {
   'worklet';
-  const tol = SNAP_DP / u;
   const span = spanAtPx(spanWidthPx(base.span, u) + panX, base.col, u);
-  /* The floor of the span being *offered*, not of the one the card has. Dragging
-     from one column to three switches the bus layout to the taller detailed
-     row, so the preview has to grow with it — otherwise the drop would silently
-     raise a card the user was shown at a shorter height. */
-  const minH = minHFor(span, u);
-  let h = base.h + panY / u;
-  if (h < minH) h = minH;
-
-  /* Only the trailing edge is offered a magnet: the leading one has not moved,
-     and snapping an edge the user is not dragging would silently resize the
-     card from the side they are holding still. */
-  const sy = snapAxis(base.y + h, 0, edgeY, tol);
-  let gy = sy.guide;
-  if (gy >= 0) {
-    const snapped = sy.v - base.y;
-    if (snapped >= minH) h = snapped;
-    else gy = -1;
-  }
-
-  return { span, h, gy: gy >= 0 ? gy * u : -1 };
+  return { span, h: hForBuses(span, buses, u) };
 }
 
 interface Carried {
@@ -338,7 +328,7 @@ function carryTo(
   panX: number,
   panY: number,
   u: number,
-  edgeY: readonly number[],
+  edgeY: EdgesY,
 ): Carried {
   'worklet';
   const tol = SNAP_DP / u;
@@ -346,7 +336,7 @@ function carryTo(
   let y = base.y + panY / u;
   if (y < 0) y = 0;
 
-  const sy = snapAxis(y, base.h, edgeY, tol);
+  const sy = snapAxis(y, base.h, edgeY, gapFor(u), tol);
   let ny = sy.v;
   let gy = sy.guide;
   if (ny < 0) {
@@ -368,11 +358,12 @@ function carryTo(
  * actions is the same answer the saved-line badges already use, for the same
  * reason: the control has nowhere to put a visible affordance.
  *
- * Width and height are four actions rather than a single "grow", and the extra
- * two are the price of the design rather than thoroughness for its own sake:
- * span picks the bus layout and height picks how many buses, so a user who
- * cannot set the two independently cannot reach half the sizes. This is the
- * longest action menu in the app, and it is still shorter than "no way to do it".
+ * Six and not eight. `Taller` and `Shorter` were here, and they are gone for the
+ * same reason the corner drag no longer has a vertical half: a card's height is
+ * exactly the buses its stop is showing, so an action that claimed to set it could
+ * only fight the filter or lie. Changing how tall a card is means changing which
+ * lines it shows, in the sheet the filter button opens — one control, reachable at
+ * every span, and the one everybody else uses too.
  */
 const ARRANGE_ACTIONS: AccessibilityActionInfo[] = [
   { name: 'moveUp', label: 'Move up' },
@@ -381,8 +372,6 @@ const ARRANGE_ACTIONS: AccessibilityActionInfo[] = [
   { name: 'moveRight', label: 'Move right' },
   { name: 'wider', label: 'Wider' },
   { name: 'narrower', label: 'Narrower' },
-  { name: 'taller', label: 'Taller' },
-  { name: 'shorter', label: 'Shorter' },
 ];
 
 /**
@@ -396,6 +385,11 @@ const ARRANGE_ACTIONS: AccessibilityActionInfo[] = [
  * and the reorder chevrons go the same way and do not come back: the arrange
  * actions already do what the chevrons did, and choosing which lines to show is
  * something to do when not in the middle of moving the card.
+ *
+ * The filter is now also the only thing that sets a card's height, which is an
+ * argument for leaving it out rather than against: a control that resized the card
+ * under the user's hands mid-placement is exactly what the arrange actions must not
+ * have to resolve around. Leaving arrange mode is one activation away.
  */
 const ARRANGE_EDIT_ACTIONS: AccessibilityActionInfo[] = [
   ...ARRANGE_ACTIONS,
@@ -408,14 +402,18 @@ const COL_WORD = ['no columns', 'One column', 'Two columns', 'Three columns'] as
  * A card's size, spoken.
  *
  * Columns and buses rather than "small" and "big", because those are the two
- * things the size actually decides and the two the actions change. A user who
- * hears "Two columns, 4 buses" after "Taller" knows what the last activation
- * bought them; "Medium card" does not say whether anything happened.
+ * things the size actually decides. A user who hears "Two columns, room for 4
+ * buses" after "Wider" knows what the last activation bought them; "Medium card"
+ * does not say whether anything happened.
+ *
+ * "Room for" rather than a flat count, because the width is now the only thing
+ * the actions change and the two spans differ in exactly that: the same four
+ * buses are four rows at one column and two rows of two at two columns. How many
+ * buses there *are* is the stop's own business, and the card's contents say it.
  */
-function sizeWord(span: number, buses: number | null): string {
+function sizeWord(span: number, buses: number): string {
   const cols = COL_WORD[span] ?? COL_WORD[3];
-  if (buses == null) return `${cols}, sized to its content`;
-  return `${cols}, ${buses} bus${buses === 1 ? '' : 'es'}`;
+  return `${cols}, room for ${buses} bus${buses === 1 ? '' : 'es'}`;
 }
 
 /* ── A card on the canvas ────────────────────────────────────── */
@@ -434,7 +432,7 @@ interface StopCardProps {
   entrance: boolean;
   reduced: boolean;
   ctl: CanvasCtl;
-  onMeasure: (stopCode: string, height: number) => void;
+  onCount: (stopCode: string, buses: number) => void;
   onRemove: (stop: FavoriteStop) => void;
   onMoveUp: (stop: FavoriteStop) => void;
   onMoveDown: (stop: FavoriteStop) => void;
@@ -446,10 +444,12 @@ interface StopCardProps {
  *
  * The wrapper carries the geometry and the card carries the content, which is
  * the split that lets a card be moved and resized without anything inside it
- * knowing. A *flowing* card is given no fixed height so it can size itself from
- * its content exactly as it did in 1.2.4, and reports what that came to — the
- * canvas needs the measurement both to stack the next card below it and to know
- * what box to freeze it at when it is first picked up.
+ * knowing. Every card is given an exact box, flowing or not: the height follows
+ * the stop's bus count, and the one thing the card reports back is that count.
+ *
+ * It used to report its measured height instead, which the canvas needed to stack
+ * the next card below it. Nothing measures itself now — the stack is arithmetic
+ * over counts, so it is right on the first frame rather than on the second.
  *
  * The gesture detector sits inside the transformed wrapper rather than on it,
  * because the wrapper is what has to be painted over its neighbours while it
@@ -467,7 +467,7 @@ const StopCard = React.memo(function StopCard({
   entrance,
   reduced,
   ctl,
-  onMeasure,
+  onCount,
   onRemove,
   onMoveUp,
   onMoveDown,
@@ -480,13 +480,6 @@ const StopCard = React.memo(function StopCard({
       else onArrangeAction(index, actionName);
     },
     [onArrangeAction, onRemove, stop, index],
-  );
-
-  const measure = useCallback(
-    (e: LayoutChangeEvent) => {
-      onMeasure(stop.stopCode, e.nativeEvent.layout.height);
-    },
-    [onMeasure, stop.stopCode],
   );
 
   const gesture = useMemo(
@@ -602,6 +595,7 @@ const StopCard = React.memo(function StopCard({
               h: base.h,
             },
             ctl.others.value,
+            u,
           );
           const tx = colLeftPx(got.col, u) - colLeftPx(base.col, u);
           const ty = (got.y - base.y) * u;
@@ -623,12 +617,19 @@ const StopCard = React.memo(function StopCard({
   );
 
   /**
-   * The corner handle.
+   * The width handle.
    *
    * A plain pan, not a held one: it is a target the user went looking for, and
    * asking them to hold a control that only exists in arrange mode would be a
    * second lock on a door already unlocked. It still refuses to start while
    * anything else is in the air, for the same reason the body drag does.
+   *
+   * `translationY` is read nowhere below, and that is the whole of what changed
+   * here: the height belongs to the stop's bus count, so there is nothing for the
+   * vertical half of the gesture to set. The preview's height still moves, because
+   * the *span* moves it — the same buses are taller at one column than at two —
+   * and it is showing the box the drop will produce rather than one the finger is
+   * dragging out.
    */
   const resize = useMemo(
     () =>
@@ -643,7 +644,6 @@ const StopCard = React.memo(function StopCard({
             if (i !== index) others.push(rects[i]);
           }
           ctl.others.value = others;
-          ctl.edgeY.value = edgesY(others);
           const u = ctl.u.value;
           const base = rects[index];
           ctl.previewX.value = colLeftPx(base.col, u);
@@ -651,6 +651,9 @@ const StopCard = React.memo(function StopCard({
           ctl.previewW.value = spanWidthPx(base.span, u);
           ctl.previewH.value = base.h * u;
           ctl.previewSpan.value = base.span;
+          /* No magnets, so no guide. A magnet is for an axis that is continuous
+             and can be *nearly* aligned; the only thing this gesture can change
+             is a column count, which is either one value or another. */
           ctl.guideY.value = -1;
           ctl.resizing.value = index;
           runOnJS(ctl.onResizeStart)(index);
@@ -661,19 +664,19 @@ const StopCard = React.memo(function StopCard({
           if (index >= rects.length) return;
           const u = ctl.u.value;
           const base = rects[index];
-          const next = sizeTo(base, e.translationX, e.translationY, u, ctl.edgeY.value);
-          ctl.previewH.value = next.h * u;
+          const list = ctl.buses.value;
+          const buses = index < list.length
+            ? list[index]
+            : busesFor(base.span, base.h, null, u);
+          const next = sizeTo(base, e.translationX, buses, u);
           /* The preview's width jumps between the three span widths rather than
              tracking the finger, for the same reason the body drag jumps between
              columns: there is nothing in between to promise. */
           if (next.span !== ctl.previewSpan.value) {
             ctl.previewSpan.value = next.span;
             ctl.previewW.value = spanWidthPx(next.span, u);
+            ctl.previewH.value = next.h * u;
             runOnJS(ctl.onSnap)();
-          }
-          if (next.gy !== ctl.guideY.value) {
-            ctl.guideY.value = next.gy;
-            if (next.gy >= 0) runOnJS(ctl.onSnap)();
           }
         })
         .onFinalize(() => {
@@ -681,7 +684,6 @@ const StopCard = React.memo(function StopCard({
           const rects = ctl.rects.value;
           const u = ctl.u.value;
           ctl.resizing.value = -1;
-          ctl.guideY.value = -1;
           // Nothing to commit, but the scroll lock and `activeRef` still have
           // to be unwound — see the same branch in the body drag.
           if (index >= rects.length) {
@@ -689,10 +691,14 @@ const StopCard = React.memo(function StopCard({
             return;
           }
           const base = rects[index];
-          const span = ctl.previewSpan.value;
+          const list = ctl.buses.value;
+          const buses = index < list.length
+            ? list[index]
+            : busesFor(base.span, base.h, null, u);
           const got = resolveResize(
-            { col: base.col, span, y: base.y, h: ctl.previewH.value / u },
+            { col: base.col, span: ctl.previewSpan.value, y: base.y },
             ctl.others.value,
+            buses,
             u,
           );
           runOnJS(ctl.onResizeEnd)(index, got);
@@ -721,9 +727,6 @@ const StopCard = React.memo(function StopCard({
   return (
     <Animated.View
       style={[s.stopCard, { left: card.left, top: card.top, width: card.width }, animStyle]}
-      // Only a flowing card's measurement means anything: a placed card would
-      // just report back the height the canvas already told it to be.
-      onLayout={card.flowing ? measure : undefined}
       /* In arrange mode the card *is* the accessible element and its contents
          are not. A screen reader wandering into an arrival row here would be
          offered "opens the live map" in the middle of placing the card, and
@@ -738,7 +741,9 @@ const StopCard = React.memo(function StopCard({
             } of ${COLS}.`
           : undefined
       }
-      accessibilityHint={arranging ? 'Use the actions to move or resize this card' : undefined}
+      accessibilityHint={
+        arranging ? 'Use the actions to move this card or change how wide it is' : undefined
+      }
       accessibilityActions={
         arranging ? (editing ? ARRANGE_EDIT_ACTIONS : ARRANGE_ACTIONS) : undefined
       }
@@ -756,15 +761,18 @@ const StopCard = React.memo(function StopCard({
             editing={editing}
             tier={card.tier}
             span={card.span}
-            /* Both halves of "one rule, not three sizes", handed over as
-               numbers the card does not have to derive: the span picks its bus
-               layout, and how many buses fit is arithmetic the geometry already
-               did in `busCapacity` when it worked out this card's floor. A card
-               that counted its own rows would be a second copy of that
-               arithmetic, and the two would disagree the first time either
-               changed. */
+            /* Both halves of "one rule, not three sizes", handed over as numbers
+               the card does not have to derive: the span picks its bus layout, and
+               `maxBuses` is how many the box holds. A card that counted its own
+               rows would be a second copy of that arithmetic, and the two would
+               disagree the first time either changed.
+               The traffic goes the other way too — `onCountChange` is where the
+               box's height comes from in the first place — and the two cannot
+               oscillate: the height admits the count that produced it, so the card
+               reports the same number back. */
             maxBuses={card.maxBuses}
-            boxHeight={card.flowing ? null : card.height}
+            boxHeight={card.height}
+            onCountChange={onCount}
             onRemove={onRemove}
             onMoveUp={onMoveUp}
             onMoveDown={onMoveDown}
@@ -791,12 +799,16 @@ const StopCard = React.memo(function StopCard({
       {arranging && (
         <GestureDetector gesture={resize}>
           {/* Hidden from the screen reader rather than left focusable: it is
-              pure gesture, and the Grow and Shrink actions above are the path
+              pure gesture, and the Wider and Narrower actions above are the path
               that does the same job. A focusable control that cannot be
               activated is worse than no control. */}
           <View style={s.resizeHandle} importantForAccessibility="no-hide-descendants">
             <View style={[s.resizeGrip, { backgroundColor: primaryColor }]}>
-              <Ionicons name="resize" size={13} color={onAccent(primaryColor)} />
+              {/* Two horizontal arrows, not the diagonal `resize` glyph that was
+                  here. The gesture is width-only now, and a corner grip drawn as a
+                  diagonal is an invitation to drag a height that nothing will
+                  respond to. */}
+              <Ionicons name="swap-horizontal" size={13} color={onAccent(primaryColor)} />
             </View>
           </View>
         </GestureDetector>
@@ -834,16 +846,21 @@ const SnapGuides = React.memo(function SnapGuides({
     transform: [{ translateY: ctl.guideY.value }],
   }));
   /**
-   * The box a corner drag is describing.
+   * The box a width drag is describing.
    *
    * The card itself is left alone until the gesture ends, and that is the whole
    * design of the resize rather than a shortcut. Re-laying-out a card on every
    * frame means a Yoga pass over up to ten arrival rows sixty times a second,
-   * on a screen where every card is already running a live query — and the
-   * change of span, or of how many buses fit, that a resize exists to produce is
-   * a React render, which cannot happen per frame at all. One outline moves
-   * instead, and the card takes the new box, at the new span, in a single commit
-   * when the finger lifts.
+   * on a screen where every card is already running a live query — and the change
+   * of span that a resize exists to produce is a React render, which cannot happen
+   * per frame at all. One outline moves instead, and the card takes the new box,
+   * at the new span, in a single commit when the finger lifts.
+   *
+   * Its height is not a dimension the drag is setting: it is the height the offered
+   * span implies for the buses the card is already showing, which changes in steps
+   * as the span does. Drawn all the same, because the outline is a promise about
+   * the box the drop will produce, and a promise that left the height out would be
+   * a card that visibly changed shape after the finger came up.
    */
   const boxStyle = useAnimatedStyle(() => ({
     opacity: ctl.resizing.value >= 0 ? 1 : 0,
@@ -1523,16 +1540,21 @@ export default function HomeScreen() {
   /** The stops as the drag maths sees them, readable from a gesture callback
    *  without waiting for a render. */
   const stopsRef = useRef<FavoriteStop[]>(favoriteStops);
-  /** Measured heights of the cards that still size themselves, by stop code —
-   *  not by index, because saving or removing a stop renumbers every index and
-   *  resizes nothing. Cards run from two rows to ten and grow again when a
-   *  timetable is expanded, so nothing here may assume a fixed height. */
-  const heightsRef = useRef<Map<string, number>>(new Map());
-  /** Bumped when a measurement actually changes, purely to re-run `placeAll`.
-   *  The map stays a ref: a card reporting the height it reported last frame
-   *  must not cost a render, and there are up to twenty of them each doing it
-   *  on every poll. */
-  const [heightsVersion, setHeightsVersion] = useState(0);
+  /**
+   * How many buses each card is showing, by stop code — not by index, because
+   * saving or removing a stop renumbers every index and changes nobody's lines.
+   *
+   * This is the input to every height on the canvas. It arrives from the cards
+   * because only they know it: a stop's line list comes off the network, and
+   * "show all" — the default — is a count this screen cannot work out from
+   * `visibleLines` alone. Absent means "not yet known", which is a different
+   * thing from zero and is why this is a map rather than an array of numbers.
+   */
+  const countsRef = useRef<Map<string, number>>(new Map());
+  /** Bumped when a count actually changes, purely to re-run `placeAll`. The map
+   *  stays a ref: a card reporting the count it reported last frame must not cost
+   *  a render, and there are up to twenty of them each doing it on every poll. */
+  const [countsVersion, setCountsVersion] = useState(0);
   const entranceRef = useRef(true);
 
   /* The canvas's usable width: what the three columns are cut from, and the unit
@@ -1591,29 +1613,31 @@ export default function HomeScreen() {
      the box stays put is exactly the shape of the hypothesis this rules out. */
   useEffect(traceFrame, [traceFrame]);
 
-  const onMeasure = useCallback((stopCode: string, height: number) => {
-    const prev = heightsRef.current.get(stopCode);
-    // Sub-pixel churn from a re-render is not a new measurement.
-    if (prev != null && Math.abs(prev - height) < 1) return;
-    heightsRef.current.set(stopCode, height);
-    setHeightsVersion((v) => v + 1);
+  /**
+   * A card has told us how many buses it is showing.
+   *
+   * Every arrivals poll rebuilds the card's line list, so the overwhelming
+   * majority of these are the same number as last time and must cost nothing —
+   * the guard is what keeps a screen of live cards from re-placing the whole
+   * canvas every fifteen seconds.
+   */
+  const onCount = useCallback((stopCode: string, buses: number) => {
+    if (countsRef.current.get(stopCode) === buses) return;
+    countsRef.current.set(stopCode, buses);
+    setCountsVersion((v) => v + 1);
   }, []);
 
   /**
    * Where every card sits.
    *
-   * `heightsVersion` rather than the map itself is the dependency: the map is
+   * `countsVersion` rather than the map itself is the dependency: the map is
    * mutated in place so its identity never changes, and the counter is the only
    * honest signal that its contents did.
    */
   const placed = useMemo(
-    () => placeAll(favoriteStops, heightsRef.current, canvasW),
-    [favoriteStops, canvasW, heightsVersion],
+    () => placeAll(favoriteStops, countsRef.current, canvasW),
+    [favoriteStops, canvasW, countsVersion],
   );
-
-  /** True for the one frame between mount and the first `onLayout`, and only
-   *  when there is something on the canvas whose height is still a guess. */
-  const canvasWaiting = heightsVersion === 0 && placed.cards.some((c) => c.flowing);
 
   /* ── Drag state ────────────────────────────────────────────── */
 
@@ -1623,7 +1647,7 @@ export default function HomeScreen() {
      to serve. */
   const placedRef = useRef(placed);
   const uRef = useRef(canvasW);
-  const edgeYRef = useRef<number[]>([]);
+  const edgeYRef = useRef<EdgesY>({ tops: [0], bottoms: [] });
   const activeRef = useRef(-1);
   const guideRef = useRef(-1);
   const scrollPosRef = useRef(0);
@@ -1641,8 +1665,9 @@ export default function HomeScreen() {
   const lift = useSharedValue(1);
   const guideY = useSharedValue(-1);
   const rectsSV = useSharedValue<Rect[]>([]);
+  const busesSV = useSharedValue<number[]>([]);
   const othersSV = useSharedValue<Rect[]>([]);
-  const edgeYSV = useSharedValue<number[]>([]);
+  const edgeYSV = useSharedValue<EdgesY>({ tops: [0], bottoms: [] });
   const uSV = useSharedValue(1);
   const resizing = useSharedValue(-1);
   const previewX = useSharedValue(0);
@@ -1689,24 +1714,35 @@ export default function HomeScreen() {
       y: c.rect.y,
       h: c.rect.h,
     }));
+    /* Resolved here rather than in the worklet, and it has to be the *reported*
+       count in preference to the box's capacity: at two columns a box holding
+       three buses has room for four, so a card resized from two columns to one
+       off its capacity would come back a row taller than its lines need, and the
+       next `fitAll` would visibly take that row away again. */
+    busesSV.value = placed.cards.map((c) =>
+      busesFor(c.rect.span, c.rect.h, countsRef.current.get(c.stopCode) ?? null, canvasW),
+    );
     uSV.value = canvasW;
-  }, [favoriteStops, placed, canvasW, dropTick, rectsSV, uSV]);
+  }, [favoriteStops, placed, canvasW, dropTick, rectsSV, busesSV, uSV]);
 
   /**
-   * Re-fit placed cards to the canvas.
+   * Re-fit placed cards to the canvas, and to what their stops are showing.
    *
-   * Columns carry an arrangement across devices and orientations on their own;
-   * what they cannot carry is the height floor, because one bus row is a fixed
-   * number of dp and `h` is a fraction of the canvas width — so a narrower
-   * screen may need a card made taller and everything it then collides with
-   * moved. The other way in is an imported backup, which can carry an
-   * arrangement from a phone of any size, so this watches the stops as well as
-   * the width.
+   * Four things reach it. A **line toggled** in a card's filter sheet, which is
+   * what makes a card grow or shrink at all now — `countsVersion` is in the
+   * dependencies for exactly that, and it is the one path that can grow a card
+   * into its neighbour, which is why the growth goes through the same resolver a
+   * drag does rather than being nudged by hand. A stop's **routes arriving**, the
+   * same thing on a longer fuse. A **rotation or a different phone**, because one
+   * bus row is a fixed number of dp and `h` is a fraction of the canvas width, so
+   * the same stored box is a different number of buses at a different width. And
+   * an **imported backup**, which can carry an arrangement from a phone of any
+   * size and heights from a build where the user chose them.
    *
    * `fitAll` returns only what actually changed, which is what stops this from
    * chasing its own tail: the write it triggers re-runs the effect, the second
    * pass finds nothing to do, and the overwhelmingly common case — same phone,
-   * same orientation, every launch — writes nothing at all.
+   * same orientation, nothing toggled — writes nothing at all.
    *
    * Held back while a card is up, for the same reason the geometry republish
    * above is. The freeze at lift writes `favoriteStops`, so without this guard
@@ -1716,14 +1752,14 @@ export default function HomeScreen() {
    */
   useEffect(() => {
     if (activeRef.current >= 0) return;
-    const changed = fitAll(favoriteStops, canvasW);
+    const changed = fitAll(favoriteStops, countsRef.current, canvasW);
     if (changed.size === 0) return;
     const patches = new Map<string, Partial<FavoriteStop>>();
     changed.forEach((rect, stopCode) => patches.set(stopCode, { layout: rect }));
     const next = updateFavoriteStops(patches);
     stopsRef.current = next;
     setFavoriteStops(next);
-  }, [favoriteStops, canvasW, dropTick]);
+  }, [favoriteStops, canvasW, countsVersion, dropTick]);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -1737,44 +1773,29 @@ export default function HomeScreen() {
   /**
    * Turn every flowing card into a placed one, at the box it already occupies.
    *
-   * Run the moment anything is picked up. What changes is that the cards stop
-   * being allowed to grow: from here on an arrival landing scrolls inside a
-   * card instead of pushing the one below it down, which is the only behaviour
-   * compatible with "nothing may overlap".
+   * Run the moment anything is picked up, so that a card cannot be dragged out of
+   * a stack whose remaining cards have no positions of their own.
    *
    * Doing it at lift rather than at drop matters. An interrupted drag — a call
    * arriving mid-gesture — must still leave a consistent canvas, and it would
    * not if half the cards had concrete boxes and half were still flowing under
    * a card that had already been moved out of the stack.
    *
-   * The one thing that can move is a card whose content measures less than the
-   * floor for its span — a stop serving no lines is about 79dp, and a flowing
-   * card is always full span, so the floor it has to clear is the widest one. It
-   * is floored here rather than left for `fitAll` to raise afterwards, because
-   * `fitAll`
-   * would do it in the middle of the drag this freeze belongs to, pushing every
-   * card below it down while the geometry the gesture is using stays
-   * deliberately frozen; the magnets and the drop would then be answering about
-   * a layout that is no longer on screen.
-   *
-   * And flooring one card means re-running the stack, not just editing that
-   * card: flowing cards sit directly under one another, so a card that grows
-   * to the floor overlaps the one below it unless everything after it moves
-   * too. When nothing needs raising — the overwhelmingly common case — the walk
-   * below reproduces the existing `y` values exactly and nothing moves at all.
+   * It is a straight copy of the boxes `placeAll` already worked out, and that is
+   * new: this used to have to floor each card at its span's minimum and re-walk
+   * the stack, because a flowing card's height was whatever it measured and a card
+   * serving no lines measured under the floor. Heights are derived now, the floor
+   * is the no-bus case of the same derivation, and the stack `placeAll` builds
+   * already has the gap between its cards — so there is nothing to correct and
+   * nothing on screen changes.
    */
   const freezeFlowing = useCallback(() => {
-    const u = uRef.current;
-    const minH = minHFor(COLS, u);
-    const gap = CARD_GAP_DP / u;
     const patches = new Map<string, Partial<FavoriteStop>>();
-    let top = -1;
     for (const c of placedRef.current.cards) {
       if (!c.flowing) continue;
-      if (top < 0) top = c.rect.y;
-      const h = c.rect.h < minH ? minH : c.rect.h;
-      patches.set(c.stopCode, { layout: { col: c.rect.col, span: c.rect.span, y: top, h } });
-      top += h + gap;
+      patches.set(c.stopCode, {
+        layout: { col: c.rect.col, span: c.rect.span, y: c.rect.y, h: c.rect.h },
+      });
     }
     if (patches.size === 0) return;
     const next = updateFavoriteStops(patches);
@@ -1915,22 +1936,28 @@ export default function HomeScreen() {
     cards.forEach((c, i) => {
       if (i !== index) others.push(c.rect);
     });
+    /* The count a width step has to preserve. Same resolution as the gesture's,
+       through the same function, because "Wider" and a corner drag to the same
+       span must produce the same box. */
+    const buses = busesFor(
+      me.rect.span,
+      me.rect.h,
+      countsRef.current.get(me.stopCode) ?? null,
+      u,
+    );
 
     let next: Rect;
     switch (action) {
       case 'moveUp': next = nudgeY(me.rect, others, -1, u); break;
       case 'moveDown': next = nudgeY(me.rect, others, 1, u); break;
-      case 'moveLeft': next = nudgeCol(me.rect, others, -1); break;
-      case 'moveRight': next = nudgeCol(me.rect, others, 1); break;
-      case 'wider': next = spanStep(me.rect, others, 1, u); break;
-      case 'narrower': next = spanStep(me.rect, others, -1, u); break;
-      case 'taller': next = heightStep(me.rect, others, 1, u); break;
-      case 'shorter': next = heightStep(me.rect, others, -1, u); break;
+      case 'moveLeft': next = nudgeCol(me.rect, others, -1, u); break;
+      case 'moveRight': next = nudgeCol(me.rect, others, 1, u); break;
+      case 'wider': next = spanStep(me.rect, others, 1, buses, u); break;
+      case 'narrower': next = spanStep(me.rect, others, -1, buses, u); break;
       default: return;
     }
 
-    const sizing = action !== 'moveUp' && action !== 'moveDown'
-      && action !== 'moveLeft' && action !== 'moveRight';
+    const sizing = action === 'wider' || action === 'narrower';
     const moved =
       next.col !== me.rect.col ||
       next.span !== me.rect.span ||
@@ -1940,15 +1967,25 @@ export default function HomeScreen() {
     if (!moved) {
       /* Silence would be indistinguishable from the action not having been
          registered at all, which on a screen a user cannot see is the worst
-         possible answer. Each of the four size actions has its own wall, and
-         says which one it hit — "blocked" for a card that is already three
-         columns wide would send the user looking for the obstruction. */
+         possible answer. Each wall says which one it is: "blocked" for a card
+         that is already three columns wide would send the user looking for an
+         obstruction that does not exist.
+         Narrowing has two walls, and they are genuinely different. One column is
+         the end of the axis; anything wider that still refuses has run out of
+         room, because a narrower card is a *taller* card — the same buses stack
+         one to a row instead of two — and the space to grow downwards into is not
+         there. Saying "already one column" for that would be a lie the user can
+         see is false. */
       AccessibilityInfo.announceForAccessibility(
-        action === 'wider' ? 'Already as wide as it fits'
-          : action === 'narrower' ? 'Already one column'
-            : action === 'taller' ? 'No room to grow'
-              : action === 'shorter' ? 'Already at the smallest height'
-                : 'Blocked',
+        action === 'wider'
+          ? me.rect.span >= COLS - me.rect.col
+            ? 'Already as wide as it fits'
+            : 'No room to widen'
+          : action === 'narrower'
+            ? me.rect.span <= 1
+              ? 'Already one column'
+              : 'No room — narrower makes this card taller'
+            : 'Blocked',
       );
       return;
     }
@@ -1964,12 +2001,12 @@ export default function HomeScreen() {
        Two actions in quick succession would otherwise both read the geometry
        from before the first one, and the second would place the card as if the
        first had not happened. */
-    placedRef.current = placeAll(updated, heightsRef.current, u);
+    placedRef.current = placeAll(updated, countsRef.current, u);
     setFavoriteStops(updated);
     hapticSelection();
     AccessibilityInfo.announceForAccessibility(
       sizing
-        ? sizeWord(next.span, busCapacity(next.span, next.h * u))
+        ? sizeWord(next.span, buses)
         : `Moved. Column ${next.col + 1} of ${COLS}.`,
     );
   }, []);
@@ -2019,6 +2056,7 @@ export default function HomeScreen() {
       lift,
       guideY,
       rects: rectsSV,
+      buses: busesSV,
       others: othersSV,
       edgeY: edgeYSV,
       u: uSV,
@@ -2039,7 +2077,7 @@ export default function HomeScreen() {
       onResizeEnd,
     }),
     [
-      active, dx, dy, heldCol, panX, panY, lift, guideY, rectsSV, othersSV,
+      active, dx, dy, heldCol, panX, panY, lift, guideY, rectsSV, busesSV, othersSV,
       edgeYSV, uSV, resizing, previewX, previewY, previewW, previewH, previewSpan,
       pointerY, scrollY, scrollAt, reducedSV,
       onLift, onSnap, onDrop, onResizeStart, onResizeEnd,
@@ -2253,8 +2291,11 @@ export default function HomeScreen() {
           {/* Two lines at most: at a large font scale this shares a row with
               the section label, and a hint that pushes the label off the screen
               is worse than a hint that wraps. */}
+          {/* "Change width" rather than "resize": the corner sets a width and
+              nothing else, and a hint that implied otherwise would send the user
+              dragging downwards against a card that cannot answer. */}
           <Text style={s.sectionHint} numberOfLines={2}>
-            {arranging ? 'Drag or resize' : 'Hold a card to arrange'}
+            {arranging ? 'Drag, or change width' : 'Hold a card to arrange'}
           </Text>
         </View>
       ) : null,
@@ -2320,7 +2361,7 @@ export default function HomeScreen() {
               accessibilityHint={
                 editing || arranging
                   ? undefined
-                  : 'Lets you move and resize saved stops, and remove saved items'
+                  : 'Lets you move saved stops, change how wide they are, and remove saved items'
               }
             >
               <Ionicons
@@ -2454,21 +2495,18 @@ export default function HomeScreen() {
               top of the stops. `placed.cards` is built from `favoriteStops` in
               the same pass, so the two are indexed alike by construction. */}
           {favoriteStops.length > 0 && (
-            /* Held back until the first measurement lands.
-               A flowing card is positioned from its neighbours' measured
-               heights, and on the frame between mount and the first `onLayout`
-               there are none — so the stack is built on `FALLBACK_CARD_H_DP`
-               and any card whose real height differs sits over or under the one
-               below it. One invisible frame is not noticeable; a frame of
-               overlapping cards on every cold start is. Every card lays out in
-               the same pass, so this clears on the next render and cannot be
-               reopened by a stop saved later, because the counter only rises.
-               An install whose cards are all placed has nothing to measure and
-               is therefore never held back. */
-            <View
-              style={[s.canvas, { height: placed.height }, canvasWaiting && s.canvasWaiting]}
-              onLayout={onCanvasLayout}
-            >
+            /* No longer held back for a frame, and that is a consequence of the
+               heights being derived rather than measured. The canvas used to be
+               drawn invisible until the first `onLayout` reported back, because a
+               flowing card was stacked from its neighbours' *measured* heights and
+               on the first frame there were none — so the stack was built out of
+               fallbacks and any card whose real height differed sat over the one
+               below it. `placeAll` now stacks cards at the heights it also hands
+               them, so the first frame is as correct as the second, and a stop
+               whose lines have not arrived is a card at `FALLBACK_BUSES` rather
+               than a hole in the arrangement. Hiding the canvas until every count
+               had landed would mean hiding it until the network answered. */
+            <View style={[s.canvas, { height: placed.height }]} onLayout={onCanvasLayout}>
               {favoriteStops.map((stop, i) => (
                 <StopCard
                   key={stop.stopCode}
@@ -2483,7 +2521,7 @@ export default function HomeScreen() {
                   entrance={entranceRef.current}
                   reduced={reduced}
                   ctl={ctl}
-                  onMeasure={onMeasure}
+                  onCount={onCount}
                   onRemove={handleRemoveStop}
                   onMoveUp={moveStopUp}
                   onMoveDown={moveStopDown}

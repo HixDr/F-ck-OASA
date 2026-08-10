@@ -157,10 +157,10 @@ export interface MapStamp {
  * authored on a 412dp phone would then need a reflow pass on a 360dp one, and
  * every such pass throws away some of the arrangement the user built.
  *
- * `h === 0` means the card has never been arranged: it is full span and sizes
- * itself to its content, exactly as it did in 1.2.4. A record still carrying the
- * old `{x, w}` is quantised to the nearest column on load — see
- * `migrateLayout` in `features/home/layout`.
+ * `h === 0` means the card has never been arranged: it is full span and stacked
+ * in saved order, exactly as it was in 1.2.4. A record still carrying the old
+ * `{x, w}` is quantised to the nearest column on load — see `migrateLayout` in
+ * `features/home/layout`.
  */
 export interface StopLayout {
   /** Leftmost column, 0-based. */
@@ -168,6 +168,24 @@ export interface StopLayout {
   /** Columns covered, at least 1, and never past the last column. */
   span: number;
   y: number;
+  /**
+   * Height — a **cache** of a derived value, not a size anybody chose.
+   *
+   * A card is exactly as tall as the buses its stop is showing, so this is
+   * `hForBuses(span, count)` and the count is the length of `visibleLines` (or of
+   * everything the stop serves, when that is null). It is stored all the same
+   * because the count is only known once the stop's routes have come back off the
+   * network, and the canvas has to lay out before then: without it every cold
+   * start would place the cards at a fallback height, resolve the overlaps that
+   * produced, and persist them.
+   *
+   * So it is written by the geometry and read only as a starting guess. A value
+   * left behind by a build where the height was dragged is quantised to a whole
+   * number of buses on the first pass — see the module comment in
+   * `features/home/layout`.
+   *
+   * Zero, or no layout at all, still means "never arranged".
+   */
   h: number;
 }
 

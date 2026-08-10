@@ -18,8 +18,14 @@
  * layout, `maxBuses` says how many buses fit, `tier` is `span` said as a word,
  * and `boxHeight` is the exact box to fill. Every one of them defaults to what
  * this card was before the canvas existed — three columns, uncapped, detailed,
- * self-measured — so a caller that passes none of them, and a stop the user has
- * never arranged, renders unchanged.
+ * self-measured — so a caller that passes none of them renders unchanged.
+ *
+ * One number goes the other way, and it is the one the box is built from:
+ * `onCountChange` reports how many buses this card is showing, and the canvas
+ * makes the card exactly that tall. Height is not something the user can drag any
+ * more — it is what the line filter below decides — so the two ends of that loop
+ * are the same fact, and the cap above can only ever be the count that produced
+ * the box.
  *
  * There are two bus layouts, which is why there are two tiers. Three columns is
  * the detailed row from 1.2.4, badge and destination and figure and bell across
@@ -150,23 +156,35 @@ interface Props {
    */
   span?: number;
   /**
-   * How many buses fit in the box the canvas gave this card, or null while the
-   * card is still allowed to show all of them.
+   * How many buses fit in the box the canvas gave this card, or null for a caller
+   * that is not imposing a box at all.
    *
-   * The null case is not a fallback, it is the migration: a stop the user has
-   * never arranged sizes itself to its content, so an install with no saved
-   * layout shows every line of every stop and looks like 1.2.4.
+   * It is a guard rather than a policy: the canvas sizes the box from the count
+   * this card reports through `onCountChange`, so in the ordinary case it admits
+   * every line the stop is showing. What it is for is the frame between a line
+   * being toggled here and the canvas hearing about it, where the card would
+   * otherwise draw a row its box has no room for.
    */
   maxBuses?: number | null;
   /**
    * The exact height in px the canvas has given this card, or null/undefined
    * while the card is still allowed to size itself to its content.
    *
-   * The second case is the other half of the same migration: an install with no
-   * saved arrangement has no heights, so every card flows and the screen is
-   * byte-for-byte the single column it was.
+   * Home always passes one — every card's height is derived from its bus count,
+   * whether or not the user has ever arranged it. The null case is what a caller
+   * that knows nothing about the canvas gets, and is what keeps this component
+   * renderable on its own.
    */
   boxHeight?: number | null;
+  /**
+   * How many buses this card is showing, reported whenever it changes.
+   *
+   * This is the input to the card's own height, so it is the one piece of layout
+   * traffic that runs upwards. Only this component can supply it: the stop's line
+   * list comes off the network, and the stored filter's default — `null`, meaning
+   * "show all" — is not a number anybody else can count.
+   */
+  onCountChange?: (stopCode: string, buses: number) => void;
   onRemove: (stop: FavoriteStop) => void;
   onMoveUp?: (stop: FavoriteStop) => void;
   onMoveDown?: (stop: FavoriteStop) => void;
@@ -519,6 +537,7 @@ function FavoriteStopCard({
   span = 3,
   maxBuses = null,
   boxHeight = null,
+  onCountChange,
   onRemove,
   onMoveUp,
   onMoveDown,
@@ -673,6 +692,31 @@ function FavoriteStopCard({
     if (!visibleSet) return allLineGroups;
     return allLineGroups.filter((l) => visibleSet.has(l.lineCode));
   }, [allLineGroups, visibleSet]);
+
+  /**
+   * Tell the canvas how many buses this card is showing.
+   *
+   * The card's height is a function of this and nothing else, so this is the one
+   * piece of layout traffic that runs upwards — and the only place it can come
+   * from. `visibleLines` is stored, but its default is `null` meaning "show all",
+   * and how many "all" is depends on a route list that arrives over the network.
+   * The intersection is what matters, not the filter: a filter still naming a line
+   * the stop no longer serves must not buy a row for a bus that cannot appear.
+   *
+   * A *number* is the dependency, not `displayLines` — the arrivals poll rebuilds
+   * that array every fifteen seconds with fresh identities, and an effect keyed on
+   * it would report the same count to the canvas on every poll for every card on
+   * the screen.
+   *
+   * Nothing is reported while the list is still unknown. A zero would be a claim —
+   * "this stop shows no buses" — and it would shrink the card to its floor and back
+   * again the moment the request landed, on every cold start.
+   */
+  const busCount = displayLines?.length ?? null;
+  useEffect(() => {
+    if (busCount == null) return;
+    onCountChange?.(stop.stopCode, busCount);
+  }, [busCount, onCountChange, stop.stopCode]);
 
   /* Freshness: how much of the last known estimate has already elapsed.
      `observedAt`, not `dataUpdatedAt` — the latter is when the *query* resolved,
@@ -941,10 +985,12 @@ function FavoriteStopCard({
   /* Two buses across, i.e. a two-column card. The only thing `span` decides. */
   const pair = span === 2;
   /* How many grey shapes the cold start draws. The cap, because that is how many
-     real ones will replace them; three when there is no cap, which is what an
-     unarranged card has always shown and is a fair guess at a stop's line count.
-     Getting this wrong is not cosmetic in a fixed box: too many and the
-     placeholder scrolls on the first frame and then does not. */
+     real ones will replace them; three when there is no cap, which is what a
+     caller imposing no box has always shown and is a fair guess at a stop's line
+     count — the canvas's own guess for a stop it has not heard from is the same
+     three, for the same reason (`FALLBACK_BUSES`). Getting this wrong is not
+     cosmetic in a fixed box: too many and the placeholder scrolls on the first
+     frame and then does not. */
   const placeholderCount = maxBuses ?? SKELETON_WIDTHS.length;
   /* An armed alert whose line the filter hides would otherwise be unreachable —
      at `detailed`. Below it this banner is left out because the geometry does not
@@ -963,14 +1009,19 @@ function FavoriteStopCard({
       : null;
 
   /**
-   * A card that has been arranged is a fixed box, and `overflow` is what makes
-   * that claim true: content that outgrew the box would paint over the card
-   * below it, and the design rules overlap out entirely — one stop covering
-   * another stop's minutes is worse than any arrangement it could enable.
+   * A card on the canvas is a fixed box, and `overflow` is what makes that claim
+   * true: content that outgrew the box would paint over the card below it, and the
+   * design rules overlap out entirely — one stop covering another stop's minutes
+   * is worse than any arrangement it could enable.
    *
-   * No height at all is the other half of the migration. A stop the user has
-   * never arranged still measures itself, so an install with no saved layout
-   * renders the column it always did.
+   * The box is sized for this card's buses, so in the ordinary case there is
+   * nothing for `overflow` to cut off. What it still catches is the two things the
+   * geometry cannot predict: a system font scale that grows a row past the height
+   * the arithmetic assigned it, and the offline notice below, which appears when
+   * the network says so rather than when the layout is decided.
+   *
+   * No height at all is what a caller outside the canvas gets, and it is why this
+   * component still renders on its own.
    *
    * `cardCompact` narrows the *side* padding only, and it is here rather than in
    * `card` because it is only worth it where width is scarce: it is 10dp of a
