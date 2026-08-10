@@ -113,6 +113,7 @@ import {
   colLeftPx,
   edgesY,
   fitAll,
+  gapFor,
   hForBuses,
   nudgeCol,
   nudgeY,
@@ -125,6 +126,7 @@ import {
   spanWidthPx,
   COLS,
   SNAP_DP,
+  type EdgesY,
   type PlacedCard,
   type Rect,
 } from './layout';
@@ -225,7 +227,7 @@ interface CanvasCtl {
   /** The same minus the carried one, plus its edges — built once per lift,
    *  because the alternative is rebuilding both on every frame of the drag. */
   others: SharedValue<Rect[]>;
-  edgeY: SharedValue<number[]>;
+  edgeY: SharedValue<EdgesY>;
   /** Canvas usable width. Every conversion between stored units and pixels
    *  goes through it. */
   u: SharedValue<number>;
@@ -326,7 +328,7 @@ function carryTo(
   panX: number,
   panY: number,
   u: number,
-  edgeY: readonly number[],
+  edgeY: EdgesY,
 ): Carried {
   'worklet';
   const tol = SNAP_DP / u;
@@ -334,7 +336,7 @@ function carryTo(
   let y = base.y + panY / u;
   if (y < 0) y = 0;
 
-  const sy = snapAxis(y, base.h, edgeY, tol);
+  const sy = snapAxis(y, base.h, edgeY, gapFor(u), tol);
   let ny = sy.v;
   let gy = sy.guide;
   if (ny < 0) {
@@ -593,6 +595,7 @@ const StopCard = React.memo(function StopCard({
               h: base.h,
             },
             ctl.others.value,
+            u,
           );
           const tx = colLeftPx(got.col, u) - colLeftPx(base.col, u);
           const ty = (got.y - base.y) * u;
@@ -1644,7 +1647,7 @@ export default function HomeScreen() {
      to serve. */
   const placedRef = useRef(placed);
   const uRef = useRef(canvasW);
-  const edgeYRef = useRef<number[]>([]);
+  const edgeYRef = useRef<EdgesY>({ tops: [0], bottoms: [] });
   const activeRef = useRef(-1);
   const guideRef = useRef(-1);
   const scrollPosRef = useRef(0);
@@ -1664,7 +1667,7 @@ export default function HomeScreen() {
   const rectsSV = useSharedValue<Rect[]>([]);
   const busesSV = useSharedValue<number[]>([]);
   const othersSV = useSharedValue<Rect[]>([]);
-  const edgeYSV = useSharedValue<number[]>([]);
+  const edgeYSV = useSharedValue<EdgesY>({ tops: [0], bottoms: [] });
   const uSV = useSharedValue(1);
   const resizing = useSharedValue(-1);
   const previewX = useSharedValue(0);
@@ -1947,8 +1950,8 @@ export default function HomeScreen() {
     switch (action) {
       case 'moveUp': next = nudgeY(me.rect, others, -1, u); break;
       case 'moveDown': next = nudgeY(me.rect, others, 1, u); break;
-      case 'moveLeft': next = nudgeCol(me.rect, others, -1); break;
-      case 'moveRight': next = nudgeCol(me.rect, others, 1); break;
+      case 'moveLeft': next = nudgeCol(me.rect, others, -1, u); break;
+      case 'moveRight': next = nudgeCol(me.rect, others, 1, u); break;
       case 'wider': next = spanStep(me.rect, others, 1, buses, u); break;
       case 'narrower': next = spanStep(me.rect, others, -1, buses, u); break;
       default: return;

@@ -52,6 +52,15 @@
  * *inverse* — how many buses a box was built for — which is the only question
  * left that needs it: see `busesFor`.
  *
+ * ## Nothing may touch
+ *
+ * `CARD_GAP_DP` is the gap on both axes, and vertically it is part of what
+ * *overlap* means: two cards that share a column and sit edge to edge count as
+ * overlapping, so every resolver here pushes them apart. Horizontally the
+ * columns already carry it — a card is a whole number of columns wide and the
+ * gaps are cut out of the canvas before the columns are, so two cards side by
+ * side cannot be closer than one gap however they are placed.
+ *
  * ## Flowing cards
  *
  * `h === 0` — or no layout at all — means "this card has never been arranged".
@@ -206,12 +215,12 @@ export const NUDGE_STEP_DP = 32;
 /**
  * Slack for every vertical edge comparison.
  *
- * Two cards that share an edge must not count as overlapping. After a snap they
- * share it only to within floating-point error, so a strict comparison rejects
- * the position the magnet just produced and the card jumps somewhere else on
- * drop — the single most confusing thing this geometry could do. 1e-4 is ~0.04dp
- * on a 364dp canvas: below the point where anything is visible, far above the
- * error a couple of divisions accumulate.
+ * Two cards exactly `CARD_GAP_DP` apart must not count as overlapping. After a
+ * snap they are that far apart only to within floating-point error, so a strict
+ * comparison rejects the position the magnet just produced and the card jumps
+ * somewhere else on drop — the single most confusing thing this geometry could
+ * do. 1e-4 is ~0.04dp on a 364dp canvas: below the point where anything is
+ * visible, far above the error a couple of divisions accumulate.
  *
  * The horizontal axis needs none of this. Columns are integers, so "these two
  * cards touch" is `a.col + a.span === b.col` and not a question about tolerance.
@@ -219,6 +228,19 @@ export const NUDGE_STEP_DP = 32;
 const EPS = 1e-4;
 
 /* ── Columns to pixels ───────────────────────────────────────── */
+
+/**
+ * The gap, in stored units.
+ *
+ * Every resolver below takes `u` for this and this alone. The gap is a fixed
+ * number of dp — 8dp is 8dp on a 320dp phone and on a tablet — and `y` and `h`
+ * are fractions of the canvas, so the one number cannot be a constant in the
+ * unit the boxes are expressed in.
+ */
+export function gapFor(u: number): number {
+  'worklet';
+  return u > 0 ? CARD_GAP_DP / u : 0;
+}
 
 /** One column, in canvas pixels. 116dp on a 412dp phone. */
 export function colWidthPx(u: number): number {
@@ -407,20 +429,37 @@ export function busesFor(span: number, h: number, reported: number | null, u: nu
 
 /* ── Rect predicates ─────────────────────────────────────────── */
 
-export function overlaps(a: Rect, b: Rect): boolean {
+/**
+ * Do these two boxes conflict, `gap` being the vertical clearance they owe each
+ * other in stored units?
+ *
+ * The gap is inside the predicate rather than applied by the callers, because
+ * "overlap" is the one thing every resolver here asks about and a clearance that
+ * only some of them enforced would be a rule with holes in it — a drop that
+ * refused to touch, a nudge that did, and a re-fit that then had to tidy up after
+ * whichever ran last.
+ *
+ * Only the vertical axis takes it. Two cards in different columns are already a
+ * gap apart by construction; two cards in the *same* columns had nothing keeping
+ * them apart at all, which is what this fixes. Passing `gap = 0` therefore asks
+ * the old question — whether the boxes literally intersect — and nothing in this
+ * file does, so `resolveMove` and friends cannot silently lose the clearance by
+ * forgetting to pass it.
+ */
+export function overlaps(a: Rect, b: Rect, gap: number): boolean {
   'worklet';
   return (
     a.col < b.col + b.span &&
     b.col < a.col + a.span &&
-    a.y + EPS < b.y + b.h &&
-    b.y + EPS < a.y + a.h
+    a.y + EPS < b.y + b.h + gap &&
+    b.y + EPS < a.y + a.h + gap
   );
 }
 
-function hitsAny(r: Rect, others: readonly Rect[]): boolean {
+function hitsAny(r: Rect, others: readonly Rect[], gap: number): boolean {
   'worklet';
   for (let i = 0; i < others.length; i++) {
-    if (overlaps(r, others[i])) return true;
+    if (overlaps(r, others[i], gap)) return true;
   }
   return false;
 }
@@ -439,17 +478,37 @@ export function bottomOf(rects: readonly Rect[]): number {
 
 /* ── Magnets ─────────────────────────────────────────────────── */
 
-/** Coordinates worth aligning a card's top or bottom edge to: the canvas's top
- *  margin, and both horizontal edges of every other card. There is no bottom
- *  margin — the canvas grows. */
-export function edgesY(others: readonly Rect[]): number[] {
+/**
+ * The horizontal edges on the canvas that are worth landing near: the canvas's
+ * top margin, and both edges of every other card. There is no bottom margin —
+ * the canvas grows.
+ *
+ * Kept as two lists rather than one, because a coordinate now means something
+ * different depending on which edge of the card it belongs to. A neighbour's
+ * *bottom* is where this card's bottom may align (a card in another column) and
+ * also what its top may come to rest one gap below (a card in the same one), and
+ * those are two different landing positions from the same number. Flattening
+ * them into a single list of candidates that every edge is tested against was the
+ * shape before the gap existed, and it now produces positions that are 8dp off a
+ * neighbour's edge for no reason anybody could see.
+ */
+export interface EdgesY {
+  /** Every card's top edge, and the canvas's. */
+  tops: number[];
+  /** Every card's bottom edge. */
+  bottoms: number[];
+}
+
+export function edgesY(others: readonly Rect[]): EdgesY {
   'worklet';
-  const out: number[] = [0];
+  const tops: number[] = [0];
+  const bottoms: number[] = [];
   for (let i = 0; i < others.length; i++) {
-    out.push(others[i].y);
-    out.push(others[i].y + others[i].h);
+    const b = others[i];
+    tops.push(b.y);
+    bottoms.push(b.y + b.h);
   }
-  return out;
+  return { tops, bottoms };
 }
 
 export interface Snap {
@@ -462,30 +521,66 @@ export interface Snap {
 /**
  * Snap the vertical axis. The horizontal one is columns and needs no magnet.
  *
- * Both of the card's own edges are tested against every candidate in the same
- * loop, so "align tops", "align bottoms" and "sit flush against" all fall out
- * of one comparison instead of being three cases to keep in step.
+ * Every edge on the canvas offers a card *four* positions, and they are written
+ * out rather than folded into one comparison because they are four different
+ * intentions: align tops with it, align bottoms with it, rest against it from
+ * above, rest against it from below. The last two are the ones the gap changed —
+ * "flush" is no longer a position a card can occupy, so resting against a
+ * neighbour means landing one gap clear of it.
+ *
+ * The distance is always measured from where the card's *top* would end up, so
+ * all four are comparable and the nearest wins outright. `guide` is the edge that
+ * attracted it and not the position it produced: for the two resting cases those
+ * differ by exactly the gap, and a hairline drawn 8dp off every card's edge would
+ * be a guide that lines up with nothing.
  *
  * The magnet only ever *offers* a position: `tol` is a radius, and pulling
  * beyond it simply stops matching. Nothing here can refuse a placement.
  */
-export function snapAxis(origin: number, size: number, edges: readonly number[], tol: number): Snap {
+export function snapAxis(
+  origin: number,
+  size: number,
+  edges: EdgesY,
+  gap: number,
+  tol: number,
+): Snap {
   'worklet';
   let v = origin;
   let best = tol;
   let guide = -1;
-  for (let i = 0; i < edges.length; i++) {
-    const e = edges[i];
-    const dLead = Math.abs(origin - e);
-    if (dLead < best) {
-      best = dLead;
+  for (let i = 0; i < edges.tops.length; i++) {
+    const e = edges.tops[i];
+    // Tops aligned.
+    let d = Math.abs(origin - e);
+    if (d < best) {
+      best = d;
       v = e;
       guide = e;
     }
-    const dTrail = Math.abs(origin + size - e);
-    if (dTrail < best) {
-      best = dTrail;
+    // Sitting above it, clear of it.
+    const above = e - gap - size;
+    d = Math.abs(origin - above);
+    if (d < best) {
+      best = d;
+      v = above;
+      guide = e;
+    }
+  }
+  for (let i = 0; i < edges.bottoms.length; i++) {
+    const e = edges.bottoms[i];
+    // Bottoms aligned.
+    let d = Math.abs(origin - (e - size));
+    if (d < best) {
+      best = d;
       v = e - size;
+      guide = e;
+    }
+    // Sitting below it, clear of it.
+    const below = e + gap;
+    d = Math.abs(origin - below);
+    if (d < best) {
+      best = d;
+      v = below;
       guide = e;
     }
   }
@@ -528,26 +623,41 @@ function legalCols(col: number, span: number): { col: number; span: number } {
  * "Nearest" is exact rather than a heuristic walk. Horizontally there are at
  * most three columns the card can occupy, so all of them are tried; vertically
  * the only positions that can be the nearest free one are the desired `y` and
- * the two flush positions per blocker. That is ~3 × (2n + 2) candidates, which
+ * the two resting positions per blocker. That is ~3 × (2n + 2) candidates, which
  * at twenty saved stops is a couple of hundred rather than the ~1700 the
- * free-width version had to test. It cannot fail, because `bottom` — below
- * every card — is always a candidate.
+ * free-width version had to test. It cannot fail, because one gap below every
+ * card is always a candidate.
+ *
+ * `u` is here for the gap and nothing else. Two cards may not touch, so the
+ * resting positions are one gap clear of a blocker rather than flush against it,
+ * and the fallback below every card has to clear the lowest one by the same
+ * amount — otherwise the position this function guarantees is free would be the
+ * one position it is not allowed to use.
  */
-export function resolveMove(want: Rect, others: readonly Rect[]): Rect {
+export function resolveMove(want: Rect, others: readonly Rect[], u: number): Rect {
   'worklet';
+  const gap = gapFor(u);
   const { col, span } = legalCols(want.col, want.span);
-  const y = want.y < 0 ? 0 : want.y;
-  const h = want.h;
+  /* Guarded the way `legalCols` guards the columns, and for the same reason.
+     `want.y < 0 ? 0 : want.y` was the whole of this, and it lets a NaN through:
+     every comparison against a NaN is false, so the clamp declines to fire, every
+     overlap test declines to fire, and the card is placed at a coordinate that
+     cannot be seen, cannot be hit and cannot be dragged back. Property-testing
+     found it — the same class of bug the column clamp was already written for, on
+     the axis nobody had checked. A non-finite height gets the floor rather than
+     zero, because a card of no height is a card the user cannot pick up again. */
+  const y = Number.isFinite(want.y) && want.y > 0 ? want.y : 0;
+  const h = Number.isFinite(want.h) && want.h > 0 ? want.h : hForBuses(span, 0, u);
   const base = { col, span, y, h };
-  if (!hitsAny(base, others)) return base;
+  if (!hitsAny(base, others, gap)) return base;
 
   const ys: number[] = [y];
-  const bottom = bottomOf(others);
+  const bottom = bottomOf(others) + gap;
   for (let i = 0; i < others.length; i++) {
     const b = others[i];
-    const above = b.y - h;
+    const above = b.y - gap - h;
     ys.push(above < 0 ? 0 : above);
-    ys.push(b.y + b.h);
+    ys.push(b.y + b.h + gap);
   }
   // Always available, always free. Without it a pathological arrangement could
   // leave the loop below with nothing to return.
@@ -560,7 +670,7 @@ export function resolveMove(want: Rect, others: readonly Rect[]): Rect {
   for (let c = 0; c <= maxCol; c++) {
     for (let j = 0; j < ys.length; j++) {
       const cand = { col: c, span, y: ys[j], h };
-      if (hitsAny(cand, others)) continue;
+      if (hitsAny(cand, others, gap)) continue;
       /* One column counts as 1/COLS of the canvas against a `y` measured in the
          same unit. That is the column *stride* short by the gap it swallows —
          0.341 rather than 0.333 of the canvas — and the approximation is
@@ -626,6 +736,7 @@ export function resolveResize(
   u: number,
 ): Rect {
   'worklet';
+  const gap = gapFor(u);
   /* Position wins over size, which is the opposite of `legalCols`: the corner the
      user is *not* holding is the one that may give way, so a card at the last
      column asked for two columns is narrowed rather than slid left. */
@@ -639,9 +750,9 @@ export function resolveResize(
 
   for (let s = span; s >= 1; s--) {
     const box = { col, span: s, y, h: hForBuses(s, buses, u) };
-    if (!hitsAny(box, others)) return box;
+    if (!hitsAny(box, others, gap)) return box;
   }
-  return resolveMove({ col, span, y, h: hForBuses(span, buses, u) }, others);
+  return resolveMove({ col, span, y, h: hForBuses(span, buses, u) }, others, u);
 }
 
 /* ── Keyboard / screen-reader steps ──────────────────────────── */
@@ -657,10 +768,10 @@ export function resolveResize(
  * announce "blocked" rather than moving the card somewhere the user did not ask
  * for.
  */
-export function nudgeCol(r: Rect, others: readonly Rect[], dir: 1 | -1): Rect {
+export function nudgeCol(r: Rect, others: readonly Rect[], dir: 1 | -1, u: number): Rect {
   const want = { col: r.col + dir, span: r.span, y: r.y, h: r.h };
   if (want.col < 0 || want.col > COLS - r.span) return r;
-  const got = resolveMove(want, others);
+  const got = resolveMove(want, others, u);
   // `resolveMove` may have had to move the card vertically to fit it in the new
   // column. That is a legal placement, but it is not a "move left", and a
   // screen-reader user who asked to go left and ended up somewhere else
@@ -679,21 +790,30 @@ export function nudgeCol(r: Rect, others: readonly Rect[], dir: 1 | -1): Rect {
  * on an edge whenever one is within reach.
  */
 export function nudgeY(r: Rect, others: readonly Rect[], dir: 1 | -1, u: number): Rect {
+  const gap = gapFor(u);
   const edges = edgesY(others);
   const step = NUDGE_STEP_DP / u;
 
   let target = r.y + dir * step;
-  for (const e of edges) {
-    // Both of the card's edges again, so "sit flush under the card above" is
-    // reachable as well as "align with it".
-    for (const cand of [e, e - r.h]) {
-      if (dir > 0 ? cand > r.y + EPS && cand < target : cand < r.y - EPS && cand > target) {
-        target = cand;
-      }
+  const consider = (cand: number) => {
+    if (dir > 0 ? cand > r.y + EPS && cand < target : cand < r.y - EPS && cand > target) {
+      target = cand;
     }
+  };
+  /* The same four landing positions `snapAxis` offers a drag, so a step can reach
+     everything a gesture can: align with a neighbour's top or bottom, or come to
+     rest one gap above or below it. Resting flush is not among them any more, and
+     a step that offered it would be a step the resolver then had to undo. */
+  for (const e of edges.tops) {
+    consider(e);
+    consider(e - gap - r.h);
+  }
+  for (const e of edges.bottoms) {
+    consider(e - r.h);
+    consider(e + gap);
   }
 
-  return resolveMove({ col: r.col, span: r.span, y: target, h: r.h }, others);
+  return resolveMove({ col: r.col, span: r.span, y: target, h: r.h }, others, u);
 }
 
 /**
@@ -846,7 +966,7 @@ export function placeAll(
   u: number,
 ): { cards: PlacedCard[]; height: number } {
   if (u <= 0) return { cards: [], height: 0 };
-  const gap = CARD_GAP_DP / u;
+  const gap = gapFor(u);
 
   /** The box each stop wants, before anything is stacked below it. */
   const boxes: (Rect | null)[] = [];
@@ -957,7 +1077,7 @@ export function fitAll(
     const buses = busesFor(l.span, l.h, reported ?? null, u);
     const { col, span } = legalCols(l.col, l.span);
     const h = hForBuses(span, buses, u);
-    const got = resolveMove({ col, span, y: l.y < 0 ? 0 : l.y, h }, placed);
+    const got = resolveMove({ col, span, y: l.y < 0 ? 0 : l.y, h }, placed, u);
     placed.push(got);
     if (
       got.col !== l.col ||
