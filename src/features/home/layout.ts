@@ -1,5 +1,5 @@
 /**
- * The saved-stop canvas: columns, per-span floors, magnets and overlap resolution.
+ * The saved-stop canvas: columns, derived heights, magnets and overlap resolution.
  *
  * Everything that decides *where a card may sit* lives here, with no React in
  * it, because the same maths has to run in three places that must not be
@@ -32,31 +32,62 @@
  *
  * ## One rule, not three sizes
  *
- * `span` picks the bus layout, `h` picks how many buses. One column stacks the
- * badge over the figure and shows them one across; two columns shows the same
- * compact bus two across; three columns is the detailed row from 1.2.4. That is
- * `tierFor` and `busCapacity` between them, and it is why the card no longer
- * measures itself to find out what it is: `span` is known before layout.
+ * `span` picks the bus layout and **the number of buses picks the height**. One
+ * column stacks the badge over the figure and shows them one across; two columns
+ * shows the same compact bus two across; three columns is the detailed row from
+ * 1.2.4. That is `tierFor` and `hDpForBuses` between them, and it is why the card
+ * no longer measures itself to find out what it is: both are known before layout.
+ *
+ * The two used to run the other way — the user dragged a corner and
+ * `busCapacity` divided the box it produced into rows. That is now inverted. A
+ * card is exactly as tall as the buses it shows, `h` is not a value anybody
+ * chooses, and the corner drag sets width only.
+ *
+ * The reason is that a height the user set and a bus count the line filter set
+ * are two ways of saying the same thing, and they disagreed. A card sized for
+ * four buses whose stop was then filtered down to one showed one bus over three
+ * rows of nothing; a card sized for one whose filter was cleared showed one bus
+ * out of eight, with nothing on screen to say the other seven existed. Deriving
+ * the height means neither state is expressible. `busCapacity` survives as the
+ * *inverse* — how many buses a box was built for — which is the only question
+ * left that needs it: see `busesFor`.
  *
  * ## Flowing cards
  *
  * `h === 0` — or no layout at all — means "this card has never been arranged".
- * It is full span, its height is whatever its content measures, and the canvas
- * stacks it beneath everything that *has* been arranged.
+ * It is full span, and the canvas stacks it beneath everything that *has* been
+ * arranged.
  *
- * That single rule is the whole migration story. A fresh install has no
- * layouts, so every card flows and the canvas reproduces 1.2.4's column exactly
- * — same width, same content-driven heights, same 8dp gap. It is also what a
+ * What it is no longer is content-sized: its height comes from its bus count
+ * like every other card's, so there is nothing to measure, and no frame where
+ * the stack is built out of guesses about cards that have not rendered yet.
+ *
+ * That single rule is still the whole migration story. A fresh install has no
+ * layouts, so every card flows and the canvas reproduces 1.2.4's column — same
+ * width, same 8dp gap, every line of every stop — with the heights computed from
+ * the line count instead of measured off the rendered rows. It is also what a
  * newly saved stop gets, which is precisely "appends below the lowest card at
  * full width". A *fractional* layout, written during 1.2.5's development before
  * columns existed, is quantised to the nearest column on load: see
  * `migrateLayout`.
  *
- * A flowing card is allowed to grow when its arrivals land, because nothing is
- * ever placed below it. A *placed* card is not: growing into a neighbour would
- * cover another stop's minutes, so a placed card is a fixed box whose content
- * is chosen to fit. Picking any card up freezes every flowing card at the box
- * it already occupies, so the transition between the two worlds is invisible.
+ * ## Why `h` is still stored
+ *
+ * It is a **cache** of the derived height and never an independent value.
+ * Dropping it from `StopLayout` is the obvious move and it is the wrong one: a
+ * stop's bus count is only known once its routes have come back off the network,
+ * and `fitAll` *writes*. A launch with no cached heights would lay every placed
+ * card out at the fallback, resolve the overlaps that produces, and persist them
+ * — so every cold start would quietly rearrange the canvas the user built,
+ * before the first response landed. With the cache the pre-count frame is the
+ * post-count frame, and the common launch writes nothing at all.
+ *
+ * Nothing trusts it any further than that. `placeAll` draws the height it
+ * derives rather than the one it read, and `fitAll` overwrites the cache from the
+ * count the moment there is one. A height stored by a build where the user chose
+ * it is quantised *down* to the nearest whole number of buses, which can only
+ * shrink a card and therefore cannot create an overlap that was not already
+ * there.
  */
 
 import { spacing } from '../../theme';
@@ -106,12 +137,12 @@ export const SNAP_DP = 8;
    The rendered heights of the card's parts, in dp.
 
    They live here, in the file with no React in it, because the geometry cannot
-   do its job without them: "how many buses fit in this box" and "how short may
-   this box be" are the two questions the whole rework turns on, and both are
-   arithmetic over these numbers. `FavoriteStopCard.styles` imports them for the
-   matching `minHeight`s, so the card renders the rows the geometry counted
-   rather than a second set that happens to be similar. A drift of a few points
-   between the two is a card whose last bus is half visible. */
+   do its job without them: "how tall is a card showing this many buses" is now the
+   question the whole canvas turns on, and it is arithmetic over these numbers.
+   `FavoriteStopCard.styles` imports them for the matching `minHeight`s, so the card
+   renders the rows the geometry counted rather than a second set that happens to be
+   similar. A drift of a few points between the two is a card whose last bus is half
+   visible. */
 
 /** Card padding and border: 1dp border top and bottom, 10dp `paddingTop`, 4dp
  *  `paddingBottom`. Everything below is measured inside this. */
@@ -145,34 +176,21 @@ export const CONTROLS_H_DP = 44;
 export const CONTROLS_COMPACT_H_DP = 38;
 
 /**
- * How short a card may be, per span, and why.
+ * Bus count assumed for a stop whose lines have not arrived yet.
  *
- * The floor is whatever the span must show at all: chrome, one header, **one**
- * bus and the controls footer. Below that the card is not a smaller version of
- * itself, it is a card with something missing.
+ * This is the cold-start placeholder's own row count, and that is the whole
+ * argument for it: the card draws `maxBuses` grey rows, so a box sized for this
+ * many is the box the grey rows exactly fill, and the one that the real rows will
+ * then replace in place. A dp constant used to live here instead, and it could
+ * only ever be right at one span.
  *
- * The design estimated ~132dp; these are ~10dp taller because they count the
- * card's border, a header tall enough for one line of the name at its rendered
- * size, and the caption under the figure at the line height it actually gets.
- * The estimate was the intent, this is the arithmetic.
+ * It applies for as long as a stop has no count — a slow network, an offline
+ * launch of a stop that was never cached, a route request that failed outright —
+ * so it has to be a plausible card and not merely a placeholder. Three is the
+ * count the old fallback assumed, for the same reason: it is about what a stop
+ * serves.
  */
-export const MIN_H_COMPACT_DP =
-  CARD_CHROME_H_DP + CARD_HEADER_COMPACT_H_DP + BUS_TILE_H_DP + CONTROLS_COMPACT_H_DP;
-/** Three columns: the taller header, one 62dp detailed row, a full-size
- *  footer. */
-export const MIN_H_WIDE_DP = CARD_CHROME_H_DP + CARD_HEADER_H_DP + BUS_ROW_H_DP + CONTROLS_H_DP;
-
-/**
- * Height assumed for a flowing card that has not reported a measurement yet.
- *
- * Only the frame between mount and the first `onLayout` leans on it, and on
- * that frame every card is showing the cold-start placeholder: a 32dp header,
- * three 62dp skeleton rows and 14dp of card padding. So the number is that,
- * rather than an average of what cards eventually become — being right about
- * the one frame it is actually used on is worth more than being right on
- * average about frames where a real measurement exists.
- */
-export const FALLBACK_CARD_H_DP = 232;
+export const FALLBACK_BUSES = 3;
 
 /**
  * How far a "move up / move down" accessibility action travels when there is no
@@ -252,7 +270,7 @@ export function spanAtPx(widthPx: number, col: number, u: number): number {
   return s < 1 ? 1 : s > max ? max : s;
 }
 
-/* ── Size, from span and height ──────────────────────────────── */
+/* ── Size, from span and bus count ───────────────────────────── */
 
 /**
  * What a card of this span can afford to show.
@@ -294,33 +312,97 @@ function controlsH(span: number): number {
   return span >= COLS ? CONTROLS_H_DP : CONTROLS_COMPACT_H_DP;
 }
 
-/** The floor for a span, in dp. */
-export function minHDp(span: number): number {
+/**
+ * Rows of buses a card showing this many of them needs.
+ *
+ * Never zero, and that is the floor: a card whose stop has every line filtered
+ * out — or has not loaded any yet — is still chrome, a header, the controls
+ * footer and *one* bus row. Below that it is not a smaller card, it is a card
+ * with something missing, and a 76dp sliver on the canvas is not a saved stop.
+ */
+export function busRowsFor(span: number, buses: number): number {
   'worklet';
-  return span >= COLS ? MIN_H_WIDE_DP : MIN_H_COMPACT_DP;
-}
-
-/** The same, in stored units. */
-export function minHFor(span: number, u: number): number {
-  'worklet';
-  return u > 0 ? minHDp(span) / u : 0;
+  const across = busesAcross(span);
+  const rows = Math.ceil((buses > 0 ? buses : 0) / across);
+  return rows < 1 ? 1 : rows;
 }
 
 /**
- * How many buses a box of this height shows.
+ * The height a card of this span must be to show this many buses, in dp.
  *
- * The other half of "height picks how many buses". Never zero: a card at its
- * floor shows one bus (two at two columns, which is one *row* of two), because
- * a saved stop showing no arrivals at all is not a size, it is a bug.
+ * The one direction the size now runs in. Everything below and every caller
+ * outside this file goes through it, so there is exactly one arithmetic for "how
+ * tall is this card" and `FavoriteStopCard.styles` can import the parts it is
+ * built from rather than restate them.
  *
- * The half-point of slack absorbs the rounding in `h * u` — a box that was
- * committed as exactly three rows tall must not come back as 2.9999 of one.
+ * The design estimated a ~132dp floor; `hDpForBuses(span, 0)` is ~10dp taller
+ * because it counts the card's border, a header tall enough for one line of the
+ * name at its rendered size, and the caption under the figure at the line height
+ * it actually gets. The estimate was the intent, this is the arithmetic.
+ */
+export function hDpForBuses(span: number, buses: number): number {
+  'worklet';
+  return (
+    CARD_CHROME_H_DP +
+    headerH(span) +
+    controlsH(span) +
+    busRowsFor(span, buses) * busRowH(span)
+  );
+}
+
+/** The same, in stored units. */
+export function hForBuses(span: number, buses: number, u: number): number {
+  'worklet';
+  return u > 0 ? hDpForBuses(span, buses) / u : 0;
+}
+
+/**
+ * How many buses a box of this height was built for — the inverse of
+ * `hDpForBuses`, and all that is left of "height picks how many buses".
+ *
+ * Two things still need it. The card is handed it as a cap, so a stale or wrong
+ * count can never make the card draw more rows than its box has (the cap is a
+ * guard now rather than a policy: the box is derived from the count, so in the
+ * ordinary case it admits everything). And a stored height written by a build
+ * where the user chose it is read back through here, which is what turns a freely
+ * chosen height into a whole number of buses.
+ *
+ * Never zero: a box always has room for the one row `busRowsFor` floors it at.
+ * It rounds **down**, which is the safe direction — a card can only come back
+ * from an old install shorter than it was stored, never taller, so quantising
+ * cannot push it into a neighbour.
+ *
+ * The half-point of slack absorbs the rounding in `h * u`: a box committed as
+ * exactly three rows tall must not come back as 2.9999 of one.
  */
 export function busCapacity(span: number, heightPx: number): number {
   'worklet';
   const avail = heightPx - CARD_CHROME_H_DP - headerH(span) - controlsH(span);
   const rows = Math.floor((avail + 0.5) / busRowH(span));
   return (rows < 1 ? 1 : rows) * busesAcross(span);
+}
+
+/**
+ * How many buses a card is sized for, from whatever is known about it.
+ *
+ * Three cases, in the order they are trusted. A count reported by the card wins,
+ * because it is the live answer to "how many lines is this stop showing" and the
+ * whole design says the height follows it. Failing that, a card that already has
+ * a box is read back through `busCapacity`, so a launch that has not heard from
+ * the network yet reproduces exactly the canvas the user last saw — and a
+ * height chosen by hand in an older build is quantised on the way through.
+ * Failing both, the card has never been arranged and has no box either, and
+ * `FALLBACK_BUSES` is the guess the placeholder is drawn at.
+ *
+ * `span` and `h` must be the ones the box was *stored* at. Reading a box's count
+ * off a different span asks a compact tile how many detailed rows it holds, and
+ * the answer is out by a factor of two.
+ */
+export function busesFor(span: number, h: number, reported: number | null, u: number): number {
+  'worklet';
+  if (reported != null && Number.isFinite(reported)) return reported > 0 ? Math.round(reported) : 0;
+  if (h > 0) return busCapacity(span, h * u);
+  return FALLBACK_BUSES;
 }
 
 /* ── Rect predicates ─────────────────────────────────────────── */
@@ -501,72 +583,65 @@ export function resolveMove(want: Rect, others: readonly Rect[]): Rect {
 }
 
 /**
- * The same for a resize, which wants a different answer.
+ * What a resize is allowed to ask for: a position, and a number of columns.
  *
- * A card whose corner is being dragged has a fixed top-left; teleporting it to
- * a free position elsewhere — which is what `resolveMove` would do — reads as
- * the card escaping the finger. So the box is shrunk against whatever it ran
- * into first, which is what the user would have done themselves a moment later.
- * Only when it cannot shrink far enough to clear the obstruction *and* stay
- * above the floor does it fall back to moving.
- *
- * Span is clamped against the blockers that share the card's rows, then height
- * against those that share its (now known) columns. Doing both in one pass
- * would need the answer to compute the answer; two passes in that order can
- * only ever over-shrink, never overlap, which is the safe direction.
- *
- * `minW` is gone from the signature and there is nothing to replace it with:
- * the minimum width is one column, and the clamp below cannot return less. `minH`
- * is gone too, and that one is a fix rather than a simplification — it was a
- * number every caller derived the same way from the span, and property-testing
- * found that passing the *old* span's floor while changing the span produces a
- * card below its own minimum that the next `fitAll` then has to rescue. The
- * canvas width is the only thing a caller can be trusted to know.
+ * Deliberately not a `Rect`. A height here would be a field every caller had to
+ * fill in with a value the resolver then discarded, and one of them would
+ * eventually fill it in with something the user had dragged.
  */
-export function resolveResize(want: Rect, others: readonly Rect[], u: number): Rect {
+export interface SizeWant {
+  col: number;
+  span: number;
+  y: number;
+}
+
+/**
+ * What a card asked to be a given number of columns wide actually becomes.
+ *
+ * A resize has no height in it any more, which is why it takes a bus count
+ * instead of a box: the height is `hForBuses` of whatever span this settles on,
+ * and the caller cannot pre-compute it because narrowing a card *raises* it — one
+ * column shows one compact tile per row where two columns show two, and three
+ * switches to the detailed row and a taller header.
+ *
+ * That is also what makes the old two-pass shrink unusable. It clamped the span
+ * against the blockers sharing the card's rows and then the height against those
+ * sharing its columns, which needed the height to be known before the span and
+ * the span before the height. So the candidates are tried outright instead:
+ * widest first, at the position the user is holding, and the first one whose
+ * derived box is free wins. There are at most three.
+ *
+ * The card keeps its top-left, which is the whole difference between a resize and
+ * a move. Teleporting it to a free position elsewhere — what `resolveMove` would
+ * do — reads as the card escaping the finger, and property-testing found exactly
+ * that when `legalCols` was used here: it prefers the size, so a card at the last
+ * column walked left as it was widened. Only when *no* width fits at that
+ * position does the box move, and then the move resolver is the only code that
+ * knows how to place it.
+ */
+export function resolveResize(
+  want: SizeWant,
+  others: readonly Rect[],
+  buses: number,
+  u: number,
+): Rect {
   'worklet';
-  /* Position wins over size here, which is the opposite of `legalCols` and the
-     whole difference between a resize and a move: the corner the user is *not*
-     holding is the one that may give way, so a card at the last column asked for
-     two columns is narrowed rather than slid left out from under the finger.
-     Property-testing found this the wrong way round — `legalCols` prefers the
-     size, which for a resize meant the card walked left as it was widened. */
+  /* Position wins over size, which is the opposite of `legalCols`: the corner the
+     user is *not* holding is the one that may give way, so a card at the last
+     column asked for two columns is narrowed rather than slid left. */
   let col = Number.isFinite(want.col) ? Math.round(want.col) : 0;
   if (col < 0) col = 0;
   if (col > COLS - 1) col = COLS - 1;
   let span = Number.isFinite(want.span) ? Math.round(want.span) : 1;
   if (span < 1) span = 1;
   if (span > COLS - col) span = COLS - col;
-  /* Derived after the span is known, because it is a property of the span: three
-     columns has a taller floor than one, being a taller bus row. */
-  const minH = minHFor(span, u);
-  let h = want.h;
+  const y = Number.isFinite(want.y) ? (want.y < 0 ? 0 : want.y) : 0;
 
-  for (let i = 0; i < others.length; i++) {
-    const b = others[i];
-    // Shares rows with the box as the user is dragging it.
-    if (want.y + EPS < b.y + b.h && b.y + EPS < want.y + h) {
-      const limit = b.col - col;
-      if (limit > 0 && limit < span) span = limit;
-    }
+  for (let s = span; s >= 1; s--) {
+    const box = { col, span: s, y, h: hForBuses(s, buses, u) };
+    if (!hitsAny(box, others)) return box;
   }
-  if (span < 1) span = 1;
-
-  for (let i = 0; i < others.length; i++) {
-    const b = others[i];
-    if (col < b.col + b.span && b.col < col + span) {
-      const limit = b.y - want.y;
-      if (limit > 0 && limit < h) h = limit;
-    }
-  }
-  if (h < minH) h = minH;
-
-  /* Flooring the height can push the card back into the neighbour it was just
-     shrunk clear of — at which point this is no longer a resize about a corner
-     the user is holding still, the box has to move, and the move resolver is
-     the only code that knows how to place it. */
-  const box = { col, span, y: want.y, h };
-  return hitsAny(box, others) ? resolveMove(box, others) : box;
+  return resolveMove({ col, span, y, h: hForBuses(span, buses, u) }, others);
 }
 
 /* ── Keyboard / screen-reader steps ──────────────────────────── */
@@ -622,52 +697,38 @@ export function nudgeY(r: Rect, others: readonly Rect[], dir: 1 | -1, u: number)
 }
 
 /**
- * Widen or narrow by one column.
+ * Widen or narrow by one column — the only size step there is.
  *
- * Separate from the height step, unlike the free-width design's single
- * "grow" — there, the stored units tied `h` to `w` and scaling both together
- * kept the box the shape the user made it. Here the two axes answer different
- * questions: span picks the bus layout, height picks how many buses. A screen
- * reader user who cannot set them independently cannot reach half the sizes.
+ * There used to be a `heightStep` beside this, and its removal is the point
+ * rather than a saving. Height is what the stop's own line filter decides, so
+ * "Taller" was an action that either fought the data or lied about it; a screen
+ * reader user changing how tall a card is does it by choosing which lines it
+ * shows, in the sheet the filter button opens, which is the same control everyone
+ * else uses.
  *
- * Widening to three columns raises the height to that span's floor if it has to,
- * because the detailed row it switches to is taller than the compact tile it
- * replaces — otherwise "wider" would silently produce a card with no room for
- * a bus.
+ * The height still moves when this runs, and it has to: one column shows one
+ * compact tile per row, two show two, and three switches to the taller detailed
+ * row. Same buses, different shape — which is why the announcement names both.
  */
-export function spanStep(r: Rect, others: readonly Rect[], dir: 1 | -1, u: number): Rect {
+export function spanStep(
+  r: Rect,
+  others: readonly Rect[],
+  dir: 1 | -1,
+  buses: number,
+  u: number,
+): Rect {
   const span = r.span + dir;
   if (span < 1 || span > COLS - r.col) return r;
-  const minH = minHFor(span, u);
-  const h = r.h < minH ? minH : r.h;
-  const got = resolveResize({ col: r.col, span, y: r.y, h }, others, u);
-  /* An action names one axis and may only change that axis. `resolveResize` is
-     free to give ground on either — it is answering a corner drag, where the
-     user can see what happened and pull back — but "Wider" that came back
-     shorter, or moved the card, is an answer to a question nobody asked, and
-     the only feedback is a sentence read out afterwards. Declining instead lets
-     the caller say "already as wide as it fits", which is true and actionable.
-     Property-testing found this: growing a card whose neighbour sat lower in the
-     next column silently cost it a bus. */
-  return got.span === span && got.col === r.col
-    && Math.abs(got.y - r.y) < EPS && got.h >= h - EPS
-    ? got
-    : r;
-}
-
-/**
- * Taller or shorter by exactly one bus — the unit the height now means.
- *
- * A partial grow is a good answer and is kept: stopping just under the card
- * below is "as tall as it fits", and asking again then reports exactly that. A
- * *narrower* or moved card is not, for the reason `spanStep` gives.
- */
-export function heightStep(r: Rect, others: readonly Rect[], dir: 1 | -1, u: number): Rect {
-  const minH = minHFor(r.span, u);
-  const step = busRowH(r.span) / u;
-  const h = r.h + dir * step;
-  const got = resolveResize({ col: r.col, span: r.span, y: r.y, h: h < minH ? minH : h }, others, u);
-  return got.span === r.span && got.col === r.col && Math.abs(got.y - r.y) < EPS ? got : r;
+  const got = resolveResize({ col: r.col, span, y: r.y }, others, buses, u);
+  /* An action names one thing and may only change that thing. `resolveResize` is
+     free to narrow or move — it is answering a corner drag, where the user can see
+     what happened and pull back — but "Wider" that came back narrower, or moved
+     the card, is an answer to a question nobody asked, and the only feedback is a
+     sentence read out afterwards. Declining instead lets the caller say "already
+     as wide as it fits", which is true and actionable. Property-testing found
+     this: growing a card whose neighbour sat lower in the next column silently
+     cost it a bus. */
+  return got.span === span && got.col === r.col && Math.abs(got.y - r.y) < EPS ? got : r;
 }
 
 /* ── Migration ───────────────────────────────────────────────── */
@@ -689,6 +750,22 @@ export function heightStep(r: Rect, others: readonly Rect[], dir: 1 | -1, u: num
  * Lives here rather than in storage because the legal set is this file's to
  * define; storage calls it on the way in from disk *and* from an import, so
  * there is no path by which a fractional layout reaches the canvas.
+ *
+ * ## What it deliberately does not do to `h`
+ *
+ * A height stored by a build where the user chose it freely is *not* a legal
+ * height any more, and this is not the place that can fix it: `h` is a fraction
+ * of the canvas's width, so how many buses it stands for is not knowable without
+ * `u`, and storage has no canvas. It cannot be dropped either — zeroing it means
+ * "never arranged", which would throw away the whole arrangement of every install
+ * that has one.
+ *
+ * So it passes through as a *cache*, which is all `h` is now (see the module
+ * comment), and `fitAll` — the one caller that knows `u` — quantises it to a whole
+ * number of buses on the first pass over the canvas. That pass can only ever
+ * shorten a card, because `busCapacity` rounds down, so nothing it does can put a
+ * card into a neighbour; and it runs before any of these boxes can be dragged,
+ * because Home re-fits on the effect that follows the render they first appear in.
  */
 export function migrateLayout(v: unknown): Rect | null {
   if (!v || typeof v !== 'object') return null;
@@ -724,10 +801,17 @@ export interface PlacedCard {
   /** Columns covered. The card reads this to decide how many buses go across. */
   span: number;
   tier: CardTier;
-  /** How many buses fit, or null while the card is still allowed to show all of
-   *  them because nothing is placed below it. */
-  maxBuses: number | null;
-  /** Still sizing itself to its content. See the module comment. */
+  /**
+   * How many buses fit in this box.
+   *
+   * A guard rather than a policy now that the box is derived from the count: in
+   * the ordinary case it admits every line the stop is showing, and what it exists
+   * for is the frame between a filter being toggled and the canvas hearing about
+   * it — where the card would otherwise draw a row its box has no space for.
+   */
+  maxBuses: number;
+  /** Never arranged: stacked in saved order rather than placed. See the module
+   *  comment. */
   flowing: boolean;
   /** The same box in stored units — what the drag maths reads and what the
    *  freeze writes. Derived here so the two can never drift apart. */
@@ -741,39 +825,60 @@ export interface PlacedCard {
  * saved order, beneath the lowest placed card — which with no placed cards at
  * all is 1.2.4's column, from y = 0, unchanged.
  *
+ * Heights are *derived* here, from `counts`, rather than read off the stored
+ * layout: the stored one is a cache, and drawing it would mean a card kept the
+ * height it had before a line was toggled until `fitAll` had written the new one
+ * — a frame of the wrong size on every filter change, and on every launch of an
+ * install upgrading from a build where the height was chosen by hand.
+ *
+ * It does not resolve collisions, which is the other half of the same split.
+ * Deriving a height can grow a card into its neighbour, and the only code allowed
+ * to answer that is `fitAll`, because the answer has to be persisted: a render
+ * pass that quietly moved cards would move them again, differently, on the next
+ * render.
+ *
  * Order is preserved: the gesture code indexes into this array and into the
  * stops array interchangeably.
  */
 export function placeAll(
   stops: readonly FavoriteStop[],
-  measured: ReadonlyMap<string, number>,
+  counts: ReadonlyMap<string, number>,
   u: number,
 ): { cards: PlacedCard[]; height: number } {
   if (u <= 0) return { cards: [], height: 0 };
+  const gap = CARD_GAP_DP / u;
 
+  /** The box each stop wants, before anything is stacked below it. */
+  const boxes: (Rect | null)[] = [];
   let flowTop = 0;
   for (const st of stops) {
     const l = st.layout;
-    if (!l || l.h <= 0) continue;
-    const b = l.y + l.h;
+    if (!l || l.h <= 0) {
+      boxes.push(null);
+      continue;
+    }
+    const reported = counts.get(st.stopCode);
+    const h = hForBuses(l.span, busesFor(l.span, l.h, reported ?? null, u), u);
+    boxes.push({ col: l.col, span: l.span, y: l.y, h });
+    const b = l.y + h;
     if (b > flowTop) flowTop = b;
   }
-  if (flowTop > 0) flowTop += CARD_GAP_DP / u;
+  if (flowTop > 0) flowTop += gap;
 
   const cards: PlacedCard[] = [];
   let height = 0;
-  for (const st of stops) {
-    const l = st.layout;
-    let rect: Rect;
-    let flowing: boolean;
-    if (l && l.h > 0) {
-      rect = l;
-      flowing = false;
-    } else {
-      const hPx = measured.get(st.stopCode) ?? FALLBACK_CARD_H_DP;
-      rect = { col: 0, span: COLS, y: flowTop, h: hPx / u };
-      flowing = true;
-      flowTop += (hPx + CARD_GAP_DP) / u;
+  stops.forEach((st, i) => {
+    let rect = boxes[i];
+    const flowing = rect == null;
+    if (rect == null) {
+      const reported = counts.get(st.stopCode);
+      /* Full span, and its height from its own count — with no stored box there
+         is nothing to read a count off, so a stop whose lines have not arrived
+         gets `FALLBACK_BUSES`. Stacked with the same gap it will keep once it is
+         frozen, so freezing changes nothing on screen. */
+      const h = hForBuses(COLS, busesFor(COLS, 0, reported ?? null, u), u);
+      rect = { col: 0, span: COLS, y: flowTop, h };
+      flowTop += h + gap;
     }
     const top = rect.y * u;
     const heightPx = rect.h * u;
@@ -785,38 +890,58 @@ export function placeAll(
       height: heightPx,
       span: rect.span,
       tier: tierFor(rect.span),
-      /* A flowing card is uncapped on purpose: nothing is placed below it, so
-         it is allowed to grow to whatever its arrivals come to — which is what
-         makes a fresh install identical to 1.2.4 rather than a truncated
-         version of it. */
-      maxBuses: flowing ? null : busCapacity(rect.span, heightPx),
+      maxBuses: busCapacity(rect.span, heightPx),
       flowing,
       rect,
     });
     if (top + heightPx > height) height = top + heightPx;
-  }
+  });
   return { cards, height };
 }
 
 /**
- * Re-fit placed cards to a canvas of a different width.
+ * Bring every placed card back to a height that matches its bus count, and to a
+ * position where nothing overlaps.
  *
- * Columns carry an arrangement between devices and orientations on their own;
- * the one thing they cannot carry is the height floor, because one bus row is a
- * fixed number of dp and `h` is a fraction of the canvas width. So a width
- * change raises anything that fell under its span's floor and then re-resolves,
- * in saved order, so the cards that were there first keep their positions.
+ * This is the one writer, and everything that can change a card's size ends up
+ * here: a line toggled in the filter sheet, a stop's routes arriving off the
+ * network, a rotation or a different phone (one bus row is a fixed number of dp
+ * and `h` is a fraction of the canvas width, so the same `h` is a different number
+ * of buses at a different width), an imported backup, a record written by a
+ * future version, and a height chosen by hand in a build before this one.
  *
- * It is also the one place a layout from outside is made legal: an imported
- * backup, or a record written by a future version, arrives through
- * `migrateLayout` and lands here to have its overlaps resolved.
+ * **Growing is the dangerous direction**, and it is handled by re-resolving the
+ * whole canvas in saved order rather than by nudging the card that grew. A card
+ * given a taller box can overlap the one beneath it, and the answer has to be the
+ * one a drag would reach — otherwise there are two collision rules and only one of
+ * them is ever tested. So each card in turn is placed with `resolveMove` against
+ * the ones already placed: the cards earlier in the saved order keep where they
+ * are, and a card that no longer fits under a grown neighbour slides to the
+ * nearest free position exactly as a dropped card does. Shrinking needs none of
+ * this and gets it anyway, harmlessly: a shorter box cannot fail to fit.
+ *
+ * The cost of that rule, stated because it is visible: the card that moves is the
+ * one *later* in the saved order, which is not always the one that grew. Cards
+ * flow in saved order when they have never been arranged, so in the common case
+ * the grown card is above the ones that give way; a canvas whose arrangement runs
+ * against its saved order can instead see the grown card itself move. Priority
+ * belongs to a stable order rather than to whichever card happened to change,
+ * because the alternative — the toggled card wins — makes the outcome depend on
+ * which card the user last touched, and the same canvas would settle differently
+ * depending on the order they toggled things.
  *
  * Returns only the boxes that actually changed, because the overwhelmingly
- * common case — the same device, same orientation — must not write anything.
- * That is also what keeps the effect that calls it from chasing its own tail:
- * the second pass over an already-fitted layout finds nothing to do.
+ * common case — same device, same orientation, nothing toggled — must not write
+ * anything. That is also what keeps the effect that calls it from chasing its own
+ * tail: the second pass over an already-fitted layout finds nothing to do, which
+ * holds because the height rule is a function of the count and the count does not
+ * depend on the box.
  */
-export function fitAll(stops: readonly FavoriteStop[], u: number): Map<string, Rect> {
+export function fitAll(
+  stops: readonly FavoriteStop[],
+  counts: ReadonlyMap<string, number>,
+  u: number,
+): Map<string, Rect> {
   const changed = new Map<string, Rect>();
   if (u <= 0) return changed;
   const placed: Rect[] = [];
@@ -824,9 +949,14 @@ export function fitAll(stops: readonly FavoriteStop[], u: number): Map<string, R
   for (const st of stops) {
     const l = st.layout;
     if (!l || l.h <= 0) continue;
+    const reported = counts.get(st.stopCode);
+    /* The count is read off the *stored* span, because that is the span the stored
+       height was written at. `legalCols` may then change the span — only for a
+       record from outside, since everything this app writes is already legal — and
+       the height follows the span it ends up at. */
+    const buses = busesFor(l.span, l.h, reported ?? null, u);
     const { col, span } = legalCols(l.col, l.span);
-    const minH = minHFor(span, u);
-    const h = l.h < minH ? minH : l.h;
+    const h = hForBuses(span, buses, u);
     const got = resolveMove({ col, span, y: l.y < 0 ? 0 : l.y, h }, placed);
     placed.push(got);
     if (

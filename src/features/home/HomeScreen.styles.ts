@@ -145,15 +145,15 @@ export const s = StyleSheet.create({
     position: 'relative',
     marginBottom: CARD_GAP_DP,
   },
-  /** Invisible, not unmounted: the cards have to be laid out to be measured,
-   *  and unmounting them is how the measurement never arrives. */
-  canvasWaiting: {
-    opacity: 0,
-  },
-  /** Wrapper for one card. `left`, `top`, `width` and (for a placed card)
-   *  `height` come from the canvas geometry; `elevation` is animated from 0 and
-   *  is what keeps a lifted card painted over the ones it travels across —
-   *  Android otherwise paints siblings in declaration order. */
+  /** Wrapper for one card. `left`, `top`, `width` and `height` come from the
+   *  canvas geometry; `elevation` is animated from 0 and is what keeps a lifted
+   *  card painted over the ones it travels across — Android otherwise paints
+   *  siblings in declaration order.
+   *
+   *  There was a `canvasWaiting` beside this that drew the whole canvas at zero
+   *  opacity for one frame, because a flowing card's height was measured and the
+   *  first frame had no measurements. Heights are derived from bus counts now, so
+   *  the first frame is as correct as the second and there is nothing to hide. */
   stopCard: {
     position: 'absolute',
     elevation: 0,
@@ -167,7 +167,7 @@ export const s = StyleSheet.create({
     borderWidth: 2,
     borderRadius: radius.lg,
   },
-  /** The corner target. Its 32dp is a compromise the column width forces: at
+  /** The width target. Its 32dp is a compromise the column width forces: at
    *  `HIT_SIZE` it would cover more than a third of a one-column card and sit on
    *  top of the arrival figure.
    *
@@ -175,7 +175,13 @@ export const s = StyleSheet.create({
    *  and that is acceptable rather than accidental: it exists only while arrange
    *  mode is on, and arrange mode is not when the user is reaching for a
    *  timetable. Outside it the handle is not rendered at all, so the control
-   *  underneath is never actually obstructed. */
+   *  underneath is never actually obstructed.
+   *
+   *  Still in the corner although the gesture is width-only, because the two
+   *  alternatives are worse: the middle of the right edge is where the arrival
+   *  figure is at every compact span, and the bottom edge is the footer's three
+   *  controls rather than its one spare end. The glyph is what says which axis
+   *  responds — see where it is rendered. */
   resizeHandle: {
     position: 'absolute',
     right: 0,
@@ -195,9 +201,10 @@ export const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  /** The box a corner drag is describing, drawn while the card itself stays
-   *  put. Positioned by transform from shared values, hence the zeroed
-   *  `left`/`top`. */
+  /** The box a width drag is describing, drawn while the card itself stays put.
+   *  Positioned by transform from shared values, hence the zeroed `left`/`top`.
+   *  Its height changes only in the steps a change of span implies, because that
+   *  is the only way the height can change at all. */
   resizePreview: {
     position: 'absolute',
     left: 0,
