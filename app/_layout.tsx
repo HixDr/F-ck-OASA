@@ -651,7 +651,23 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: colors.bg },
           animation: 'slide_from_right',
         }}
-      />
+      >
+        {/**
+         * Home declares its own `headerShown: false` too, and that was not
+         * enough: a screen inherits the navigator's default of `true`, so the
+         * native fragment is *created* with a header, and expo-router applies a
+         * screen's own options from a layout effect — one commit later. On a
+         * launch that lost that race the toolbar was removed but its
+         * AppBarLayout kept the height it had already measured, leaving Home
+         * 83dp low behind an empty grey band. Declaring it here means no
+         * toolbar is ever created for the route and there is no race to lose.
+         *
+         * Deliberately per-route rather than a `headerShown: false` in
+         * `screenOptions` above: search, the planner and both map screens rely
+         * on the default being on and set only their title.
+         */}
+        <Stack.Screen name="index" options={{ headerShown: false }} />
+      </Stack>
       <TopBanner banner={banner} />
       <AlertPill />
       <UpdateOverlay progress={updateProgress} />
