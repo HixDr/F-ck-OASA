@@ -11,8 +11,15 @@
  * for half a second on the first line I open" — and they are independent bets:
  * (1) makes the work happen earlier, (2) makes it happen somewhere it cannot be
  * seen. `MAP_WARMUP_ENABLED` kills the first, `MAP_MOUNT_AFTER_TRANSITION` the
- * second, and either can be reverted without touching the other. Which one
- * actually helps is a question for the `mapPerf` marks, not for reading.
+ * second, and either can be reverted without touching the other.
+ *
+ * The marks have since been read off a device, and they are unkind to (1):
+ * warming the process does not make the *next* MapView cheaper. The warm-up's
+ * own construction took 261ms and the first real screen's took 259ms with the
+ * SDK already up — the same number twice. See `src/utils/mapPerf.ts` for the log.
+ * What the marks do settle is the mechanism below: this map is parked wholly
+ * offscreen at zero opacity and it still reached `onMapLoaded`, which was the one
+ * thing about it in genuine doubt.
  *
  * ── What opening a map for the first time actually costs ──
  *
@@ -112,30 +119,6 @@ const WARMUP_LINGER_MS = 500;
  * while its framebuffer is a fraction of a full-screen surface's.
  */
 const WARMUP_SIZE = 256;
-
-/**
- * How much of the warm-up map is allowed to overlap the screen, in dp.
- *
- * HYPOTHESIS — not a measurement. adb is unavailable in the environment this was
- * written in, so `warmup torn down (CAP — never loaded)` has never actually been
- * read and the mechanism below is reasoning, not evidence.
- *
- * The reasoning: the map's GL output lives in a SurfaceView, i.e. its own
- * SurfaceFlinger layer rather than pixels in our view hierarchy. A layer lying
- * entirely outside the display bounds is not composited, so its buffers are
- * never latched, and a producer whose buffers are never released eventually
- * blocks in `eglSwapBuffers`. That would look exactly like the symptom on file:
- * `onMapReady` fires (SDK init, which is the expensive permanent half and needs
- * no pixels), `onMapLoaded` never does, the hard cap tears the warm-up down, and
- * the cloud style and tile cache were never warmed.
- *
- * Leaving one row of pixels on screen makes the layer intersect the display, so
- * it is composited and the queue keeps draining. One dp of dark basemap at 1%
- * opacity, behind the status bar, over a near-black UI is not something a person
- * can see. If this is ever measured and `onMapLoaded` proves to fire reliably
- * from fully offscreen, it can go back to being wholly offscreen.
- */
-const WARMUP_SLIVER = 1;
 
 /** Once per process, not once per mount — Fast Refresh and any remount of the
  *  root layout must not warm a second time. */
@@ -394,21 +377,24 @@ export function useDeferredMapMount(label: string): boolean {
 }
 
 const ws = StyleSheet.create({
+  /* Fully offscreen and fully transparent, exactly as the SVG capture hosts do
+     it. This briefly grew a one-dp sliver on screen and `opacity: 0.01`, on the
+     theory that a SurfaceView lying entirely outside the display bounds is never
+     composited, so its buffers are never latched and `onMapLoaded` can never
+     fire. Plausible, and wrong: the marks off a 1.2.5 release build read
+
+         +2071ms warmup onMapReady
+         +2309ms warmup onMapLoaded
+         +2821ms warmup torn down (loaded)
+
+     from precisely this arrangement. `onMapLoaded` fires from a map nobody can
+     see, so there is nothing to hedge against and no reason to put a row of live
+     basemap under the status bar. The sliver is gone and so is the hypothesis. */
   hidden: {
     position: 'absolute',
-    /* Almost entirely offscreen — see WARMUP_SLIVER for why "almost" and not
-       the `top: -9999, left: -9999` the SVG capture hosts use. An SVG only has
-       to be laid out for `toDataURL` to work; a map has to be composited before
-       it will admit to being loaded. */
-    top: -(WARMUP_SIZE - WARMUP_SLIVER),
-    left: 0,
-    /* Not `opacity: 0`. Android's draw path has fast-outs for a fully
-       transparent view, and a SurfaceView propagates alpha straight to its own
-       layer — so zero opacity is a second, independent way for the warm map to
-       never be composited, which is the same failure WARMUP_SLIVER hedges
-       against. 0.01 is indistinguishable from 0 to a person and is not zero to
-       the compositor. Also a hypothesis, for the same reason: unmeasured. */
-    opacity: 0.01,
+    top: -9999,
+    left: -9999,
+    opacity: 0,
   },
   map: { width: WARMUP_SIZE, height: WARMUP_SIZE },
 });

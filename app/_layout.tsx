@@ -647,9 +647,9 @@ export default function RootLayout() {
       <UpdateOverlay progress={updateProgress} />
       {/* Brings the Google Maps SDK up a quarter-second after the first screen
           paints, so the first map open is not also the first time Play Services
-          loads maps_core. All but one row of pixels of it sits offscreen and it
-          takes no part in layout — an overlay in the strictest sense. That last
-          row is deliberate; MapWarmup.tsx explains what it is hedging against. */}
+          loads maps_core. Parked wholly offscreen at zero opacity and taking no
+          part in layout — an overlay in the strictest sense — and the marks
+          confirm it still composites and loads from there. */}
       <MapWarmup />
       {/* Undo toasts. Last sibling so it draws above every other overlay, and
           an overlay itself — it must never take part in layout. */}
