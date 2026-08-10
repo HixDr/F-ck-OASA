@@ -27,7 +27,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { colors, onAccent, spacing } from '../../theme';
 import { mapStyles as ms } from '../../theme/mapStyles';
 import Pressable from '../../ui/Pressable';
-import { MapSurfaceSlot, useMapSurface } from '../../ui/MapHost';
+import { MAP_SCREEN_CONTENT_STYLE, MapSurfaceSlot, useMapSurface } from '../../ui/MapHost';
 import BottomSheet, { type BottomSheetHandle } from '../../ui/BottomSheet';
 import { SkeletonTripCard } from '../../ui/Skeleton';
 import { useSettings } from '../settings/SettingsProvider';
@@ -725,7 +725,7 @@ export default function PlannerScreen() {
         <Stack.Screen
           options={{
             headerStyle: { backgroundColor: colors.bg },
-            contentStyle: { backgroundColor: 'transparent' },
+            contentStyle: MAP_SCREEN_CONTENT_STYLE,
             headerTitle: 'Get Me There',
             headerTitleStyle: { color: colors.text, fontWeight: '700' },
           }}
@@ -1052,7 +1052,7 @@ export default function PlannerScreen() {
              background before this screen's root view even gets a say. The root
              view above is what keeps the screen opaque until the push animation
              has finished. */
-          contentStyle: { backgroundColor: 'transparent' },
+          contentStyle: MAP_SCREEN_CONTENT_STYLE,
           headerTitle: 'Get Me There',
           headerTitleStyle: { color: colors.text, fontWeight: '700' },
         }}

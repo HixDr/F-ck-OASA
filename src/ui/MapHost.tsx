@@ -77,13 +77,23 @@
  *   GestureHandlerRootView      auto — the parent, tried last, fine
  *     └ SafeAreaProviderCompat  box-none via patches/@react-navigation+elements
  *        └ ScreenStack/Screen   native, do not consume
- *           └ contentContainer  box-none via the Stack's `contentStyle`
+ *           └ contentContainer  box-none via `MAP_SCREEN_CONTENT_STYLE`
  *              └ map screen     box-none while revealed (each map screen)
  *                 └ the hole    `MapSurfaceSlot`, pointerEvents="none"
  *
  * Two of those are third-party wrappers with no touch handling of their own, so
  * `box-none` changes nothing for anybody else: children are still targets, and
  * only touches nothing claimed keep falling — to this.
+ *
+ * The link that broke it twice is `contentContainer`, and the trap is worth
+ * naming: React Navigation merges options *shallowly*, so a screen that sets
+ * `contentStyle` does not add to the navigator's — it replaces it outright.
+ * Every map screen has to set one (their content must be transparent or the
+ * navigator's own background hides the map), so a `pointerEvents` set once in
+ * `screenOptions` was silently dropped on exactly the four screens that needed
+ * it and kept on every screen that did not. Hence `MAP_SCREEN_CONTENT_STYLE`
+ * below: the two properties travel together, because separately they are a
+ * transparent screen with a dead map.
  *
  * The same mechanism is what keeps an *unrevealed* map out of the way, and it is
  * stronger than turning gestures off: `pointerEvents="none"` on the host makes
@@ -134,6 +144,27 @@ import { colors } from '../theme';
 import { GOOGLE_DARK_STYLE, GOOGLE_MAP_ID } from '../theme/googleMapStyle';
 import { useInitialRegion } from '../hooks/useInitialRegion';
 import { mapNow, mapPerf } from '../utils/mapPerf';
+
+/**
+ * What every screen that borrows the map must pass as its `contentStyle`.
+ *
+ * Both halves are load-bearing and neither works without the other:
+ *
+ *  - `backgroundColor: 'transparent'` — otherwise the navigator's own content
+ *    background hides the map before the screen's root view gets a say.
+ *  - `pointerEvents: 'box-none'` — otherwise that same wrapper consumes every
+ *    touch the screen's controls did not take, and the map behind the navigator
+ *    receives nothing. See the dispatch chain at the top of this file.
+ *
+ * One constant rather than two properties written out per screen, because
+ * React Navigation replaces `contentStyle` wholesale instead of merging it, so
+ * a screen that spells out only the background silently turns its own map into
+ * a picture. That is exactly how 1.2.8 and 1.2.9 shipped.
+ */
+export const MAP_SCREEN_CONTENT_STYLE: ViewStyle = {
+  backgroundColor: 'transparent',
+  pointerEvents: 'box-none',
+};
 
 /* ── Levers ──────────────────────────────────────────────────── */
 
