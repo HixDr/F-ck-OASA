@@ -1,5 +1,6 @@
 import { StyleSheet } from 'react-native';
 import { colors, spacing, radius, font, HIT_SIZE } from '../../theme';
+import { CARD_GAP_DP } from './layout';
 
 /** Gap between saved-line badges, both ways.
  *
@@ -133,11 +134,88 @@ export const s = StyleSheet.create({
   list: {
     paddingHorizontal: spacing.lg,
   },
-  /** Wrapper the drag gesture transforms. `elevation` is animated from 0, and
-   *  is what keeps a lifted card painted over the cells it travels across —
-   *  sibling FlatList cells otherwise paint in list order. */
-  stopCell: {
+  /** The saved-stop canvas. Its children are all absolutely positioned, so it
+   *  contributes no height of its own and is given one explicitly.
+   *
+   *  The margin is the gap *after* the last card. The canvas's own height stops
+   *  at the lowest card's bottom edge, which is right — but in 1.2.4 every card
+   *  carried a trailing `marginBottom`, including the last, so without this the
+   *  saved lines below would ride 8dp higher than they used to. */
+  canvas: {
+    position: 'relative',
+    marginBottom: CARD_GAP_DP,
+  },
+  /** Invisible, not unmounted: the cards have to be laid out to be measured,
+   *  and unmounting them is how the measurement never arrives. */
+  canvasWaiting: {
+    opacity: 0,
+  },
+  /** Wrapper for one card. `left`, `top`, `width` and (for a placed card)
+   *  `height` come from the canvas geometry; `elevation` is animated from 0 and
+   *  is what keeps a lifted card painted over the ones it travels across —
+   *  Android otherwise paints siblings in declaration order. */
+  stopCard: {
+    position: 'absolute',
     elevation: 0,
+  },
+  /** What arrange mode looks like. An outline rather than a tint or a scrim:
+   *  at three cards across a phone, anything painted over a card is painted
+   *  over an arrival number, which is the one thing this app exists to show.
+   *  Colour comes from the accent inline. */
+  arrangeOutline: {
+    ...StyleSheet.absoluteFillObject,
+    borderWidth: 2,
+    borderRadius: radius.lg,
+  },
+  /** The corner target. Its 32dp is a compromise the tier boundaries force: at
+   *  `HIT_SIZE` it would cover a third of a 120dp card and sit on top of the
+   *  arrival figure, and it only exists while arrange mode is on, when nothing
+   *  underneath it is being read. */
+  resizeHandle: {
+    position: 'absolute',
+    right: 0,
+    bottom: 0,
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /** Filled, unlike everything else in arrange mode: an outline grip on a card
+   *  that is itself outlined is invisible. Its glyph takes `onAccent` so it
+   *  stays legible on a yellow or green accent. */
+  resizeGrip: {
+    width: 22,
+    height: 22,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /** The box a corner drag is describing, drawn while the card itself stays
+   *  put. Positioned by transform from shared values, hence the zeroed
+   *  `left`/`top`. */
+  resizePreview: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    borderWidth: 2,
+    borderRadius: radius.lg,
+  },
+  /** Magnet guides. One hairline each, spanning the whole canvas so that an
+   *  alignment two cards apart is legible as an alignment; positioned by
+   *  transform from a shared value, which is why `left`/`top` are zero. */
+  snapGuideV: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    width: 1,
+  },
+  snapGuideH: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: 0,
+    height: 1,
   },
   linesSection: {
     marginTop: spacing.md,

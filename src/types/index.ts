@@ -141,6 +141,28 @@ export interface MapStamp {
   lng: number;
 }
 
+/**
+ * Where a saved stop's card sits on Home's canvas.
+ *
+ * Every number is a fraction of the canvas's *usable width* — `x` and `w`
+ * directly, `y` and `h` in the same unit so the card's aspect is preserved.
+ * Pixels were the obvious alternative and are the wrong one: a layout authored
+ * on a 412dp phone would then need a reflow pass on a 360dp one, in landscape,
+ * and at a larger font scale, and every such pass throws away some of the
+ * arrangement the user built. In these units the same numbers reconstruct
+ * everywhere, and `x + w <= 1` makes "no card is ever stranded off-screen" true
+ * by construction rather than by a rescue routine.
+ *
+ * `h === 0` means the card has never been arranged: it is full width and sizes
+ * itself to its content, exactly as it did in 1.2.4. See `features/home/layout`.
+ */
+export interface StopLayout {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
 export interface FavoriteStop {
   stopCode: string;
   stopName: string;
@@ -148,4 +170,7 @@ export interface FavoriteStop {
   lng: number;
   /** Line codes to display. null/undefined = show all. */
   visibleLines?: string[] | null;
+  /** Placement on Home's canvas. Absent for stops saved before 1.2.5 and for
+   *  stops the user has never arranged — both flow full-width, in order. */
+  layout?: StopLayout | null;
 }
