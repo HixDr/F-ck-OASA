@@ -3,7 +3,7 @@
  *
  * The complaint these exist to settle: on a fresh launch, tapping a line freezes
  * the push animation for roughly half a second. A native-stack transition is
- * animated on the UI thread, so JS cannot be what freezes it — the suspect is
+ * animated on the UI thread, so JS cannot be what freezes it — the suspect was
  * native map setup (the maps_core dynamite load, MapsInitializer, renderer
  * selection, the EGL surface) happening on that same thread at the same time.
  *
@@ -11,52 +11,84 @@
  *
  *     adb logcat -s ReactNativeJS:V | grep mapperf
  *
- * ── What each mark answers ──
+ * ── What the 1.2.5 build already settled ──
  *
- *  warmup armed / warmup skipped (already on a map)
- *      When the hidden warm-up MapView was created. This is the mark that
- *      matters most: if it lands *after* `line map screen mounted`, the warm-up
- *      did nothing for this open, which is exactly what a 1,500ms arming delay
- *      used to guarantee for anyone who tapped quickly. It should now land at
- *      roughly (first paint + 250ms).
+ * Two things, both from marks read off a real device:
  *
- *  warmup onMapReady / warmup onMapLoaded
- *      The two halves of the warm-up. `onMapReady` alone means SDK init was
- *      warmed — the expensive, permanent half. `onMapLoaded` additionally means
- *      the hidden map was really composited, so the cloud style and tiles landed
- *      in the SDK's disk cache too.
+ *     +1810ms  warmup armed
+ *     +2071ms  warmup onMapReady          <- 261ms
+ *     +2309ms  warmup onMapLoaded
+ *     +2821ms  warmup torn down (loaded)
  *
- *  warmup torn down (loaded) / (CAP — never loaded)
- *      The CAP branch is the standing hypothesis about the warm-up being parked
- *      offscreen at zero opacity: nothing composites it, so it never reports
- *      itself loaded. If this branch is what shows up, the sliver and non-zero
- *      opacity in MapWarmup.tsx are aimed at it — and if it *stops* showing up
- *      after those, they worked.
+ *     +81856ms line map screen mounted
+ *     +82115ms line map onMapReady        <- 259ms
+ *     +84677ms line map onMapLoaded          (tiles over the network)
  *
- *  <screen> mount released (why, warmup=phase)
- *      When the screen's own MapView was finally created, and why. `why` should
- *      read `transitionEnd` every time; `CAP — no transitionEnd` means the event
- *      never arrived and the deferral degenerated into a plain timer, which is a
- *      bug to fix rather than a result to keep. `warmup=` says whether the warm-up
- *      was `done` (ideal), `warming`/`loaded` (the tap collided with it — the
- *      dynamite load was on the UI thread as the user tapped), `idle` (armed too
- *      late again) or `off`.
+ *  1. A hidden map parked fully offscreen at zero opacity DOES composite and
+ *     load — the teardown branch was `(loaded)`, not `(CAP — never loaded)`.
+ *  2. Per-instance native construction costs ~259ms and is paid in full with the
+ *     SDK already warm: the warm-up's own 261ms and the real screen's 259ms are
+ *     the same number. Warming the process cannot remove it, because a MapView's
+ *     EGL surface cannot be handed to another MapView. Only *not creating a
+ *     second MapView* removes it.
  *
- *  <screen> screen mounted → mount released → onMapReady → onMapLoaded
- *      The four-stage breakdown of an open. `mounted → released` is the
- *      deliberate deferral (expect ~400ms, one transition), `released →
- *      onMapReady` is native map construction, `onMapReady → onMapLoaded` is
- *      tiles.
+ * So there is now one MapView for the whole process, hosted behind the navigator
+ * (`src/ui/MapHost.tsx`), and these marks exist to prove that the per-screen cost
+ * is gone rather than moved.
  *
- *      `released → onMapReady` is the number that decides whether deferring was
- *      worth it, because that span is the UI-thread work that used to overlap the
- *      animation. Hundreds of milliseconds: it was the stall, and moving it past
- *      the transition is the right fix. Tens of milliseconds: constructing the
- *      view was never expensive, the freeze came from somewhere else, and the
- *      deferral is pure added latency — turn `MAP_MOUNT_AFTER_TRANSITION` off and
- *      look elsewhere. Whether the transition itself is smooth is still a
- *      question for eyes, not for the log; these marks only say where the time
- *      went.
+ * ── What each mark answers now ──
+ *
+ *  map host armed / armed (already on a map)
+ *      When the one and only MapView was created. Normally ~250ms after the
+ *      first screen paints; immediately if a deep link put a map on screen
+ *      first. Everything below it should happen once per process, never again.
+ *
+ *  map host onMapReady / map host onMapLoaded
+ *      The construction that used to be paid per screen, paid once. `onMapReady`
+ *      is SDK init and the EGL surface (~260ms); `onMapLoaded` additionally means
+ *      tiles reached the screen.
+ *
+ *      THE HEADLINE TEST: these two marks, and the ~260ms between armed and
+ *      onMapReady, must appear EXACTLY ONCE in a session's log. A second
+ *      `onMapReady` from any source means something is still building a MapView
+ *      per screen and the refactor did not land.
+ *
+ *  <screen> screen mounted
+ *      The screen's React mount. The clock for everything below starts here.
+ *
+ *  <screen> claimed the surface (Δ…)
+ *      The screen took ownership of the shared map: camera handed over, its
+ *      markers and polylines queued. Δ from mount should be single-digit ms —
+ *      it is a JS state change and nothing else.
+ *
+ *  <screen> camera set / camera restored (Δ…)
+ *      `set` is a first visit taking its `initialRegion`; `restored` is a pop
+ *      back to a screen whose viewport was remembered, which is what stops a
+ *      return trip showing the other screen's part of Athens. Both happen while
+ *      the screen is still opaque, so neither is visible.
+ *
+ *  <screen> map usable (why, host=phase) Δ…
+ *      **This is the number the whole exercise is about.** The moment the shared
+ *      map is showing through this screen and can be touched. Δ is measured from
+ *      `screen mounted`.
+ *
+ *      Δ should be one push animation and nothing more — ~400ms on stock
+ *      Android, ~800ms at a 2× animator scale — because the only thing between
+ *      mount and reveal is the transition we deliberately wait for. What must
+ *      NOT be in there any more is the ~259ms of native construction: before
+ *      this refactor the equivalent gap was transition + 259ms.
+ *
+ *      `why` should read `transitionEnd` every time. `CAP — no transitionEnd`
+ *      means react-native-screens never told us the animation finished and the
+ *      reveal degenerated into a plain 900ms timer — a bug to fix, not a result
+ *      to keep. `host=` must read `loaded`: it says the surface was already
+ *      drawing tiles when the screen claimed it. `host=creating` means the user
+ *      beat the boot arming — the only case left where anyone waits for a map.
+ *
+ *  <screen> released the surface
+ *      The screen lost focus and gave the map back. Its markers come off and its
+ *      viewport is remembered. Paired with the next screen's `claimed`, this is
+ *      the handover, and there should be no `onMapReady` anywhere near it.
  *
  * Flip `MAP_PERF` to false to silence them. Deliberately not gated on __DEV__:
  * this app is diagnosed from release builds installed off GitHub Releases, and
@@ -66,10 +98,33 @@
 /** Process start, near enough — this module is imported during boot. */
 const T0 = Date.now();
 
-/** Single switch. Turn off once the warm-up question is settled. */
+/** Single switch. Turn off once the shared-surface question is settled. */
 export const MAP_PERF = true;
 
-export function mapPerf(tag: string): void {
+/**
+ * A clock reading to hand back to `mapPerf` later.
+ *
+ * The marks used to be moments only, and the questions they exist to answer are
+ * all *spans* — "how long after the screen appeared was its map usable?". That
+ * arithmetic was left to whoever read the log, across lines whose absolute
+ * timestamps run into six figures on a session that has been open for a day.
+ * Printing the span is the difference between a number you can read and a number
+ * you can mis-subtract.
+ */
+export function mapNow(): number {
+  return Date.now();
+}
+
+/**
+ * Log a mark, optionally with the span since a `mapNow()` reading.
+ *
+ * `since` is deliberately not defaulted to T0: a span from process start is the
+ * absolute timestamp we already print, and pretending otherwise would make the
+ * two numbers on a line say the same thing.
+ */
+export function mapPerf(tag: string, since?: number): void {
   if (!MAP_PERF) return;
-  console.log(`[mapperf] +${Date.now() - T0}ms ${tag}`);
+  const now = Date.now();
+  const span = since == null ? '' : ` Δ${now - since}ms`;
+  console.log(`[mapperf] +${now - T0}ms ${tag}${span}`);
 }
