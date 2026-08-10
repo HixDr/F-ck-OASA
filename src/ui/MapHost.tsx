@@ -517,9 +517,20 @@ export function MapHost() {
   return (
     /* `collapsable={false}`: the wrapper has no visual of its own, so RN's view
        flattening is entitled to remove it and take the accessibility props with
-       it. `pointerEvents="none"` keeps it out of RN's JS touch dispatch — the
-       native map's own gestures come from the Maps SDK and are governed by the
-       gesture props below, not by this.
+       it.
+
+       `pointerEvents` follows the reveal, and it is not optional. This wrapper
+       was `none` unconditionally on the belief that the value governs only RN's
+       JS dispatch while Android still walks down to the native map. It does not:
+       ReactViewGroup.onInterceptTouchEvent returns true — i.e. intercepts —
+       whenever `canChildrenBeTouchTarget` is false, which is every value except
+       `auto` and `box-none`. The wrapper swallowed the gesture and the Maps SDK
+       never saw a MotionEvent, so no map could be panned or tapped at all.
+
+       `none` while inactive still earns its place: it is what keeps a drag on
+       Home off a map sitting behind it, and it is a stronger guard than the
+       gesture props below, which only stop the SDK acting on events it has
+       already been handed.
 
        Hidden from screen readers whenever it is not `active`: a Google map is
        full of focusable native content, and TalkBack must not be able to land on
@@ -528,7 +539,7 @@ export function MapHost() {
     <View
       style={[hs.host, { left: frame.left, top: frame.top, width: frame.width, height: frame.height }]}
       collapsable={false}
-      pointerEvents="none"
+      pointerEvents={active ? 'auto' : 'none'}
       accessibilityElementsHidden={!active}
       importantForAccessibility={active ? 'auto' : 'no-hide-descendants'}
     >

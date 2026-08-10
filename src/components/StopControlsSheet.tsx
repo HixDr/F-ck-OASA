@@ -178,6 +178,13 @@ export default function StopControlsSheet({
                     <ScrollView
                       horizontal
                       showsHorizontalScrollIndicator={false}
+                      /* Sized to its chips, not to a share of the sheet. RN
+                         applies `baseHorizontal` — which carries `flexGrow: 1`
+                         — to a horizontal ScrollView's own style, so in this
+                         column it competed with the timetable's `flex: 1` and
+                         the two split the body in half. The line picker is one
+                         row of badges; the timetable is what the sheet is for. */
+                      style={s.chipScroll}
                       contentContainerStyle={s.chipRow}
                     >
                       {linesWithTimetable.map((l) => {
@@ -352,6 +359,10 @@ const s = StyleSheet.create({
     color: colors.textMuted,
     fontSize: font.size.label,
     marginBottom: spacing.md,
+  },
+  chipScroll: {
+    flexGrow: 0,
+    flexShrink: 0,
   },
   chipRow: {
     gap: spacing.sm,
