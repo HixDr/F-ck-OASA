@@ -94,6 +94,7 @@ import { USER_MARKER_BASE64 } from '../../data/userMarker';
 import { useSettings } from '../settings/SettingsProvider';
 import { hapticImpact, hapticSelection } from '../../services/haptics';
 import { useNetworkStatus } from '../../services/network';
+import { traceHomeFrame } from '../../utils/homeLayout';
 import Pressable from '../../ui/Pressable';
 import LiveStatus from '../../ui/LiveStatus';
 import { showUndo } from '../../ui/UndoBar';
@@ -1448,6 +1449,28 @@ const HeaderLive = React.memo(function HeaderLive({
 
 /* ── Home Screen ─────────────────────────────────────────────── */
 
+/**
+ * Hoisted, not an inline literal, and the reason is not tidiness.
+ *
+ * expo-router's `<Stack.Screen>` calls `navigation.setOptions(options)` from a
+ * layout effect keyed on `options`, so a fresh object every render meant every
+ * render of this screen pushed a new options object into the navigator — which
+ * re-renders the navigator and re-runs the native header config's `onUpdate()`.
+ * Home re-renders on every arrivals poll, so that was a header update every few
+ * seconds for a header that is switched off.
+ *
+ * This is NOT the fix for the launch offset (Home rendering ~83dp too low with a
+ * grey band above it), and it should not be mistaken for one. That bug is that
+ * the header *exists at all* on the first commit: `app/_layout.tsx` gives the
+ * Stack no `headerShown`, so React Navigation's default `true` applies until
+ * this lands one commit later, and a launch that loses that race is left with an
+ * empty `AppBarLayout` still holding its measured height. The fix is to declare
+ * it in the navigator — `<Stack.Screen name="index" options={{ headerShown:
+ * false }} />` inside `<Stack>` — so no toolbar is ever created for this route.
+ * See utils/homeLayout.ts.
+ */
+const HEADER_OFF = { headerShown: false } as const;
+
 export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -1517,7 +1540,7 @@ export default function HomeScreen() {
      zero until the first onLayout: frame 1 would otherwise stack every card at
      width zero, and this screen has already been through one round of the first
      frame lying to existing users. */
-  const { width: windowW } = useWindowDimensions();
+  const { width: windowW, height: windowH } = useWindowDimensions();
   const [measuredW, setMeasuredW] = useState(0);
   const canvasW = measuredW > 0 ? measuredW : Math.max(1, windowW - spacing.lg * 2);
 
@@ -1531,6 +1554,42 @@ export default function HomeScreen() {
     const { width } = e.nativeEvent.layout;
     setMeasuredW((prev) => (Math.abs(prev - width) < 1 ? prev : width));
   }, []);
+
+  /* ── Where the screen box actually is ──────────────────────────
+     Diagnostic only — see utils/homeLayout.ts for what the one line it prints
+     means and which hypothesis each shape of it implicates. It is a ref and a
+     log, never state: Home's container measuring itself must not cost a render,
+     and the canvas below re-places every card when it does. */
+  const frameRef = useRef<{ w: number; h: number } | null>(null);
+
+  const traceFrame = useCallback(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    traceHomeFrame({
+      winW: windowW,
+      winH: windowH,
+      frameW: frame.w,
+      frameH: frame.h,
+      top: insets.top,
+      bottom: insets.bottom,
+      left: insets.left,
+      right: insets.right,
+    });
+  }, [windowW, windowH, insets.top, insets.bottom, insets.left, insets.right]);
+
+  const onContainerLayout = useCallback(
+    (e: LayoutChangeEvent) => {
+      const { width, height } = e.nativeEvent.layout;
+      frameRef.current = { w: width, h: height };
+      traceFrame();
+    },
+    [traceFrame],
+  );
+
+  /* The insets or the window can change without the container's own box
+     changing size, and that case still has to print — an inset that grows while
+     the box stays put is exactly the shape of the hypothesis this rules out. */
+  useEffect(traceFrame, [traceFrame]);
 
   const onMeasure = useCallback((stopCode: string, height: number) => {
     const prev = heightsRef.current.get(stopCode);
@@ -2228,8 +2287,11 @@ export default function HomeScreen() {
   const onPrimary = onAccent(primaryColor);
 
   return (
-    <View style={[s.container, { paddingTop: insets.top + spacing.sm }]}>
-      <Stack.Screen options={{ headerShown: false }} />
+    <View
+      style={[s.container, { paddingTop: insets.top + spacing.sm }]}
+      onLayout={onContainerLayout}
+    >
+      <Stack.Screen options={HEADER_OFF} />
 
       <View style={s.header}>
         <View style={s.logoRow}>
