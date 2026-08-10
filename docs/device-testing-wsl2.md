@@ -137,15 +137,66 @@ adb -s "$S" reverse tcp:8081 tcp:8082
 
 ## Reading the app's own diagnostics
 
-The app logs timing marks through `console.log`, which **survives release
-builds** — there is no `drop_console` anywhere in the Metro/Babel toolchain, and
-shipped code already relies on `console.warn` (`[boot]`, `[alert]`, `[planner]`).
-Diagnostics are deliberately not `__DEV__`-gated, because this app is diagnosed
-from release APKs installed off GitHub Releases.
+**A release build tells you nothing.** This was wrong here for a long time, and
+it cost days on the 1.2.8–1.2.10 map bug. The app logs timing marks through
+`console.log` and nothing strips them, but the build is **bridgeless** (New
+Architecture), and in a release bridgeless build those calls reach no Android log
+at all:
 
 ```bash
-adb -s "$S" logcat -s ReactNativeJS:V | grep mapperf
+adb -s "$S" logcat -d -s ReactNativeJS:V     # empty
+adb -s "$S" logcat -d --pid=$(adb -s "$S" shell pidof com.itshix.fckoasa)
+# ~20 lines, all system: NtViewRootImpl, BridgelessReact host pause/resume. No JS.
 ```
+
+So a shipped APK can only be diagnosed from the outside — screenshots, `input
+tap`/`swipe`, and pixel diffs. That is enough to *measure* a symptom and nowhere
+near enough to explain one:
+
+```bash
+adb -s "$S" exec-out screencap -p > /tmp/a.png
+adb -s "$S" shell input swipe 630 1900 630 1150 400
+adb -s "$S" exec-out screencap -p > /tmp/b.png
+# then compare — 0.00% changed is a real result, and a very strong one
+```
+
+`uiautomator dump` is also unavailable on the map screens: it waits for the
+window to go idle and the arrival countdown never does, so it fails with "could
+not get idle state". And when it *does* succeed, check what you dumped — a dump
+taken after the app backgrounded is the launcher's tree, which looks plausible
+and is worthless.
+
+### Use a side-by-side dev build instead
+
+`OASA_APP_ID_SUFFIX` (see `app.config.ts`) builds the same app under a different
+application id, so a debuggable copy installs **next to** the release without the
+signature clash or the data loss:
+
+```bash
+OASA_APP_ID_SUFFIX=.dev npx expo prebuild --platform android --clean
+(cd android && ./gradlew assembleDebug)          # no keystore needed
+adb -s "$S" install -r android/app/build/outputs/apk/debug/app-debug.apk
+npx expo start --dev-client --port 8082
+adb -s "$S" reverse tcp:8081 tcp:8082
+```
+
+Logs then arrive in Metro's own output, and Fast Refresh makes each experiment
+seconds rather than a release cycle. Two things to know:
+
+- The Maps key is restricted per (package, SHA-1), so the suffixed build needs
+  its own entry or every map is blank. `com.itshix.fckoasa.dev` with the AOSP
+  debug SHA-1 `5E:8F:16:06:2E:A3:CD:2C:4A:0D:54:78:76:BA:A6:F3:8C:AB:F6:25` is
+  already on the key.
+- **Metro caches `node_modules` transforms.** Editing a dependency and reloading
+  serves the old module and looks like the edit did nothing. Restart with
+  `--clear`, and confirm what is actually being served:
+  ```bash
+  curl -s "http://localhost:8082/node_modules/expo-router/entry.bundle?platform=android&dev=true&minify=false" \
+    | grep -c 'your marker'
+  ```
+  Also check *which copy* of the dependency Metro reads: `react-native-screens`
+  points its `react-native` entry field at `src/`, so patching its compiled
+  `lib/` output changes nothing that runs.
 
 For a clean map-timing run the order matters:
 

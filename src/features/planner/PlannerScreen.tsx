@@ -1063,7 +1063,14 @@ export default function PlannerScreen() {
           line map this screen has that wrapper between its root and the hole. An
           opaque wrapper over a transparent root is a black rectangle where the map
           should be, so the reveal has to reach this view too. */}
-      <View style={[s.mapFill, revealed && ms.containerClear]}>
+      <View
+        style={[s.mapFill, revealed && ms.containerClear]}
+        /* And it has to decline touches too, for the same reason the root above
+           does. This wrapper is unique to the planner — Live and Nearby put the
+           hole straight under their root — so it is a second, independent way
+           for this one screen's map to be dead while the other two work. */
+        pointerEvents={revealed ? 'box-none' : 'auto'}
+      >
         {/* The hole the map shows through, laid out exactly where this screen's
             own `<MapView>` used to be. It reports its rectangle to the host; it
             draws nothing itself, so everything below still draws over the map. */}
