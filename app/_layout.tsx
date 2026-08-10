@@ -652,15 +652,20 @@ export default function RootLayout() {
            * `pointerEvents: 'box-none'` is what makes the shared map touchable,
            * and it is not optional.
            *
-           * React Navigation wraps every screen's content in a plain
-           * `<View style={{flex: 1}}>`, and an RN view whose pointerEvents
-           * allow it to be a target returns `true` from `onTouchEvent`
-           * *unconditionally* — see `ReactViewGroup.onTouchEvent`, which
-           * comments that "the root view always assumes any view that was
-           * tapped wants the touch". So that wrapper consumed every touch no
-           * screen child had claimed, Android stopped walking, and the one
-           * MapView — a sibling *below* the navigator — was never offered a
-           * single event: no panning, no zooming, no marker taps.
+           * React Navigation wraps every screen's content in a full-screen
+           * view, and an RN view whose pointerEvents allow it to be a target
+           * returns `true` from `onTouchEvent` *unconditionally* — see
+           * `ReactViewGroup.onTouchEvent`, which comments that "the root view
+           * always assumes any view that was tapped wants the touch". So that
+           * wrapper consumed every touch no screen child had claimed, Android
+           * stopped walking, and the one MapView — a sibling *below* the
+           * navigator — was never offered a single event: no panning, no
+           * zooming, no marker taps.
+           *
+           * On Android that wrapper is `RNSScreenContentWrapper`, not a plain
+           * `<View>`, and it *discards* `pointerEvents` — which is why this
+           * option alone was not enough and the real fix is a patch on
+           * react-native-screens. See `src/ui/MapHost.tsx` for the full chain.
            *
            * `box-none` means "not a target, children still are", so screens
            * behave exactly as before and an unclaimed touch keeps falling to

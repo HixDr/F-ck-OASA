@@ -74,9 +74,32 @@ if (!googleMapsApiKey) {
  */
 const googleMapsMapId = process.env.GOOGLE_MAPS_MAP_ID || 'e5d6168c8f0f60a4fe8c9747';
 
+/**
+ * Optional application-id suffix, for a build that installs *alongside* the
+ * real app instead of replacing it.
+ *
+ * `OASA_APP_ID_SUFFIX=.dev npx expo prebuild && ./gradlew assembleDebug` gives a
+ * separate app with its own data, so a debug build can be put on the same phone
+ * as the installed release without the signature clash (different key) or the
+ * data loss (same package). That matters more than it sounds: a release build is
+ * bridgeless, and **nothing it logs reaches logcat** — `console.log` under
+ * `ReactNativeJS` produces no output at all — so a shipped APK cannot be
+ * diagnosed from its own diagnostics, and the alternative to this suffix is
+ * uninstalling the user's app to get at a debuggable one.
+ *
+ * The Maps key is restricted to the real package, so a suffixed build shows a
+ * blank basemap. Everything drawn *over* the map — markers, polylines, controls
+ * — and every gesture still behaves normally, which is enough for anything but
+ * judging the tiles.
+ *
+ * Unset in CI, so releases are unaffected.
+ */
+const appIdSuffix = process.env.OASA_APP_ID_SUFFIX ?? '';
+const applicationId = `com.itshix.fckoasa${appIdSuffix}`;
+
 export default ({ config }: ConfigContext): ExpoConfig => ({
   ...config,
-  name: "F*ck OASA",
+  name: appIdSuffix ? `F*ck OASA ${appIdSuffix.replace(/^\./, '')}` : "F*ck OASA",
   slug: "fck-oasa",
   version,
   orientation: "portrait",
@@ -94,7 +117,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
   },
   ios: {
     supportsTablet: false,
-    bundleIdentifier: "com.itshix.fckoasa",
+    bundleIdentifier: applicationId,
   },
   android: {
     adaptiveIcon: {
@@ -115,7 +138,7 @@ export default ({ config }: ConfigContext): ExpoConfig => ({
       "android.permission.REQUEST_INSTALL_PACKAGES",
     ],
     versionCode,
-    package: "com.itshix.fckoasa",
+    package: applicationId,
     config: {
       googleMaps: {
         apiKey: googleMapsApiKey,

@@ -1,13 +1,14 @@
 {
   "name": "fck-oasa",
-  "version": "1.2.10",
+  "version": "1.2.11",
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "postinstall": "patch-package --error-on-fail"
+    "postinstall": "patch-package --error-on-fail",
+    "test": "tsc --noEmit && node --test \"tests/*.test.mjs\""
   },
   "dependencies": {
     "@expo/ngrok": "^4.1.3",

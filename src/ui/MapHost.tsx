@@ -72,28 +72,47 @@
  * and marker taps all die together, which reads like a broken MapView and is
  * not one.
  *
- * So the whole chain from the root down to the hole has to be `box-none`:
+ * So the whole chain from the root down to the hole has to decline:
  *
- *   GestureHandlerRootView      auto — the parent, tried last, fine
+ *   GestureHandlerRootView      auto — the shared parent, tried last, fine
  *     └ SafeAreaProviderCompat  box-none via patches/@react-navigation+elements
- *        └ ScreenStack/Screen   native, do not consume
- *           └ contentContainer  box-none via `MAP_SCREEN_CONTENT_STYLE`
- *              └ map screen     box-none while revealed (each map screen)
- *                 └ the hole    `MapSurfaceSlot`, pointerEvents="none"
+ *        └ ScreenStack          plain ViewGroup, declines
+ *           └ CoordinatorLayout box-none upstream (PointerEventsBoxNoneImpl)
+ *              └ Screen         plain ViewGroup, declines
+ *                 └ content     ← the one that ate three releases; see below
+ *                    └ screen   box-none while revealed (each map screen)
+ *                       └ hole  `MapSurfaceSlot`, pointerEvents="none"
  *
- * Two of those are third-party wrappers with no touch handling of their own, so
- * `box-none` changes nothing for anybody else: children are still targets, and
- * only touches nothing claimed keep falling — to this.
+ * ── The link that ate 1.2.8, 1.2.9 and 1.2.10 ──
  *
- * The link that broke it twice is `contentContainer`, and the trap is worth
- * naming: React Navigation merges options *shallowly*, so a screen that sets
- * `contentStyle` does not add to the navigator's — it replaces it outright.
- * Every map screen has to set one (their content must be transparent or the
- * navigator's own background hides the map), so a `pointerEvents` set once in
- * `screenOptions` was silently dropped on exactly the four screens that needed
- * it and kept on every screen that did not. Hence `MAP_SCREEN_CONTENT_STYLE`
- * below: the two properties travel together, because separately they are a
- * transparent screen with a dead map.
+ * The screen's content container is not a plain `<View>` on Android, whatever it
+ * looks like in `NativeStackView`. Native-stack renders react-native-screens'
+ * `ScreenStackItem`, which wraps every screen's children in `DebugContainer` —
+ * and in a production bundle that *is* `RNSScreenContentWrapper`, a native
+ * `ReactViewGroup`. Its ViewManager is a `ViewGroupManager` with a codegen
+ * delegate, and that delegate has no `pointerEvents` case, so:
+ *
+ *   **`pointerEvents` on the content container is silently discarded — as a
+ *   style and as a prop alike — while `backgroundColor` from the very same
+ *   object is honoured.**
+ *
+ * Which is exactly what the bug looked like: the transparent half of
+ * `contentStyle` worked, so the map was perfectly visible, and the touch half
+ * evaporated, so it received nothing. Only three ViewManagers in all of React
+ * Native implement the prop (`RCTView` and the two ScrollViews); every other
+ * `ReactViewGroup` with a delegate ignores it and consumes touches forever.
+ *
+ * `patches/react-native-screens+*.patch` is the fix: outside `formSheet` the
+ * wrapper becomes a plain `View` with `pointerEvents="box-none"`, which the
+ * native class only ever existed to avoid because it measures form-sheet content
+ * height. Note the patch has to change `src/`, not `lib/`: the package's
+ * `react-native` entry field points at its TypeScript source, so Metro bundles
+ * `src/` and edits to the compiled output do nothing at all.
+ *
+ * A related trap is real but was never the cause: React Navigation merges options
+ * *shallowly*, so a screen setting `contentStyle` replaces the navigator's rather
+ * than adding to it, and every map screen must set one. `MAP_SCREEN_CONTENT_STYLE`
+ * keeps the two properties together for that reason.
  *
  * The same mechanism is what keeps an *unrevealed* map out of the way, and it is
  * stronger than turning gestures off: `pointerEvents="none"` on the host makes
@@ -158,8 +177,15 @@ import { mapNow, mapPerf } from '../utils/mapPerf';
  *
  * One constant rather than two properties written out per screen, because
  * React Navigation replaces `contentStyle` wholesale instead of merging it, so
- * a screen that spells out only the background silently turns its own map into
- * a picture. That is exactly how 1.2.8 and 1.2.9 shipped.
+ * a screen that spells out only the background would silently drop the other
+ * half.
+ *
+ * Honest note on the second property: on Android it only reaches a view that
+ * can accept it because `patches/react-native-screens+*.patch` turns the content
+ * container into a plain `View`. Unpatched, `RNSScreenContentWrapper` discards
+ * `pointerEvents` and keeps every touch — see the chain at the top of this file.
+ * It is kept here rather than left to the patch alone so the intent is visible
+ * from the screen that depends on it, and because iOS honours it directly.
  */
 export const MAP_SCREEN_CONTENT_STYLE: ViewStyle = {
   backgroundColor: 'transparent',
@@ -510,6 +536,7 @@ export function MapHost() {
     setMeasured((prev) => (prev && sameFrame(prev, specFrame) ? prev : specFrame));
   }, [specFrame]);
   const frame = measured ?? guessed;
+
 
   /* ── Camera handover ──────────────────────────────────────── */
 
