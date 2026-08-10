@@ -13,18 +13,23 @@
  *
  * ## Tiers
  *
- * The card no longer decides how big it is. Home's canvas measures it, turns
- * that width into a `tier` and hands it back with the exact `boxHeight` it must
- * fill; this file's job is to decide what fits. `detailed` is this card
- * unchanged and is the default, so a caller that passes neither prop — and a
- * stop the user has never arranged — gets what it always got.
+ * The card no longer decides how big it is. Home's canvas hands it a `tier` and
+ * the exact `boxHeight` it must fill; this file's job is to decide what fits.
+ * `detailed` is this card unchanged and is the default, so a caller that passes
+ * neither prop — and a stop the user has never arranged — gets what it always
+ * got.
+ *
+ * There are two tiers, and the reason there are two is that there are two bus
+ * layouts. The tier comes from the card's column *span* rather than from a
+ * measured width: three columns is the detailed row below, one or two is the
+ * compact stack, and a width between two columns is not something the canvas can
+ * hand out. The middle tier of the free-width design existed only to describe
+ * such a width, so it went with it.
  *
  * Content is dropped around the arrival figure rather than the figure being
- * shrunk, in this order: the destination and the timetable go at `standard`,
- * then everything but the badge and one number at `compact`. Which content goes
- * at which width is not a taste question and the comments below say what each
- * omission buys in dp; the one place the figure itself is shrunk is called out
- * where it happens.
+ * shrunk: `compact` keeps the badge and the number and drops the destination,
+ * the timetable pill and the bell. The one place the figure itself is shrunk is
+ * called out where it happens.
  *
  * Nothing above this line varies by tier. The polling, the decay, the alert
  * switching and the visibility filter are the card's contract with the rest of
@@ -111,7 +116,7 @@ interface Props {
   editing?: boolean;
   /**
    * How much content this card can afford, decided by the canvas from the
-   * card's measured width.
+   * card's column span.
    *
    * Defaults to `detailed`, which is this card exactly as it was before the
    * canvas existed — so every caller that knows nothing about tiers, and every
@@ -197,27 +202,18 @@ const LoadingRows = React.memo(function LoadingRows({
       </View>
     );
   }
-  const dense = tier === 'standard';
   return (
     <View accessible accessibilityLabel={`Loading arrivals for ${stopName}`}>
       {SKELETON_WIDTHS.map((w, i) => (
-        <View key={i} style={dense ? s.skeletonRowStandard : s.skeletonRow}>
+        <View key={i} style={s.skeletonRow}>
           <SkeletonBox width={46} height={22} radius={radius.sm} />
-          {dense ? (
-            <View style={s.skeletonFill}>
-              <SkeletonBox width={40} height={26} radius={radius.sm} />
-            </View>
-          ) : (
-            <>
-              {/* Percentage of the flexible middle, not of the row: measured
-                  against the row it would overflow once the badge, the number
-                  block and three gaps are subtracted from a 360dp screen. */}
-              <View style={s.skeletonGrow}>
-                <SkeletonBox width={w} height={12} />
-              </View>
-              <SkeletonBox width={40} height={26} radius={radius.sm} />
-            </>
-          )}
+          {/* Percentage of the flexible middle, not of the row: measured
+              against the row it would overflow once the badge, the number
+              block and three gaps are subtracted from a 360dp screen. */}
+          <View style={s.skeletonGrow}>
+            <SkeletonBox width={w} height={12} />
+          </View>
+          <SkeletonBox width={40} height={26} radius={radius.sm} />
         </View>
       ))}
     </View>
@@ -240,10 +236,6 @@ interface RowProps {
   scheduleOpen: boolean;
   alertActive: boolean;
   primaryColor: string;
-  /** `standard` keeps the badge and the figure and drops everything between and
-   *  after them. `compact` does not use this row at all — it stacks, which is a
-   *  different shape rather than a subset of this one. */
-  tier: CardTier;
   onPress: (lineCode: string) => void;
   onToggleSchedule: (lineCode: string) => void;
   onToggleAlert: (lineCode: string) => void;
@@ -262,7 +254,6 @@ const LineRow = React.memo(function LineRow({
   scheduleOpen,
   alertActive,
   primaryColor,
-  tier,
   onPress,
   onToggleSchedule,
   onToggleAlert,
@@ -271,15 +262,11 @@ const LineRow = React.memo(function LineRow({
     minutes == null ? null : minutes <= 0 ? 'now' : String(minutes);
 
   const spoken = spokenArrival(minutes, nextDeparture, nextIsTomorrow);
-  const dense = tier === 'standard';
 
   return (
     <View>
-      {/* The label is the full one at every tier, destination included. What
-          `standard` drops is 146dp of width it does not have, not a fact about
-          the bus — and a screen reader is not reading the width. */}
       <Pressable
-        style={dense ? s.lineRowStandard : s.lineRow}
+        style={s.lineRow}
         onPress={() => onPress(lineCode)}
         accessibilityRole="button"
         accessibilityLabel={`Line ${lineId}, ${label}, ${spoken}${stale ? ', data may be out of date' : ''}`}
@@ -289,35 +276,33 @@ const LineRow = React.memo(function LineRow({
           <Text style={[s.lineBadgeText, { color: onAccent(primaryColor) }]} maxFontSizeMultiplier={fontScaleCap.badge}>{lineId}</Text>
         </View>
 
-        {!dense && (
-          <View style={s.lineMain}>
-            <Text style={s.lineDescr} numberOfLines={1}>{label}</Text>
-            {hasTimetable && (
-              <Pressable
-                style={s.schedPill}
-                onPress={() => onToggleSchedule(lineCode)}
-                accessibilityRole="button"
-                accessibilityState={{ expanded: scheduleOpen }}
-                accessibilityLabel={
-                  nextDeparture
-                    ? `Timetable, next departure ${nextDeparture}${nextIsTomorrow ? ' tomorrow' : ''}`
-                    : 'Timetable'
-                }
-              >
-                <Ionicons
-                  name={scheduleOpen ? 'time' : 'time-outline'}
-                  size={12}
-                  color={scheduleOpen ? primaryColor : colors.textMuted}
-                />
-                <Text style={[s.schedPillText, scheduleOpen && { color: primaryColor }]}>
-                  {nextDeparture
-                    ? nextIsTomorrow ? `${nextDeparture} tomorrow` : nextDeparture
-                    : 'Timetable'}
-                </Text>
-              </Pressable>
-            )}
-          </View>
-        )}
+        <View style={s.lineMain}>
+          <Text style={s.lineDescr} numberOfLines={1}>{label}</Text>
+          {hasTimetable && (
+            <Pressable
+              style={s.schedPill}
+              onPress={() => onToggleSchedule(lineCode)}
+              accessibilityRole="button"
+              accessibilityState={{ expanded: scheduleOpen }}
+              accessibilityLabel={
+                nextDeparture
+                  ? `Timetable, next departure ${nextDeparture}${nextIsTomorrow ? ' tomorrow' : ''}`
+                  : 'Timetable'
+              }
+            >
+              <Ionicons
+                name={scheduleOpen ? 'time' : 'time-outline'}
+                size={12}
+                color={scheduleOpen ? primaryColor : colors.textMuted}
+              />
+              <Text style={[s.schedPillText, scheduleOpen && { color: primaryColor }]}>
+                {nextDeparture
+                  ? nextIsTomorrow ? `${nextDeparture} tomorrow` : nextDeparture
+                  : 'Timetable'}
+              </Text>
+            </Pressable>
+          )}
+        </View>
 
         {/* Everything in this block carries the figure's cap, including the two
             that are not the figure. Uncapped, at accessibility text sizes the
@@ -325,7 +310,7 @@ const LineRow = React.memo(function LineRow({
             become the widest thing in the block — which lifts it off the floor
             in `arrivalBlock` that keeps the row from reflowing on every poll,
             and makes a row with no arrival taller than the rows above it. */}
-        <View style={[s.arrivalBlock, dense && s.arrivalBlockFill, stale && s.stale]}>
+        <View style={[s.arrivalBlock, stale && s.stale]}>
           {arrivalText == null ? (
             <Text style={s.noArrival} maxFontSizeMultiplier={fontScaleCap.figure}>—</Text>
           ) : arrivalText === 'now' ? (
@@ -338,33 +323,20 @@ const LineRow = React.memo(function LineRow({
           )}
         </View>
 
-        {/* No bell below `detailed`. It is a 44dp target, and `standard` has
-            ~146dp of content of which the badge and the number block already
-            take 102 — there is no arrangement of the remainder in which a
-            fourth control is reachable rather than merely present.
-
-            This never strands an armed alert, and the next reader should not
-            "fix" it by putting the button back. `app/_layout.tsx` renders an
-            app-wide alert pill with a "Stop alert" button on every screen for
-            as long as `subscribeAlertConfig` reports a watch, because only one
-            watch exists app-wide. What a narrow card loses is *arming* a new
-            alert, which the user does from a card wide enough to offer it. */}
-        {!dense && (
-          <Pressable
-            style={s.bellBtn}
-            onPress={() => onToggleAlert(lineCode)}
-            accessibilityRole="switch"
-            accessibilityState={{ checked: alertActive }}
-            accessibilityLabel={`Arrival alert for line ${lineId}`}
-            accessibilityHint={alertActive ? 'Turns the alert off' : 'Choose how early to be warned'}
-          >
-            <Ionicons
-              name={alertActive ? 'notifications' : 'notifications-outline'}
-              size={22}
-              color={alertActive ? colors.warning : colors.textMuted}
-            />
-          </Pressable>
-        )}
+        <Pressable
+          style={s.bellBtn}
+          onPress={() => onToggleAlert(lineCode)}
+          accessibilityRole="switch"
+          accessibilityState={{ checked: alertActive }}
+          accessibilityLabel={`Arrival alert for line ${lineId}`}
+          accessibilityHint={alertActive ? 'Turns the alert off' : 'Choose how early to be warned'}
+        >
+          <Ionicons
+            name={alertActive ? 'notifications' : 'notifications-outline'}
+            size={22}
+            color={alertActive ? colors.warning : colors.textMuted}
+          />
+        </Pressable>
       </Pressable>
     </View>
   );
@@ -855,7 +827,6 @@ function FavoriteStopCard({
             scheduleOpen={expandedScheduleLine === line.lineCode}
             alertActive={!!alertHere && alertHere.lineId === line.lineId}
             primaryColor={primaryColor}
-            tier={tier}
             onPress={handleLinePress}
             onToggleSchedule={toggleSchedule}
             onToggleAlert={handleAlertToggle}

@@ -107,24 +107,6 @@ export const s = StyleSheet.create({
     paddingVertical: spacing.xs,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
-  /**
-   * The same row at `standard`.
-   *
-   * 62 was the height of a description stacked over a timetable pill beside the
-   * figure. `standard` drops both, so the row is one 34pt figure and its
-   * caption tall and the extra ten points are empty card — which at ~146dp of
-   * content is not cosmetic, it is the difference between three arrival rows
-   * fitting in a box and two. The floor still matters for the rows the figure
-   * does not fill: an em dash or a "now" would otherwise make a card of expired
-   * estimates a ragged stack of short rows.
-   */
-  lineRowStandard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    minHeight: 52,
-    paddingVertical: spacing.xs,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
   /** Cold-start placeholder. Same metrics as `lineRow` so the real rows land
    *  where the grey ones were rather than shoving the card taller. */
   skeletonRow: {
@@ -135,24 +117,8 @@ export const s = StyleSheet.create({
     paddingVertical: spacing.xs,
     borderTopWidth: StyleSheet.hairlineWidth,
   },
-  /** And the same at `standard`, for the same reason: a placeholder that does
-   *  not match the row replacing it reintroduces the jump it exists to avoid. */
-  skeletonRowStandard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: spacing.sm,
-    minHeight: 52,
-    paddingVertical: spacing.xs,
-    borderTopWidth: StyleSheet.hairlineWidth,
-  },
   skeletonGrow: {
     flex: 1,
-  },
-  /** Stands in for `arrivalBlockFill`, so the grey block sits where the figure
-   *  will. */
-  skeletonFill: {
-    flex: 1,
-    alignItems: 'center',
   },
   lineBadge: {
     borderRadius: radius.sm,
@@ -233,19 +199,6 @@ export const s = StyleSheet.create({
     minWidth: 56,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  /**
-   * `standard` only. With the description and the bell gone, nothing else in
-   * the row is flexible, so the block would sit hard against the badge with all
-   * the slack pooled at the card's edge. Letting it take the slack centres the
-   * figure in the space beside the badge instead.
-   *
-   * This does not weaken the reservation above: the block's width is now
-   * decided by the row rather than by its own contents, which is the same
-   * guarantee — a 12 → 9 tick moves nothing — arrived at from the other side.
-   */
-  arrivalBlockFill: {
-    flex: 1,
   },
   arrivalMin: {
     ...font.num,

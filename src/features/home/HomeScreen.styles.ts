@@ -200,16 +200,13 @@ export const s = StyleSheet.create({
     borderWidth: 2,
     borderRadius: radius.lg,
   },
-  /** Magnet guides. One hairline each, spanning the whole canvas so that an
-   *  alignment two cards apart is legible as an alignment; positioned by
-   *  transform from a shared value, which is why `left`/`top` are zero. */
-  snapGuideV: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    left: 0,
-    width: 1,
-  },
+  /** The magnet guide. One hairline, spanning the canvas so that an alignment
+   *  two cards apart is legible as an alignment; positioned by transform from a
+   *  shared value, which is why `top` is zero.
+   *
+   *  There is no vertical twin any more and nothing for one to do: a card is
+   *  always on a column, so its side edges are always already aligned with every
+   *  other card's. Only `y` can be *nearly* aligned. */
   snapGuideH: {
     position: 'absolute',
     left: 0,
