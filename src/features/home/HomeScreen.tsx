@@ -5,16 +5,21 @@
  * every card is absolutely positioned on a surface that scrolls vertically and
  * grows to fit the lowest card, because a card the user may put anywhere is not
  * something a list can express. `features/home/layout` owns every number behind
- * that — units, size tiers, magnets, overlap resolution — and contains no React
- * on purpose, so the render pass, the gesture worklets and the accessibility
- * actions cannot quietly become three layout engines that disagree.
+ * that — the three columns, the per-span floors, the vertical magnets, overlap
+ * resolution — and contains no React on purpose, so the render pass, the gesture
+ * worklets and the accessibility actions cannot quietly become three layout
+ * engines that disagree.
+ *
+ * The horizontal axis is columns and only columns, which is why the two drags
+ * below behave differently on the two axes: vertically a card follows the
+ * finger, horizontally it jumps between the three places it can be put down.
  *
  * Virtualization is the price, and it is a real one: every saved stop renders
  * at once and each card owns live arrival queries. That is fine at the 5-20
  * stops people actually save, and it is what turns `active` — the focus gate
  * handed to every card — from an optimisation into load-bearing code.
  *
- * A stop that has never been arranged *flows*: full width, sized by its own
+ * A stop that has never been arranged *flows*: full span, sized by its own
  * content, stacked in saved order beneath anything that has been placed. An
  * install arriving from 1.2.4 has no saved placements at all, so every card
  * flows and this canvas reproduces the old column exactly. That is the whole
@@ -89,6 +94,7 @@ import { USER_MARKER_BASE64 } from '../../data/userMarker';
 import { useSettings } from '../settings/SettingsProvider';
 import { hapticImpact, hapticSelection } from '../../services/haptics';
 import { useNetworkStatus } from '../../services/network';
+import { traceHomeFrame } from '../../utils/homeLayout';
 import Pressable from '../../ui/Pressable';
 import LiveStatus from '../../ui/LiveStatus';
 import { showUndo } from '../../ui/UndoBar';
@@ -97,21 +103,25 @@ import FavoriteStopCard from '../../components/FavoriteStopCard';
 import SettingsModal from '../../components/SettingsModal';
 import { s, LINE_GRID_GAP } from './HomeScreen.styles';
 import {
-  edgesX,
+  busCapacity,
+  colAtPx,
+  colLeftPx,
   edgesY,
   fitAll,
+  heightStep,
+  minHFor,
+  nudgeCol,
+  nudgeY,
   placeAll,
-  nudge,
-  resizeStep,
   resolveMove,
   resolveResize,
   snapAxis,
-  tierFor,
+  spanAtPx,
+  spanStep,
+  spanWidthPx,
   CARD_GAP_DP,
-  CARD_MIN_H_DP,
-  CARD_MIN_W_DP,
+  COLS,
   SNAP_DP,
-  type CardTier,
   type PlacedCard,
   type Rect,
 } from './layout';
@@ -186,36 +196,41 @@ const EDGE_TICK_MS = 16;
 interface CanvasCtl {
   /** Index of the carried card, -1 when nothing is held. */
   active: SharedValue<number>;
-  /** The carried card's travel from its laid-out position, in canvas pixels,
-   *  after snapping. */
+  /** The carried card's travel from its laid-out position, in canvas pixels.
+   *  `dx` is a column boundary and nothing between; `dy` follows the finger. */
   dx: SharedValue<number>;
   dy: SharedValue<number>;
+  /** The column the carried card is currently over. Kept because `dx` is
+   *  animated — reading a spring mid-flight would compare where the card is
+   *  against where it is going, and re-target the spring every frame. */
+  heldCol: SharedValue<number>;
   /** Raw gesture translation, kept separately so the edge auto-scroll can add
    *  its own contribution without the finger having moved. */
   panX: SharedValue<number>;
   panY: SharedValue<number>;
   lift: SharedValue<number>;
-  /** Canvas pixel coordinate of the edge each axis is currently snapped to, or
-   *  -1. Drives the guide lines. */
-  guideX: SharedValue<number>;
+  /** Canvas pixel coordinate of the horizontal edge the card is snapped to, or
+   *  -1. Drives the guide line. There is no vertical counterpart: a card is
+   *  always on a column, so it is always already aligned with every other. */
   guideY: SharedValue<number>;
   /** Every card's box, in stored units, in render order. */
   rects: SharedValue<Rect[]>;
   /** The same minus the carried one, plus its edges — built once per lift,
    *  because the alternative is rebuilding both on every frame of the drag. */
   others: SharedValue<Rect[]>;
-  edgeX: SharedValue<number[]>;
   edgeY: SharedValue<number[]>;
   /** Canvas usable width. Every conversion between stored units and pixels
    *  goes through it. */
   u: SharedValue<number>;
   /** Index of the card whose corner is being dragged, -1 when none. */
   resizing: SharedValue<number>;
-  /** The box that corner is currently describing, in canvas pixels. */
+  /** The box that corner is currently describing: pixels for the preview,
+   *  and the span it has settled on, which is what the drop commits. */
   previewX: SharedValue<number>;
   previewY: SharedValue<number>;
   previewW: SharedValue<number>;
   previewH: SharedValue<number>;
+  previewSpan: SharedValue<number>;
   /** Finger position in window coordinates — drives the edge auto-scroll. */
   pointerY: SharedValue<number>;
   scrollY: SharedValue<number>;
@@ -234,55 +249,47 @@ interface CanvasCtl {
 }
 
 interface Sized {
-  w: number;
+  /** Columns the corner is currently describing. */
+  span: number;
   h: number;
-  /** Snapped edge in canvas pixels, or -1. */
-  gx: number;
+  /** Snapped horizontal edge in canvas pixels, or -1. */
   gy: number;
 }
 
 /**
  * The box a corner drag is describing, in stored units.
  *
- * The top-left is fixed, so only the trailing edges snap and only they are
- * clamped. Pure and argument-taking for the same reason as `carryTo`, and
- * because the accessibility "grow" and "shrink" actions have to reach the same
- * answer through `resizeStep` without a gesture anywhere in sight.
+ * The top-left is fixed, so only the trailing edges move. Horizontally that is
+ * now a column count rather than a width: there are at most three answers, the
+ * nearest one is taken, and the whole class of bug the free-width version had
+ * here — a floor and a margin fighting over the order of two ternaries, and a
+ * preview promising a width the drop then refused — is gone with it.
+ *
+ * Pure and argument-taking for the same reason as `carryTo`, and because the
+ * accessibility size actions have to reach the same answer through `spanStep`
+ * and `heightStep` without a gesture anywhere in sight.
  */
 function sizeTo(
   base: Rect,
   panX: number,
   panY: number,
   u: number,
-  edgeX: readonly number[],
   edgeY: readonly number[],
 ): Sized {
   'worklet';
   const tol = SNAP_DP / u;
-  const minW = CARD_MIN_W_DP / u;
-  const minH = CARD_MIN_H_DP / u;
-  /* The floor wins over the margin, and `maxW` says so rather than leaving it
-     to the order of two ternaries. A card placed closer to the right edge than
-     the minimum width cannot be resized about a fixed corner at all — the drop
-     resolves that by moving it — and a preview drawn at less than the floor
-     would promise a size the card is never allowed to take. */
-  const maxW = Math.max(minW, 1 - base.x);
-
-  let w = base.w + panX / u;
-  w = w > maxW ? maxW : w < minW ? minW : w;
+  const span = spanAtPx(spanWidthPx(base.span, u) + panX, base.col, u);
+  /* The floor of the span being *offered*, not of the one the card has. Dragging
+     from one column to three switches the bus layout to the taller detailed
+     row, so the preview has to grow with it — otherwise the drop would silently
+     raise a card the user was shown at a shorter height. */
+  const minH = minHFor(span, u);
   let h = base.h + panY / u;
   if (h < minH) h = minH;
 
   /* Only the trailing edge is offered a magnet: the leading one has not moved,
      and snapping an edge the user is not dragging would silently resize the
      card from the side they are holding still. */
-  const sx = snapAxis(base.x + w, 0, edgeX, tol);
-  let gx = sx.guide;
-  if (gx >= 0) {
-    const snapped = sx.v - base.x;
-    if (snapped >= minW && snapped <= maxW) w = snapped;
-    else gx = -1;
-  }
   const sy = snapAxis(base.y + h, 0, edgeY, tol);
   let gy = sy.guide;
   if (gy >= 0) {
@@ -291,60 +298,54 @@ function sizeTo(
     else gy = -1;
   }
 
-  return { w, h, gx: gx >= 0 ? gx * u : -1, gy: gy >= 0 ? gy * u : -1 };
+  return { span, h, gy: gy >= 0 ? gy * u : -1 };
 }
 
 interface Carried {
-  dx: number;
+  /** The column the card is over. Its `dx` follows from this and nothing else. */
+  col: number;
   dy: number;
-  /** Snapped edge in canvas pixels, or -1. */
-  gx: number;
+  /** Snapped horizontal edge in canvas pixels, or -1. */
   gy: number;
 }
 
 /**
  * Where a carried card sits, given how far the finger has travelled.
  *
+ * The two axes deliberately do not behave alike. Vertically the card follows
+ * the finger, with magnets offering an alignment; horizontally it jumps between
+ * the three columns, because those are the only places it can be put down.
+ * Following the finger and then snapping on release would show the user a
+ * position that does not exist, and on an axis with three answers that is not a
+ * detail — it is the whole model, mis-stated.
+ *
  * Deliberately pure, and deliberately takes everything as arguments rather than
  * reading the shared values itself: it is called both from the gesture worklet
  * on the UI thread and from the auto-scroll tick on the JS thread, and reading
  * a shared value from JS is a synchronous hop into the UI runtime. The tick
  * pays for a few scalars anyway — it has to, to know where the finger is — so
- * what this actually buys is the two *arrays*, which would otherwise be marshalled
- * across the boundary sixty times a second for values that cannot change during
- * a drag. Writing the results back is the caller's job for the same reason.
+ * what this actually buys is the edge *array*, which would otherwise be
+ * marshalled across the boundary sixty times a second for a value that cannot
+ * change during a drag. Writing the results back is the caller's job for the
+ * same reason.
  *
- * A snap that would push the card off the canvas is dropped rather than
- * clamped: showing a guide line the card then fails to sit on is worse than not
- * offering the magnet at all.
+ * A snap that would push the card off the top of the canvas is dropped rather
+ * than clamped: showing a guide line the card then fails to sit on is worse
+ * than not offering the magnet at all.
  */
 function carryTo(
   base: Rect,
   panX: number,
   panY: number,
   u: number,
-  edgeX: readonly number[],
   edgeY: readonly number[],
 ): Carried {
   'worklet';
   const tol = SNAP_DP / u;
-  /* `Math.max` for the same reason `resolveMove` needs it: a card can be wider
-     than the canvas — a layout authored on a wider phone, widened to the dp
-     floor on a narrow one — and a negative ceiling here would let the clamp
-     below carry it off the left edge instead of pinning it at zero. */
-  const maxX = Math.max(0, 1 - base.w);
-  let x = base.x + panX / u;
-  x = x < 0 ? 0 : x > maxX ? maxX : x;
+  const col = colAtPx(colLeftPx(base.col, u) + panX, base.span, u);
   let y = base.y + panY / u;
   if (y < 0) y = 0;
 
-  const sx = snapAxis(x, base.w, edgeX, tol);
-  let nx = sx.v;
-  let gx = sx.guide;
-  if (nx < 0 || nx > maxX) {
-    nx = x;
-    gx = -1;
-  }
   const sy = snapAxis(y, base.h, edgeY, tol);
   let ny = sy.v;
   let gy = sy.guide;
@@ -353,12 +354,7 @@ function carryTo(
     gy = -1;
   }
 
-  return {
-    dx: (nx - base.x) * u,
-    dy: (ny - base.y) * u,
-    gx: gx >= 0 ? gx * u : -1,
-    gy: gy >= 0 ? gy * u : -1,
-  };
+  return { col, dy: (ny - base.y) * u, gy: gy >= 0 ? gy * u : -1 };
 }
 
 /* ── Arranging without a gesture ─────────────────────────────── */
@@ -372,18 +368,21 @@ function carryTo(
  * actions is the same answer the saved-line badges already use, for the same
  * reason: the control has nowhere to put a visible affordance.
  *
- * Grow and shrink are two actions rather than four because the stored units
- * already tie a card's height to its width, so scaling both together keeps the
- * box the shape the user made it and halves the length of a menu that is
- * already the longest in the app.
+ * Width and height are four actions rather than a single "grow", and the extra
+ * two are the price of the design rather than thoroughness for its own sake:
+ * span picks the bus layout and height picks how many buses, so a user who
+ * cannot set the two independently cannot reach half the sizes. This is the
+ * longest action menu in the app, and it is still shorter than "no way to do it".
  */
 const ARRANGE_ACTIONS: AccessibilityActionInfo[] = [
   { name: 'moveUp', label: 'Move up' },
   { name: 'moveDown', label: 'Move down' },
   { name: 'moveLeft', label: 'Move left' },
   { name: 'moveRight', label: 'Move right' },
-  { name: 'grow', label: 'Grow' },
-  { name: 'shrink', label: 'Shrink' },
+  { name: 'wider', label: 'Wider' },
+  { name: 'narrower', label: 'Narrower' },
+  { name: 'taller', label: 'Taller' },
+  { name: 'shorter', label: 'Shorter' },
 ];
 
 /**
@@ -403,11 +402,21 @@ const ARRANGE_EDIT_ACTIONS: AccessibilityActionInfo[] = [
   { name: 'removeStop', label: 'Remove this stop' },
 ];
 
-const TIER_WORD: Record<CardTier, string> = {
-  compact: 'Compact',
-  standard: 'Standard',
-  detailed: 'Detailed',
-};
+const COL_WORD = ['no columns', 'One column', 'Two columns', 'Three columns'] as const;
+
+/**
+ * A card's size, spoken.
+ *
+ * Columns and buses rather than "small" and "big", because those are the two
+ * things the size actually decides and the two the actions change. A user who
+ * hears "Two columns, 4 buses" after "Taller" knows what the last activation
+ * bought them; "Medium card" does not say whether anything happened.
+ */
+function sizeWord(span: number, buses: number | null): string {
+  const cols = COL_WORD[span] ?? COL_WORD[3];
+  if (buses == null) return `${cols}, sized to its content`;
+  return `${cols}, ${buses} bus${buses === 1 ? '' : 'es'}`;
+}
 
 /* ── A card on the canvas ────────────────────────────────────── */
 
@@ -506,15 +515,14 @@ const StopCard = React.memo(function StopCard({
             if (i !== index) others.push(rects[i]);
           }
           ctl.others.value = others;
-          ctl.edgeX.value = edgesX(others);
           ctl.edgeY.value = edgesY(others);
 
           ctl.active.value = index;
           ctl.dx.value = 0;
           ctl.dy.value = 0;
+          ctl.heldCol.value = rects[index].col;
           ctl.panX.value = 0;
           ctl.panY.value = 0;
-          ctl.guideX.value = -1;
           ctl.guideY.value = -1;
           ctl.scrollAt.value = ctl.scrollY.value;
           ctl.pointerY.value = e.absoluteY;
@@ -531,21 +539,38 @@ const StopCard = React.memo(function StopCard({
           /* The card's travel is the gesture *plus* however far the canvas has
              auto-scrolled: a finger holding still while the content moves under
              it is still the card moving across the canvas. */
+          const base = rects[index];
           const next = carryTo(
-            rects[index],
+            base,
             e.translationX,
             e.translationY + (ctl.scrollY.value - ctl.scrollAt.value),
             ctl.u.value,
-            ctl.edgeX.value,
             ctl.edgeY.value,
           );
-          ctl.dx.value = next.dx;
           ctl.dy.value = next.dy;
-          if (next.gx !== ctl.guideX.value || next.gy !== ctl.guideY.value) {
-            ctl.guideX.value = next.gx;
-            ctl.guideY.value = next.gy;
-            if (next.gx >= 0 || next.gy >= 0) runOnJS(ctl.onSnap)();
+          /* Both axes can land on something in the same frame — a card carried
+             diagonally into a corner does exactly that — and the haptic fires
+             once for the pair. Two selection ticks in one frame is not two
+             confirmations, it is one confirmation played twice. */
+          let caught = false;
+          /* Only on a change of column, and animated rather than assigned: the
+             card has three positions on this axis, so following the finger
+             would show a place it cannot be put down. The spring is what makes
+             the jump read as the card claiming a column instead of teleporting.
+             Guarded on the column and not on `dx` itself, because `dx` is a
+             spring in flight — comparing it would be comparing where the card
+             is against where it is going, and would re-target on every frame. */
+          if (next.col !== ctl.heldCol.value) {
+            ctl.heldCol.value = next.col;
+            const tx = colLeftPx(next.col, ctl.u.value) - colLeftPx(base.col, ctl.u.value);
+            ctl.dx.value = ctl.reduced.value ? tx : withSpring(tx, liftSpring);
+            caught = true;
           }
+          if (next.gy !== ctl.guideY.value) {
+            ctl.guideY.value = next.gy;
+            if (next.gy >= 0) caught = true;
+          }
+          if (caught) runOnJS(ctl.onSnap)();
         })
         /* onFinalize rather than onEnd: a gesture cancelled from outside — a
            call arriving, a navigation — must still put the card down, and must
@@ -555,7 +580,6 @@ const StopCard = React.memo(function StopCard({
           const rects = ctl.rects.value;
           const u = ctl.u.value;
           const base = index < rects.length ? rects[index] : null;
-          ctl.guideX.value = -1;
           ctl.guideY.value = -1;
           ctl.lift.value = withSpring(1, liftSpring);
           if (!base) {
@@ -571,10 +595,15 @@ const StopCard = React.memo(function StopCard({
              to where the card will actually end up, or the drop plays twice —
              once to the finger's position and once again to the free one. */
           const got = resolveMove(
-            { x: base.x + ctl.dx.value / u, y: base.y + ctl.dy.value / u, w: base.w, h: base.h },
+            {
+              col: ctl.heldCol.value,
+              span: base.span,
+              y: base.y + ctl.dy.value / u,
+              h: base.h,
+            },
             ctl.others.value,
           );
-          const tx = (got.x - base.x) * u;
+          const tx = colLeftPx(got.col, u) - colLeftPx(base.col, u);
           const ty = (got.y - base.y) * u;
           if (ctl.reduced.value) {
             ctl.dx.value = tx;
@@ -614,15 +643,14 @@ const StopCard = React.memo(function StopCard({
             if (i !== index) others.push(rects[i]);
           }
           ctl.others.value = others;
-          ctl.edgeX.value = edgesX(others);
           ctl.edgeY.value = edgesY(others);
           const u = ctl.u.value;
           const base = rects[index];
-          ctl.previewX.value = base.x * u;
+          ctl.previewX.value = colLeftPx(base.col, u);
           ctl.previewY.value = base.y * u;
-          ctl.previewW.value = base.w * u;
+          ctl.previewW.value = spanWidthPx(base.span, u);
           ctl.previewH.value = base.h * u;
-          ctl.guideX.value = -1;
+          ctl.previewSpan.value = base.span;
           ctl.guideY.value = -1;
           ctl.resizing.value = index;
           runOnJS(ctl.onResizeStart)(index);
@@ -633,20 +661,19 @@ const StopCard = React.memo(function StopCard({
           if (index >= rects.length) return;
           const u = ctl.u.value;
           const base = rects[index];
-          const next = sizeTo(
-            base,
-            e.translationX,
-            e.translationY,
-            u,
-            ctl.edgeX.value,
-            ctl.edgeY.value,
-          );
-          ctl.previewW.value = next.w * u;
+          const next = sizeTo(base, e.translationX, e.translationY, u, ctl.edgeY.value);
           ctl.previewH.value = next.h * u;
-          if (next.gx !== ctl.guideX.value || next.gy !== ctl.guideY.value) {
-            ctl.guideX.value = next.gx;
+          /* The preview's width jumps between the three span widths rather than
+             tracking the finger, for the same reason the body drag jumps between
+             columns: there is nothing in between to promise. */
+          if (next.span !== ctl.previewSpan.value) {
+            ctl.previewSpan.value = next.span;
+            ctl.previewW.value = spanWidthPx(next.span, u);
+            runOnJS(ctl.onSnap)();
+          }
+          if (next.gy !== ctl.guideY.value) {
             ctl.guideY.value = next.gy;
-            if (next.gx >= 0 || next.gy >= 0) runOnJS(ctl.onSnap)();
+            if (next.gy >= 0) runOnJS(ctl.onSnap)();
           }
         })
         .onFinalize(() => {
@@ -654,7 +681,6 @@ const StopCard = React.memo(function StopCard({
           const rects = ctl.rects.value;
           const u = ctl.u.value;
           ctl.resizing.value = -1;
-          ctl.guideX.value = -1;
           ctl.guideY.value = -1;
           // Nothing to commit, but the scroll lock and `activeRef` still have
           // to be unwound — see the same branch in the body drag.
@@ -663,11 +689,11 @@ const StopCard = React.memo(function StopCard({
             return;
           }
           const base = rects[index];
+          const span = ctl.previewSpan.value;
           const got = resolveResize(
-            { x: base.x, y: base.y, w: ctl.previewW.value / u, h: ctl.previewH.value / u },
+            { col: base.col, span, y: base.y, h: ctl.previewH.value / u },
             ctl.others.value,
-            CARD_MIN_W_DP / u,
-            CARD_MIN_H_DP / u,
+            u,
           );
           runOnJS(ctl.onResizeEnd)(index, got);
         }),
@@ -707,9 +733,9 @@ const StopCard = React.memo(function StopCard({
       accessible={arranging}
       accessibilityLabel={
         arranging
-          ? `${stop.stopName}. ${TIER_WORD[card.tier]} card, ${Math.round(
-              (card.rect.x + card.rect.w / 2) * 100,
-            )} percent across.`
+          ? `${stop.stopName}. ${sizeWord(card.span, card.maxBuses)}, starting at column ${
+              card.rect.col + 1
+            } of ${COLS}.`
           : undefined
       }
       accessibilityHint={arranging ? 'Use the actions to move or resize this card' : undefined}
@@ -729,6 +755,15 @@ const StopCard = React.memo(function StopCard({
             active={focused}
             editing={editing}
             tier={card.tier}
+            span={card.span}
+            /* Both halves of "one rule, not three sizes", handed over as
+               numbers the card does not have to derive: the span picks its bus
+               layout, and how many buses fit is arithmetic the geometry already
+               did in `busCapacity` when it worked out this card's floor. A card
+               that counted its own rows would be a second copy of that
+               arithmetic, and the two would disagree the first time either
+               changed. */
+            maxBuses={card.maxBuses}
             boxHeight={card.flowing ? null : card.height}
             onRemove={onRemove}
             onMoveUp={onMoveUp}
@@ -771,10 +806,15 @@ const StopCard = React.memo(function StopCard({
 });
 
 /**
- * The two magnet guides.
+ * The magnet guide.
+ *
+ * One line, not two: the horizontal axis is columns, so a card's left and right
+ * edges are always already aligned with every other card's and there is nothing
+ * for a vertical guide to announce. Only `y` is continuous, and only `y` can be
+ * "nearly aligned" — which is the state a guide exists to resolve.
  *
  * Its own component so that catching and releasing an edge — which can happen
- * many times in one drag — repaints two hairlines instead of every card on the
+ * many times in one drag — repaints one hairline instead of every card on the
  * canvas: the positions live in shared values and never reach React state.
  *
  * Nothing here is animated, and that is the point rather than an omission. The
@@ -789,10 +829,6 @@ const SnapGuides = React.memo(function SnapGuides({
   ctl: CanvasCtl;
   color: string;
 }) {
-  const vStyle = useAnimatedStyle(() => ({
-    opacity: ctl.guideX.value >= 0 ? 1 : 0,
-    transform: [{ translateX: ctl.guideX.value }],
-  }));
   const hStyle = useAnimatedStyle(() => ({
     opacity: ctl.guideY.value >= 0 ? 1 : 0,
     transform: [{ translateY: ctl.guideY.value }],
@@ -803,10 +839,11 @@ const SnapGuides = React.memo(function SnapGuides({
    * The card itself is left alone until the gesture ends, and that is the whole
    * design of the resize rather than a shortcut. Re-laying-out a card on every
    * frame means a Yoga pass over up to ten arrival rows sixty times a second,
-   * on a screen where every card is already running a live query — and the tier
-   * change that a resize exists to produce is a React render, which cannot
-   * happen per frame at all. One outline moves instead, and the card takes the
-   * new box, at the new tier, in a single commit when the finger lifts.
+   * on a screen where every card is already running a live query — and the
+   * change of span, or of how many buses fit, that a resize exists to produce is
+   * a React render, which cannot happen per frame at all. One outline moves
+   * instead, and the card takes the new box, at the new span, in a single commit
+   * when the finger lifts.
    */
   const boxStyle = useAnimatedStyle(() => ({
     opacity: ctl.resizing.value >= 0 ? 1 : 0,
@@ -819,10 +856,6 @@ const SnapGuides = React.memo(function SnapGuides({
       <Animated.View
         pointerEvents="none"
         style={[s.resizePreview, { borderColor: color }, boxStyle]}
-      />
-      <Animated.View
-        pointerEvents="none"
-        style={[s.snapGuideV, { backgroundColor: color }, vStyle]}
       />
       <Animated.View
         pointerEvents="none"
@@ -1416,6 +1449,28 @@ const HeaderLive = React.memo(function HeaderLive({
 
 /* ── Home Screen ─────────────────────────────────────────────── */
 
+/**
+ * Hoisted, not an inline literal, and the reason is not tidiness.
+ *
+ * expo-router's `<Stack.Screen>` calls `navigation.setOptions(options)` from a
+ * layout effect keyed on `options`, so a fresh object every render meant every
+ * render of this screen pushed a new options object into the navigator — which
+ * re-renders the navigator and re-runs the native header config's `onUpdate()`.
+ * Home re-renders on every arrivals poll, so that was a header update every few
+ * seconds for a header that is switched off.
+ *
+ * This is NOT the fix for the launch offset (Home rendering ~83dp too low with a
+ * grey band above it), and it should not be mistaken for one. That bug is that
+ * the header *exists at all* on the first commit: `app/_layout.tsx` gives the
+ * Stack no `headerShown`, so React Navigation's default `true` applies until
+ * this lands one commit later, and a launch that loses that race is left with an
+ * empty `AppBarLayout` still holding its measured height. The fix is to declare
+ * it in the navigator — `<Stack.Screen name="index" options={{ headerShown:
+ * false }} />` inside `<Stack>` — so no toolbar is ever created for this route.
+ * See utils/homeLayout.ts.
+ */
+const HEADER_OFF = { headerShown: false } as const;
+
 export default function HomeScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -1480,12 +1535,12 @@ export default function HomeScreen() {
   const [heightsVersion, setHeightsVersion] = useState(0);
   const entranceRef = useRef(true);
 
-  /* The canvas's usable width — the unit every stored layout number is a
-     fraction of. Seeded from the window rather than left at zero until the
-     first onLayout: frame 1 would otherwise stack every card at width zero,
-     and this screen has already been through one round of the first frame
-     lying to existing users. */
-  const { width: windowW } = useWindowDimensions();
+  /* The canvas's usable width: what the three columns are cut from, and the unit
+     `y` and `h` are fractions of. Seeded from the window rather than left at
+     zero until the first onLayout: frame 1 would otherwise stack every card at
+     width zero, and this screen has already been through one round of the first
+     frame lying to existing users. */
+  const { width: windowW, height: windowH } = useWindowDimensions();
   const [measuredW, setMeasuredW] = useState(0);
   const canvasW = measuredW > 0 ? measuredW : Math.max(1, windowW - spacing.lg * 2);
 
@@ -1499,6 +1554,42 @@ export default function HomeScreen() {
     const { width } = e.nativeEvent.layout;
     setMeasuredW((prev) => (Math.abs(prev - width) < 1 ? prev : width));
   }, []);
+
+  /* ── Where the screen box actually is ──────────────────────────
+     Diagnostic only — see utils/homeLayout.ts for what the one line it prints
+     means and which hypothesis each shape of it implicates. It is a ref and a
+     log, never state: Home's container measuring itself must not cost a render,
+     and the canvas below re-places every card when it does. */
+  const frameRef = useRef<{ w: number; h: number } | null>(null);
+
+  const traceFrame = useCallback(() => {
+    const frame = frameRef.current;
+    if (!frame) return;
+    traceHomeFrame({
+      winW: windowW,
+      winH: windowH,
+      frameW: frame.w,
+      frameH: frame.h,
+      top: insets.top,
+      bottom: insets.bottom,
+      left: insets.left,
+      right: insets.right,
+    });
+  }, [windowW, windowH, insets.top, insets.bottom, insets.left, insets.right]);
+
+  const onContainerLayout = useCallback(
+    (e: LayoutChangeEvent) => {
+      const { width, height } = e.nativeEvent.layout;
+      frameRef.current = { w: width, h: height };
+      traceFrame();
+    },
+    [traceFrame],
+  );
+
+  /* The insets or the window can change without the container's own box
+     changing size, and that case still has to print — an inset that grows while
+     the box stays put is exactly the shape of the hypothesis this rules out. */
+  useEffect(traceFrame, [traceFrame]);
 
   const onMeasure = useCallback((stopCode: string, height: number) => {
     const prev = heightsRef.current.get(stopCode);
@@ -1532,10 +1623,9 @@ export default function HomeScreen() {
      to serve. */
   const placedRef = useRef(placed);
   const uRef = useRef(canvasW);
-  const edgeXRef = useRef<number[]>([]);
   const edgeYRef = useRef<number[]>([]);
   const activeRef = useRef(-1);
-  const guideRef = useRef({ x: -1, y: -1 });
+  const guideRef = useRef(-1);
   const scrollPosRef = useRef(0);
   const scrollMaxRef = useRef(0);
   const scrollAtRef = useRef(0);
@@ -1545,14 +1635,13 @@ export default function HomeScreen() {
   const active = useSharedValue(-1);
   const dx = useSharedValue(0);
   const dy = useSharedValue(0);
+  const heldCol = useSharedValue(0);
   const panX = useSharedValue(0);
   const panY = useSharedValue(0);
   const lift = useSharedValue(1);
-  const guideX = useSharedValue(-1);
   const guideY = useSharedValue(-1);
   const rectsSV = useSharedValue<Rect[]>([]);
   const othersSV = useSharedValue<Rect[]>([]);
-  const edgeXSV = useSharedValue<number[]>([]);
   const edgeYSV = useSharedValue<number[]>([]);
   const uSV = useSharedValue(1);
   const resizing = useSharedValue(-1);
@@ -1560,6 +1649,7 @@ export default function HomeScreen() {
   const previewY = useSharedValue(0);
   const previewW = useSharedValue(0);
   const previewH = useSharedValue(0);
+  const previewSpan = useSharedValue(COLS);
   const pointerY = useSharedValue(0);
   const scrollY = useSharedValue(0);
   const scrollAt = useSharedValue(0);
@@ -1593,18 +1683,25 @@ export default function HomeScreen() {
        it, and `rect` for a placed card *is* the object sitting in the saved
        stop — freezing that would quietly make the persisted layout immutable
        for everything else that ever touches it. */
-    rectsSV.value = placed.cards.map((c) => ({ x: c.rect.x, y: c.rect.y, w: c.rect.w, h: c.rect.h }));
+    rectsSV.value = placed.cards.map((c) => ({
+      col: c.rect.col,
+      span: c.rect.span,
+      y: c.rect.y,
+      h: c.rect.h,
+    }));
     uSV.value = canvasW;
   }, [favoriteStops, placed, canvasW, dropTick, rectsSV, uSV]);
 
   /**
    * Re-fit placed cards to the canvas.
    *
-   * Fractions carry an arrangement across devices and orientations on their
-   * own; what they cannot carry is the 120dp legibility floor, so a narrower
-   * screen may need a card widened and everything it then collides with moved.
-   * The other way in is an imported backup, which can carry an arrangement from
-   * a phone of any size, so this watches the stops as well as the width.
+   * Columns carry an arrangement across devices and orientations on their own;
+   * what they cannot carry is the height floor, because one bus row is a fixed
+   * number of dp and `h` is a fraction of the canvas width — so a narrower
+   * screen may need a card made taller and everything it then collides with
+   * moved. The other way in is an imported backup, which can carry an
+   * arrangement from a phone of any size, so this watches the stops as well as
+   * the width.
    *
    * `fitAll` returns only what actually changed, which is what stops this from
    * chasing its own tail: the write it triggers re-runs the effect, the second
@@ -1650,9 +1747,11 @@ export default function HomeScreen() {
    * not if half the cards had concrete boxes and half were still flowing under
    * a card that had already been moved out of the stack.
    *
-   * The one thing that can move is a card whose content measures less than
-   * `CARD_MIN_H_DP` — a stop serving no lines is about 79dp. It is floored
-   * here rather than left for `fitAll` to raise afterwards, because `fitAll`
+   * The one thing that can move is a card whose content measures less than the
+   * floor for its span — a stop serving no lines is about 79dp, and a flowing
+   * card is always full span, so the floor it has to clear is the widest one. It
+   * is floored here rather than left for `fitAll` to raise afterwards, because
+   * `fitAll`
    * would do it in the middle of the drag this freeze belongs to, pushing every
    * card below it down while the geometry the gesture is using stays
    * deliberately frozen; the magnets and the drop would then be answering about
@@ -1666,7 +1765,7 @@ export default function HomeScreen() {
    */
   const freezeFlowing = useCallback(() => {
     const u = uRef.current;
-    const minH = CARD_MIN_H_DP / u;
+    const minH = minHFor(COLS, u);
     const gap = CARD_GAP_DP / u;
     const patches = new Map<string, Partial<FavoriteStop>>();
     let top = -1;
@@ -1674,7 +1773,7 @@ export default function HomeScreen() {
       if (!c.flowing) continue;
       if (top < 0) top = c.rect.y;
       const h = c.rect.h < minH ? minH : c.rect.h;
-      patches.set(c.stopCode, { layout: { x: c.rect.x, y: top, w: c.rect.w, h } });
+      patches.set(c.stopCode, { layout: { col: c.rect.col, span: c.rect.span, y: top, h } });
       top += h + gap;
     }
     if (patches.size === 0) return;
@@ -1711,31 +1810,32 @@ export default function HomeScreen() {
     scrollRef.current?.scrollTo({ y: next, animated: false });
 
     /* The finger has not moved, so nothing else will recompute the carried
-       card: from its point of view the whole canvas just slid past it. */
+       card: from its point of view the whole canvas just slid past it.
+       Vertically only, and that is not an omission — a card's column is a
+       function of `panX` and nothing else, so an auto-scroll that moves the
+       canvas up cannot change which column the card is over. `dx` and `heldCol`
+       are the gesture's to write; this tick would only ever write back the value
+       it read. */
     const carried = carryTo(
       cards[a].rect,
       panX.value,
       panY.value + (next - scrollAtRef.current),
       uRef.current,
-      edgeXRef.current,
       edgeYRef.current,
     );
-    dx.value = carried.dx;
     dy.value = carried.dy;
-    const g = guideRef.current;
-    if (carried.gx !== g.x || carried.gy !== g.y) {
-      guideRef.current = { x: carried.gx, y: carried.gy };
-      guideX.value = carried.gx;
+    if (carried.gy !== guideRef.current) {
+      guideRef.current = carried.gy;
       guideY.value = carried.gy;
-      if (carried.gx >= 0 || carried.gy >= 0) hapticSelection();
+      if (carried.gy >= 0) hapticSelection();
     }
-  }, [pointerY, scrollY, panX, panY, dx, dy, guideX, guideY]);
+  }, [pointerY, scrollY, panX, panY, dy, guideY]);
 
   const onLift = useCallback(
     (index: number) => {
       activeRef.current = index;
       scrollAtRef.current = scrollPosRef.current;
-      guideRef.current = { x: -1, y: -1 };
+      guideRef.current = -1;
       /* Rebuilt from this side's own mirror rather than shipped over from the
          gesture: the two are computed from the same `placeAll` output, and
          passing arrays across the runtime boundary on every lift is the more
@@ -1744,7 +1844,6 @@ export default function HomeScreen() {
       placedRef.current.cards.forEach((c, i) => {
         if (i !== index) others.push(c.rect);
       });
-      edgeXRef.current = edgesX(others);
       edgeYRef.current = edgesY(others);
 
       hapticImpact();
@@ -1784,13 +1883,12 @@ export default function HomeScreen() {
       active.value = -1;
       dx.value = 0;
       dy.value = 0;
-      guideX.value = -1;
       guideY.value = -1;
 
       // Measurements taken while the card was up were held back; take them now.
       setDropTick((v) => v + 1);
     },
-    [active, dx, dy, guideX, guideY],
+    [active, dx, dy, guideY],
   );
 
   /**
@@ -1820,32 +1918,37 @@ export default function HomeScreen() {
 
     let next: Rect;
     switch (action) {
-      case 'moveUp': next = nudge(me.rect, others, 'y', -1, u); break;
-      case 'moveDown': next = nudge(me.rect, others, 'y', 1, u); break;
-      case 'moveLeft': next = nudge(me.rect, others, 'x', -1, u); break;
-      case 'moveRight': next = nudge(me.rect, others, 'x', 1, u); break;
-      case 'grow': next = resizeStep(me.rect, others, 1, u); break;
-      case 'shrink': next = resizeStep(me.rect, others, -1, u); break;
+      case 'moveUp': next = nudgeY(me.rect, others, -1, u); break;
+      case 'moveDown': next = nudgeY(me.rect, others, 1, u); break;
+      case 'moveLeft': next = nudgeCol(me.rect, others, -1); break;
+      case 'moveRight': next = nudgeCol(me.rect, others, 1); break;
+      case 'wider': next = spanStep(me.rect, others, 1, u); break;
+      case 'narrower': next = spanStep(me.rect, others, -1, u); break;
+      case 'taller': next = heightStep(me.rect, others, 1, u); break;
+      case 'shorter': next = heightStep(me.rect, others, -1, u); break;
       default: return;
     }
 
-    const sizing = action === 'grow' || action === 'shrink';
+    const sizing = action !== 'moveUp' && action !== 'moveDown'
+      && action !== 'moveLeft' && action !== 'moveRight';
     const moved =
-      Math.abs(next.x - me.rect.x) > 0.001 ||
+      next.col !== me.rect.col ||
+      next.span !== me.rect.span ||
       Math.abs(next.y - me.rect.y) > 0.001 ||
-      Math.abs(next.w - me.rect.w) > 0.001 ||
       Math.abs(next.h - me.rect.h) > 0.001;
 
     if (!moved) {
       /* Silence would be indistinguishable from the action not having been
          registered at all, which on a screen a user cannot see is the worst
-         possible answer. */
+         possible answer. Each of the four size actions has its own wall, and
+         says which one it hit — "blocked" for a card that is already three
+         columns wide would send the user looking for the obstruction. */
       AccessibilityInfo.announceForAccessibility(
-        sizing
-          ? action === 'grow'
-            ? 'Already as large as it fits'
-            : 'Already at the smallest size'
-          : 'Blocked',
+        action === 'wider' ? 'Already as wide as it fits'
+          : action === 'narrower' ? 'Already one column'
+            : action === 'taller' ? 'No room to grow'
+              : action === 'shorter' ? 'Already at the smallest height'
+                : 'Blocked',
       );
       return;
     }
@@ -1866,8 +1969,8 @@ export default function HomeScreen() {
     hapticSelection();
     AccessibilityInfo.announceForAccessibility(
       sizing
-        ? `${TIER_WORD[tierFor(next.w * u)]} card`
-        : `Moved. ${Math.round((next.x + next.w / 2) * 100)} percent across.`,
+        ? sizeWord(next.span, busCapacity(next.span, next.h * u))
+        : `Moved. Column ${next.col + 1} of ${COLS}.`,
     );
   }, []);
 
@@ -1910,14 +2013,13 @@ export default function HomeScreen() {
       active,
       dx,
       dy,
+      heldCol,
       panX,
       panY,
       lift,
-      guideX,
       guideY,
       rects: rectsSV,
       others: othersSV,
-      edgeX: edgeXSV,
       edgeY: edgeYSV,
       u: uSV,
       resizing,
@@ -1925,6 +2027,7 @@ export default function HomeScreen() {
       previewY,
       previewW,
       previewH,
+      previewSpan,
       pointerY,
       scrollY,
       scrollAt,
@@ -1936,8 +2039,8 @@ export default function HomeScreen() {
       onResizeEnd,
     }),
     [
-      active, dx, dy, panX, panY, lift, guideX, guideY, rectsSV, othersSV,
-      edgeXSV, edgeYSV, uSV, resizing, previewX, previewY, previewW, previewH,
+      active, dx, dy, heldCol, panX, panY, lift, guideY, rectsSV, othersSV,
+      edgeYSV, uSV, resizing, previewX, previewY, previewW, previewH, previewSpan,
       pointerY, scrollY, scrollAt, reducedSV,
       onLift, onSnap, onDrop, onResizeStart, onResizeEnd,
     ],
@@ -2184,8 +2287,11 @@ export default function HomeScreen() {
   const onPrimary = onAccent(primaryColor);
 
   return (
-    <View style={[s.container, { paddingTop: insets.top + spacing.sm }]}>
-      <Stack.Screen options={{ headerShown: false }} />
+    <View
+      style={[s.container, { paddingTop: insets.top + spacing.sm }]}
+      onLayout={onContainerLayout}
+    >
+      <Stack.Screen options={HEADER_OFF} />
 
       <View style={s.header}>
         <View style={s.logoRow}>

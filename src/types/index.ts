@@ -144,22 +144,30 @@ export interface MapStamp {
 /**
  * Where a saved stop's card sits on Home's canvas.
  *
- * Every number is a fraction of the canvas's *usable width* — `x` and `w`
- * directly, `y` and `h` in the same unit so the card's aspect is preserved.
- * Pixels were the obvious alternative and are the wrong one: a layout authored
- * on a 412dp phone would then need a reflow pass on a 360dp one, in landscape,
- * and at a larger font scale, and every such pass throws away some of the
- * arrangement the user built. In these units the same numbers reconstruct
- * everywhere, and `x + w <= 1` makes "no card is ever stranded off-screen" true
- * by construction rather than by a rescue routine.
+ * The horizontal axis is columns and only columns: `col` ∈ {0,1,2} and `span` ∈
+ * {1,2,3}, with `col + span <= 3`. Fractions of the width came first and were
+ * replaced — a card could be any width, so its content had to adapt at measured
+ * breakpoints and nothing lined up with anything. Three integers make "no card
+ * is stranded off-screen" and "everything aligns" true by construction rather
+ * than by a rescue routine.
  *
- * `h === 0` means the card has never been arranged: it is full width and sizes
- * itself to its content, exactly as it did in 1.2.4. See `features/home/layout`.
+ * `y` and `h` stay continuous, in fractions of the canvas's *usable width* — the
+ * same unit for both axes, so a card's aspect survives a rotation or a narrower
+ * phone. Pixels were the obvious alternative and are the wrong one: a layout
+ * authored on a 412dp phone would then need a reflow pass on a 360dp one, and
+ * every such pass throws away some of the arrangement the user built.
+ *
+ * `h === 0` means the card has never been arranged: it is full span and sizes
+ * itself to its content, exactly as it did in 1.2.4. A record still carrying the
+ * old `{x, w}` is quantised to the nearest column on load — see
+ * `migrateLayout` in `features/home/layout`.
  */
 export interface StopLayout {
-  x: number;
+  /** Leftmost column, 0-based. */
+  col: number;
+  /** Columns covered, at least 1, and never past the last column. */
+  span: number;
   y: number;
-  w: number;
   h: number;
 }
 

@@ -167,10 +167,15 @@ export const s = StyleSheet.create({
     borderWidth: 2,
     borderRadius: radius.lg,
   },
-  /** The corner target. Its 32dp is a compromise the tier boundaries force: at
-   *  `HIT_SIZE` it would cover a third of a 120dp card and sit on top of the
-   *  arrival figure, and it only exists while arrange mode is on, when nothing
-   *  underneath it is being read. */
+  /** The corner target. Its 32dp is a compromise the column width forces: at
+   *  `HIT_SIZE` it would cover more than a third of a one-column card and sit on
+   *  top of the arrival figure.
+   *
+   *  What it covers instead is the right-hand end of the card's controls footer,
+   *  and that is acceptable rather than accidental: it exists only while arrange
+   *  mode is on, and arrange mode is not when the user is reaching for a
+   *  timetable. Outside it the handle is not rendered at all, so the control
+   *  underneath is never actually obstructed. */
   resizeHandle: {
     position: 'absolute',
     right: 0,
@@ -200,16 +205,13 @@ export const s = StyleSheet.create({
     borderWidth: 2,
     borderRadius: radius.lg,
   },
-  /** Magnet guides. One hairline each, spanning the whole canvas so that an
-   *  alignment two cards apart is legible as an alignment; positioned by
-   *  transform from a shared value, which is why `left`/`top` are zero. */
-  snapGuideV: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    left: 0,
-    width: 1,
-  },
+  /** The magnet guide. One hairline, spanning the canvas so that an alignment
+   *  two cards apart is legible as an alignment; positioned by transform from a
+   *  shared value, which is why `top` is zero.
+   *
+   *  There is no vertical twin any more and nothing for one to do: a card is
+   *  always on a column, so its side edges are always already aligned with every
+   *  other card's. Only `y` can be *nearly* aligned. */
   snapGuideH: {
     position: 'absolute',
     left: 0,

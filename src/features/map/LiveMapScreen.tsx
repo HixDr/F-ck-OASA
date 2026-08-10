@@ -11,7 +11,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Text, ActivityIndicator, Alert } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
-import MapView, { Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import { Polyline } from 'react-native-maps';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, font } from '../../theme';
 import {
@@ -29,7 +29,6 @@ import {
 } from '../../services/storage';
 import { useNetworkStatus } from '../../services/network';
 import { useSettings } from '../settings/SettingsProvider';
-import { GOOGLE_DARK_STYLE, GOOGLE_MAP_ID } from '../../theme/googleMapStyle';
 import { METRO_POLYLINES } from '../../data/metroPolylines';
 import { mapStyles as ms } from '../../theme/mapStyles';
 import {
@@ -39,6 +38,7 @@ import StampModal from '../../components/StampModal';
 import ScheduleGrid from '../../components/ScheduleGrid';
 import UserLocationMarker from '../../components/UserLocationMarker';
 import Pressable from '../../ui/Pressable';
+import { MapSurfaceSlot, useMapSurface } from '../../ui/MapHost';
 import MapControls, { type MapToggle } from '../../ui/MapControls';
 import StopSheet, { useStopSheetInset, type StopSheetLine } from '../../ui/StopSheet';
 import RefreshTimer from './components/RefreshTimer';
@@ -222,8 +222,6 @@ export default function LiveMapScreen() {
   } = useBusLocations(activeRouteCode, focused);
   const { data: stops, error: stopsError, refetch: refetchStops } = useStops(activeRouteCode);
   const isOnline = useNetworkStatus();
-  const mapRef = useRef<MapView>(null);
-  const [mapReady, setMapReady] = useState(false);
 
   // 1 Hz GPS only while this screen is actually on top of the stack.
   const { userLocationRef, userLoc, userHeading } = useUserLocation({ highAccuracy: focused });
@@ -366,36 +364,6 @@ export default function LiveMapScreen() {
     return stopsWithBearings.filter((st) => isInRegion(st.lat, st.lng, region));
   }, [stopsWithBearings, region]);
 
-  // Fit map to route bounds — once per screen, on the first direction whose
-  // stops actually arrive.
-  //
-  // Switching direction deliberately does NOT re-fit: the stop list is refetched
-  // per RouteCode, so `parsedStops` changes identity and this effect runs again,
-  // but by then the user has usually panned and zoomed somewhere of their own
-  // choosing and yanking the camera back throws that away. The other direction
-  // of a line covers nearly the same ground, so there is nothing to re-frame.
-  // Latching on the route code instead of a plain boolean is what caused it.
-  const hasFitted = useRef(false);
-  useEffect(() => {
-    // Both guards are load-bearing for "exactly once": the stops arrive
-    // asynchronously (instantly from cache, seconds later from the network),
-    // and latching on an empty list would lock out the only fit we get.
-    if (!mapReady || !activeRouteCode || parsedStops.length < 2) return;
-    if (hasFitted.current) return;
-    const map = mapRef.current;
-    // On Android fitToCoordinates is a no-op before the map is ready, and the
-    // old code latched `hasFitted` *before* calling it — so a fast cached load
-    // left the camera at initialRegion with the route off-screen, forever.
-    if (!map) return;
-    map.fitToCoordinates(
-      parsedStops.map((p) => ({ latitude: p.lat, longitude: p.lng })),
-      { edgePadding: FIT_PADDING, animated: true },
-    );
-    hasFitted.current = true;
-    // activeRouteCode stays a dependency so a direction switched *before* the
-    // first fit still gets one — that user has never been positioned at all.
-  }, [mapReady, activeRouteCode, parsedStops]);
-
   // Metro polyline data (pre-computed constant)
   const metroLines = useMemo(() => METRO_POLYLINES.map((line, i) => (
     <Polyline key={`mp-${i}`} coordinates={line.coords}
@@ -505,25 +473,127 @@ export default function LiveMapScreen() {
     setStampModal({ lat: e.nativeEvent.coordinate.latitude, lng: e.nativeEvent.coordinate.longitude });
   }, []);
 
-  const onMapReady = useCallback(() => {
-    mapPerf('line map onMapReady');
-    setMapReady(true);
-  }, []);
-  /* The mark that answers the question: how long after the screen mounts do
-     tiles actually appear. Everything before it is warmable in principle;
-     the gap between mount and this is the per-instance cost that is not. */
-  const onMapLoaded = useCallback(() => mapPerf('line map onMapLoaded'), []);
   const onRemoveStamp = useCallback((id: string) => setStamps(removeStamp(id)), []);
+
+  /* ── The shared map surface ────────────────────────────────── */
+
+  /* Everything that used to be a JSX child of this screen's own `<MapView>`.
+     There is no `<MapView>` here any more — one lives behind the navigator for
+     the life of the process (src/ui/MapHost.tsx) and this screen borrows it while
+     it is focused, handing over exactly this element tree. The elements are still
+     created here, by this render, closing over this screen's state; only the
+     place they are mounted has moved. */
+  const mapChildren = (
+    <>
+      {/* Route polyline */}
+      {routePolyline.length > 1 && (
+        <Polyline coordinates={routePolyline} strokeColor={primaryColor + 'AA'}
+          strokeWidth={3.5} lineCap="round" lineJoin="round" zIndex={0} />
+      )}
+
+      {/* Walking route */}
+      {walk.coords.length > 1 && (
+        <Polyline coordinates={walk.coords} strokeColor="#4285F4"
+          strokeWidth={4} lineDashPattern={[8, 6]} lineCap="round" lineJoin="round" />
+      )}
+
+      {/* Metro polylines */}
+      {showMetro && metroLines}
+
+      {/* Stop markers — bus icon with directional arrow */}
+      {visibleStops.map((stop) => (
+        <RouteStopMarker
+          key={`st-${stop.code}`}
+          code={stop.code}
+          lat={stop.lat}
+          lng={stop.lng}
+          bearing={stop.bearing}
+          selected={selectedStopCode === stop.code}
+          color={primaryColor}
+          onPress={onStopPress}
+        />
+      ))}
+
+      {/* Buses — animated natively, no React state per frame */}
+      <BusLayer
+        buses={busMarkers}
+        route={routeGeometry}
+        imageUri={busMarkerUri}
+        color={primaryColor}
+        durationMs={BUS_POLL_MS}
+        stale={busStale}
+        active={focused}
+      />
+
+      {/* Stamps */}
+      {showStamps && <StampLayer stamps={stamps} onRemove={onRemoveStamp} />}
+
+      {/* User location */}
+      {userLoc && (
+        <UserLocationMarker
+          lat={userLoc.lat} lng={userLoc.lng}
+          heading={userHeading} iconStyle={iconStyle}
+        />
+      )}
+    </>
+  );
+
+  const { revealed, ready: mapReady, getMap, onFrame } = useMapSurface({
+    label: 'line map',
+    focused,
+    initialRegion,
+    children: mapChildren,
+    // This screen's camera is 2D; a tilted basemap makes the route unreadable.
+    pitchEnabled: false,
+    onLongPress: onMapLongPress,
+    onRegionChangeStart,
+    onRegionChangeComplete,
+  });
+
+  // Fit map to route bounds — once per screen, on the first direction whose
+  // stops actually arrive.
+  //
+  // Switching direction deliberately does NOT re-fit: the stop list is refetched
+  // per RouteCode, so `parsedStops` changes identity and this effect runs again,
+  // but by then the user has usually panned and zoomed somewhere of their own
+  // choosing and yanking the camera back throws that away. The other direction
+  // of a line covers nearly the same ground, so there is nothing to re-frame.
+  // Latching on the route code instead of a plain boolean is what caused it.
+  const hasFitted = useRef(false);
+  useEffect(() => {
+    // Both guards are load-bearing for "exactly once": the stops arrive
+    // asynchronously (instantly from cache, seconds later from the network),
+    // and latching on an empty list would lock out the only fit we get.
+    if (!mapReady || !activeRouteCode || parsedStops.length < 2) return;
+    if (hasFitted.current) return;
+    /* Null unless this screen currently holds the surface. That guard is new and
+       it is load-bearing: the map is shared now, so a blurred line map whose
+       stops arrive late would otherwise reframe the camera out from under
+       whichever screen is on top of it. */
+    const map = getMap();
+    // On Android fitToCoordinates is a no-op before the map is ready, and the
+    // old code latched `hasFitted` *before* calling it — so a fast cached load
+    // left the camera at initialRegion with the route off-screen, forever.
+    if (!map) return;
+    map.fitToCoordinates(
+      parsedStops.map((p) => ({ latitude: p.lat, longitude: p.lng })),
+      { edgePadding: FIT_PADDING, animated: true },
+    );
+    hasFitted.current = true;
+    // activeRouteCode stays a dependency so a direction switched *before* the
+    // first fit still gets one — that user has never been positioned at all.
+  }, [mapReady, activeRouteCode, parsedStops, getMap]);
 
   const recenter = useCallback(() => {
     const loc = userLocationRef.current;
-    if (loc && mapRef.current) {
-      mapRef.current.animateToRegion({
+    const map = getMap();
+    if (loc && map) {
+      map.animateToRegion({
         latitude: loc.lat, longitude: loc.lng,
         latitudeDelta: 0.01, longitudeDelta: 0.01,
       }, 500);
     }
-  }, [userLocationRef]);
+  }, [userLocationRef, getMap]);
 
   const selectRoute = useCallback((routeCode: string) => {
     setActiveRouteCode(routeCode);
@@ -589,6 +659,11 @@ export default function LiveMapScreen() {
   // is a full native header pass 60 times a second.
   const headerOptions = useMemo(() => ({
     headerStyle: { backgroundColor: colors.bg },
+    /* The screen's *content* has to be transparent or the shared map — which
+       lives behind the navigator — is hidden by the navigator's own background
+       before this screen's root view even gets a say. The root view below is what
+       keeps the screen opaque until the push animation has finished. */
+    contentStyle: { backgroundColor: 'transparent' },
     headerTitle: () => (
       // `disabled` is deliberately not used: our Pressable dims a disabled
       // target, and a single-direction line's header is not "unavailable".
@@ -656,92 +731,28 @@ export default function LiveMapScreen() {
     if (!stops) return 'Loading stops…';
     if (shapeLoading) return 'Drawing the route…';
     if (!buses && focused && isOnline) return 'Locating buses…';
+    // Last, because it is the shortest wait and everything above is a better
+    // description of it. It only surfaces when the whole load came from cache
+    // and the map is the only thing left — without it that case is a bare black
+    // screen for the tail of the transition.
+    if (!revealed) return 'Opening the map…';
     return null;
-  }, [allRoutes, stops, shapeLoading, buses, focused, isOnline]);
+  }, [allRoutes, stops, shapeLoading, buses, focused, isOnline, revealed]);
 
   return (
-    <View style={ms.container}>
+    /* Opaque until the shared map is revealed through this screen, transparent
+       after. Both halves matter. Opaque is what makes the push animation look
+       exactly as it did — a dark panel sliding in over Home, with MapStatus on it
+       — and it is also what hides the camera being handed over. Transparent is
+       the reveal: the map is already drawn and already loaded, so there is
+       nothing to wait for and no `loadingBackgroundColor` to see. */
+    <View style={[ms.container, revealed && ms.containerClear]}>
       <Stack.Screen options={headerOptions} />
 
-      <MapView
-        ref={mapRef}
-        provider={PROVIDER_GOOGLE}
-        style={ms.map}
-        initialRegion={initialRegion}
-        customMapStyle={GOOGLE_DARK_STYLE}
-        googleMapId={GOOGLE_MAP_ID}
-        // The native map surface is a child view covering the full bounds, so it
-        // paints over the black RN background with its own loading colour —
-        // white by default, a flashbang in a pure-black UI. `loadingEnabled` is
-        // not redundant here: on Android the loading layout that carries
-        // `loadingBackgroundColor` only exists once loading is enabled, so
-        // dropping this prop silently restores the white flash.
-        loadingEnabled
-        loadingBackgroundColor={colors.bg}
-        loadingIndicatorColor={colors.primaryLight}
-        showsUserLocation={false}
-        showsMyLocationButton={false}
-        showsCompass={false}
-        toolbarEnabled={false}
-        pitchEnabled={false}
-        onMapReady={onMapReady}
-        onMapLoaded={onMapLoaded}
-        onLongPress={onMapLongPress}
-        onRegionChangeStart={onRegionChangeStart}
-        onRegionChangeComplete={onRegionChangeComplete}
-        moveOnMarkerPress={false}
-      >
-        {/* Route polyline */}
-        {routePolyline.length > 1 && (
-          <Polyline coordinates={routePolyline} strokeColor={primaryColor + 'AA'}
-            strokeWidth={3.5} lineCap="round" lineJoin="round" zIndex={0} />
-        )}
-
-        {/* Walking route */}
-        {walk.coords.length > 1 && (
-          <Polyline coordinates={walk.coords} strokeColor="#4285F4"
-            strokeWidth={4} lineDashPattern={[8, 6]} lineCap="round" lineJoin="round" />
-        )}
-
-        {/* Metro polylines */}
-        {showMetro && metroLines}
-
-        {/* Stop markers — bus icon with directional arrow */}
-        {visibleStops.map((stop) => (
-          <RouteStopMarker
-            key={`st-${stop.code}`}
-            code={stop.code}
-            lat={stop.lat}
-            lng={stop.lng}
-            bearing={stop.bearing}
-            selected={selectedStopCode === stop.code}
-            color={primaryColor}
-            onPress={onStopPress}
-          />
-        ))}
-
-        {/* Buses — animated natively, no React state per frame */}
-        <BusLayer
-          buses={busMarkers}
-          route={routeGeometry}
-          imageUri={busMarkerUri}
-          color={primaryColor}
-          durationMs={BUS_POLL_MS}
-          stale={busStale}
-          active={focused}
-        />
-
-        {/* Stamps */}
-        {showStamps && <StampLayer stamps={stamps} onRemove={onRemoveStamp} />}
-
-        {/* User location */}
-        {userLoc && (
-          <UserLocationMarker
-            lat={userLoc.lat} lng={userLoc.lng}
-            heading={userHeading} iconStyle={iconStyle}
-          />
-        )}
-      </MapView>
+      {/* The hole the map shows through, exactly where this screen's own
+          `<MapView>` used to be laid out. It reports its rectangle to the host;
+          it draws nothing itself. */}
+      <MapSurfaceSlot style={ms.mapSlot} onFrame={onFrame} />
 
       {/* Route direction dropdown */}
       {showRouteMenu && allRoutes && allRoutes.length > 1 && (

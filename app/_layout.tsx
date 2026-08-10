@@ -1,10 +1,11 @@
 /**
- * Root layout — React Query provider, the boot gate, and the three app-wide
- * overlays (connectivity, arrival alert, self-update).
+ * Root layout — React Query provider, the boot gate, the shared map surface, and
+ * the three app-wide overlays (connectivity, arrival alert, self-update).
  *
- * Everything here is an *overlay*: nothing above `<Stack/>` is allowed to take
- * part in layout, because anything that does resizes every screen underneath
- * it the moment it appears.
+ * Everything here is an *overlay*: no sibling of `<Stack/>` is allowed to take
+ * part in layout, because anything that does resizes every screen the moment it
+ * appears. That holds for `<MapHost/>` too, which is a sibling *below* the
+ * navigator rather than above it — the only thing here that is not drawn on top.
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -26,7 +27,7 @@ import * as SplashScreen from 'expo-splash-screen';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, font, spacing, radius, withAlpha, onAccent, HIT_SIZE } from '../src/theme';
 import { UndoHost } from '../src/ui/UndoBar';
-import { MapWarmup } from '../src/ui/MapWarmup';
+import { MapHost } from '../src/ui/MapHost';
 import { initStorage, prefetchFavoriteSchedules } from '../src/services/storage';
 import { initLocation, type LocationInit } from '../src/services/location';
 import { setupNetworkListener, useNetworkStatus } from '../src/services/network';
@@ -624,6 +625,15 @@ export default function RootLayout() {
     <SettingsProvider>
     <QueryClientProvider client={queryClient}>
       <StatusBar style="light" backgroundColor={colors.bg} />
+      {/* The app's one and only MapView, created a quarter-second after the
+          first paint and kept for the life of the process. It is rendered
+          *before* the navigator on purpose: that puts it underneath every
+          screen, so a map screen reveals it by making its own background
+          transparent rather than by building a second map — which is the whole
+          point, because per-instance construction costs ~259ms of UI-thread time
+          that no amount of warming can avoid. Absolute and behind everything, so
+          the rule above still holds: it takes no part in layout. */}
+      <MapHost />
       {/* Route modules are already required lazily in release builds:
           expo-router hands React Navigation a `getComponent` thunk and
           Metro's require.context exposes each route behind a getter, so
@@ -641,15 +651,26 @@ export default function RootLayout() {
           contentStyle: { backgroundColor: colors.bg },
           animation: 'slide_from_right',
         }}
-      />
+      >
+        {/**
+         * Home declares its own `headerShown: false` too, and that was not
+         * enough: a screen inherits the navigator's default of `true`, so the
+         * native fragment is *created* with a header, and expo-router applies a
+         * screen's own options from a layout effect — one commit later. On a
+         * launch that lost that race the toolbar was removed but its
+         * AppBarLayout kept the height it had already measured, leaving Home
+         * 83dp low behind an empty grey band. Declaring it here means no
+         * toolbar is ever created for the route and there is no race to lose.
+         *
+         * Deliberately per-route rather than a `headerShown: false` in
+         * `screenOptions` above: search, the planner and both map screens rely
+         * on the default being on and set only their title.
+         */}
+        <Stack.Screen name="index" options={{ headerShown: false }} />
+      </Stack>
       <TopBanner banner={banner} />
       <AlertPill />
       <UpdateOverlay progress={updateProgress} />
-      {/* Brings the Google Maps SDK up in the background a moment after the
-          first screen paints, so the first map open is not also the first time
-          Play Services loads maps_core. Draws nothing and is parked offscreen;
-          it is an overlay in the strictest sense. */}
-      <MapWarmup />
       {/* Undo toasts. Last sibling so it draws above every other overlay, and
           an overlay itself — it must never take part in layout. */}
       <UndoHost />

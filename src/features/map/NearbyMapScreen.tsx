@@ -7,7 +7,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { View, Alert } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
-import MapView, { Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import { Polyline } from 'react-native-maps';
 import { colors } from '../../theme';
 import { useArrivals, useClosestStops, useRoutesForStop } from '../../hooks';
 import { useLinesMap } from '../../hooks/useLinesMap';
@@ -18,7 +18,6 @@ import {
   getStamps, addStamp, removeStamp, getToggle, setToggle,
   isFavoriteStop, addFavoriteStop, removeFavoriteStop,
 } from '../../services/storage';
-import { GOOGLE_DARK_STYLE, GOOGLE_MAP_ID } from '../../theme/googleMapStyle';
 import { METRO_POLYLINES } from '../../data/metroPolylines';
 import { mapStyles as ms } from '../../theme/mapStyles';
 import { buildLineGroups, coarseGrid, describeApiError } from './mapUtils';
@@ -27,12 +26,14 @@ import { useSettings } from '../settings/SettingsProvider';
 import StampModal from '../../components/StampModal';
 import UserLocationMarker from '../../components/UserLocationMarker';
 import MapControls, { type MapToggle } from '../../ui/MapControls';
+import { MapSurfaceSlot, useMapSurface } from '../../ui/MapHost';
 import StopSheet, { useStopSheetInset, type StopSheetLine } from '../../ui/StopSheet';
 import MapStatus from './components/MapStatus';
 import StampLayer from './components/StampLayer';
 import { NearbyStopMarker } from './components/StopMarkers';
 import { StopMarkerCaptureHost } from './components/StopMarkerImages';
 import { useScreenFocused, useWalkingRoute } from './components/mapHooks';
+import { mapPerf } from '../../utils/mapPerf';
 import type { MapStamp } from '../../types';
 
 /* ── Helpers ─────────────────────────────────────────────────── */
@@ -58,6 +59,7 @@ interface ParsedStop { lat: number; lng: number; name: string; code: string }
 /* ── Nearby Map Component ────────────────────────────────────── */
 
 export default function NearbyMapScreen() {
+  useEffect(() => { mapPerf('nearby map screen mounted'); }, []);
   const router = useRouter();
   const { linesMap } = useLinesMap();
   const { primaryColor, iconStyle } = useSettings();
@@ -73,8 +75,6 @@ export default function NearbyMapScreen() {
   const [showMetro, setShowMetro] = useState(() => getToggle('metro', true));
   const [showStamps, setShowStamps] = useState(() => getToggle('stamps', true));
 
-  const mapRef = useRef<MapView>(null);
-  const [mapReady, setMapReady] = useState(false);
   /** True during a pan/zoom gesture; a refetch mid-gesture stutters the map. */
   const panningRef = useRef(false);
   const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -115,20 +115,6 @@ export default function NearbyMapScreen() {
   } = useClosestStops(queryLoc?.lat, queryLoc?.lng);
 
   const initialRegion = useInitialRegion(0.01);
-
-  // Fly to user location on first update — but only once the native map can
-  // actually act on it. Before onMapReady this is a no-op on Android.
-  const hasCentered = useRef(false);
-  useEffect(() => {
-    if (!mapReady || !userLoc || hasCentered.current) return;
-    const map = mapRef.current;
-    if (!map) return;
-    map.animateToRegion({
-      latitude: userLoc.lat, longitude: userLoc.lng,
-      latitudeDelta: 0.01, longitudeDelta: 0.01,
-    }, 500);
-    hasCentered.current = true;
-  }, [mapReady, userLoc]);
 
   const onRegionChangeStart = useCallback(() => {
     panningRef.current = true;
@@ -253,21 +239,98 @@ export default function NearbyMapScreen() {
     setStampModal({ lat: e.nativeEvent.coordinate.latitude, lng: e.nativeEvent.coordinate.longitude });
   }, []);
 
-  const onMapReady = useCallback(() => setMapReady(true), []);
   const onRemoveStamp = useCallback((id: string) => setStamps(removeStamp(id)), []);
+
+  /* ── The shared map surface ────────────────────────────────── */
+
+  /* Everything that used to be a JSX child of this screen's own `<MapView>`.
+     There is no `<MapView>` here any more — one lives behind the navigator for
+     the life of the process (src/ui/MapHost.tsx) and this screen borrows it while
+     it is focused, handing over exactly this element tree. The elements are still
+     created here, by this render, closing over this screen's state; only the
+     place they are mounted has moved. */
+  const mapChildren = (
+    <>
+      {/* Walking route */}
+      {walk.coords.length > 1 && (
+        <Polyline coordinates={walk.coords} strokeColor="#4285F4"
+          strokeWidth={4} lineDashPattern={[8, 6]} lineCap="round" lineJoin="round" />
+      )}
+
+      {/* Metro polylines */}
+      {showMetro && metroLines}
+
+      {/* Nearby stop markers */}
+      {parsedStops.map((stop) => (
+        <NearbyStopMarker
+          key={`stop-${stop.code}`}
+          code={stop.code}
+          lat={stop.lat}
+          lng={stop.lng}
+          color={primaryColor}
+          onPress={onStopPress}
+        />
+      ))}
+
+      {/* Stamps */}
+      {showStamps && <StampLayer stamps={stamps} onRemove={onRemoveStamp} />}
+
+      {/* User location */}
+      {userLoc && (
+        <UserLocationMarker
+          lat={userLoc.lat} lng={userLoc.lng}
+          heading={userHeading} iconStyle={iconStyle}
+        />
+      )}
+    </>
+  );
+
+  const { revealed, ready: mapReady, getMap, onFrame } = useMapSurface({
+    label: 'nearby map',
+    focused,
+    initialRegion,
+    children: mapChildren,
+    onLongPress: onMapLongPress,
+    onRegionChangeStart,
+    onRegionChangeComplete,
+  });
+
+  // Fly to user location on first update — but only once the map can actually
+  // act on it. Before it reports ready this is a no-op on Android.
+  const hasCentered = useRef(false);
+  useEffect(() => {
+    if (!mapReady || !userLoc || hasCentered.current) return;
+    /* Null unless this screen currently holds the shared surface. That guard is
+       what stops a blurred Nearby — still mounted behind a line map, still
+       getting GPS fixes — from yanking the camera away from whichever screen is
+       on top of it. */
+    const map = getMap();
+    if (!map) return;
+    map.animateToRegion({
+      latitude: userLoc.lat, longitude: userLoc.lng,
+      latitudeDelta: 0.01, longitudeDelta: 0.01,
+    }, 500);
+    hasCentered.current = true;
+  }, [mapReady, userLoc, getMap]);
 
   const recenter = useCallback(() => {
     const loc = userLocationRef.current;
-    if (loc && mapRef.current) {
-      mapRef.current.animateToRegion({
+    const map = getMap();
+    if (loc && map) {
+      map.animateToRegion({
         latitude: loc.lat, longitude: loc.lng,
         latitudeDelta: 0.01, longitudeDelta: 0.01,
       }, 500);
     }
-  }, [userLocationRef]);
+  }, [userLocationRef, getMap]);
 
   const headerOptions = useMemo(() => ({
     headerStyle: { backgroundColor: colors.bg },
+    /* The screen's *content* has to be transparent or the shared map — which
+       lives behind the navigator — is hidden by the navigator's own background
+       before this screen's root view even gets a say. The root view below is what
+       keeps the screen opaque until the push animation has finished. */
+    contentStyle: { backgroundColor: 'transparent' },
     headerTitle: 'Nearby Stops',
     headerTitleStyle: { color: colors.text, fontWeight: '700' as const },
   }), []);
@@ -299,67 +362,20 @@ export default function NearbyMapScreen() {
   const visibleError = errorMessage && errorMessage !== dismissedError ? errorMessage : null;
 
   return (
-    <View style={ms.container}>
+    /* Opaque until the shared map is revealed through this screen, transparent
+       after. Both halves matter. Opaque is what makes the push animation look
+       exactly as it did — a dark panel sliding in over the screen that opened it,
+       with MapStatus on it — and it is also what hides the camera being handed
+       over. Transparent is the reveal: the map behind it is already drawn and
+       already loaded, so there is nothing to wait for and no
+       `loadingBackgroundColor` to see. */
+    <View style={[ms.container, revealed && ms.containerClear]}>
       <Stack.Screen options={headerOptions} />
 
-      <MapView
-        ref={mapRef}
-        provider={PROVIDER_GOOGLE}
-        style={ms.map}
-        initialRegion={initialRegion}
-        customMapStyle={GOOGLE_DARK_STYLE}
-        googleMapId={GOOGLE_MAP_ID}
-        // The native map surface is a child view covering the full bounds, so it
-        // paints over the black RN background with its own loading colour —
-        // white by default, a flashbang in a pure-black UI. `loadingEnabled` is
-        // not redundant here: on Android the loading layout that carries
-        // `loadingBackgroundColor` only exists once loading is enabled, so
-        // dropping this prop silently restores the white flash.
-        loadingEnabled
-        loadingBackgroundColor={colors.bg}
-        loadingIndicatorColor={colors.primaryLight}
-        showsUserLocation={false}
-        showsMyLocationButton={false}
-        showsCompass={false}
-        toolbarEnabled={false}
-        onMapReady={onMapReady}
-        onLongPress={onMapLongPress}
-        onRegionChangeStart={onRegionChangeStart}
-        onRegionChangeComplete={onRegionChangeComplete}
-        moveOnMarkerPress={false}
-      >
-        {/* Walking route */}
-        {walk.coords.length > 1 && (
-          <Polyline coordinates={walk.coords} strokeColor="#4285F4"
-            strokeWidth={4} lineDashPattern={[8, 6]} lineCap="round" lineJoin="round" />
-        )}
-
-        {/* Metro polylines */}
-        {showMetro && metroLines}
-
-        {/* Nearby stop markers */}
-        {parsedStops.map((stop) => (
-          <NearbyStopMarker
-            key={`stop-${stop.code}`}
-            code={stop.code}
-            lat={stop.lat}
-            lng={stop.lng}
-            color={primaryColor}
-            onPress={onStopPress}
-          />
-        ))}
-
-        {/* Stamps */}
-        {showStamps && <StampLayer stamps={stamps} onRemove={onRemoveStamp} />}
-
-        {/* User location */}
-        {userLoc && (
-          <UserLocationMarker
-            lat={userLoc.lat} lng={userLoc.lng}
-            heading={userHeading} iconStyle={iconStyle}
-          />
-        )}
-      </MapView>
+      {/* The hole the map shows through, exactly where this screen's own
+          `<MapView>` used to be laid out. It reports its rectangle to the host;
+          it draws nothing itself. */}
+      <MapSurfaceSlot style={ms.mapSlot} onFrame={onFrame} />
 
       <MapControls
         toggles={toggles}
@@ -385,7 +401,14 @@ export default function NearbyMapScreen() {
 
       <MapStatus
         blocking={firstLoad}
-        loadingLabel={firstLoad ? 'Finding stops near you…' : fetchingStops ? 'Updating…' : null}
+        loadingLabel={
+          firstLoad ? 'Finding stops near you…'
+            : fetchingStops ? 'Updating…'
+            // Last: the shortest of the three waits, and it only surfaces when
+            // the stops came from cache and the map is all that is left.
+            : !revealed ? 'Opening the map…'
+            : null
+        }
         error={visibleError}
         onRetry={() => { setDismissedError(null); refetchStops(); }}
         onDismissError={() => setDismissedError(errorMessage)}

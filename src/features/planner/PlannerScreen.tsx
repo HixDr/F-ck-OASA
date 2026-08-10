@@ -22,12 +22,12 @@ import {
 } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from 'react-native-maps';
+import { Marker, Polyline } from 'react-native-maps';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, onAccent, spacing } from '../../theme';
-import { GOOGLE_DARK_STYLE, GOOGLE_MAP_ID } from '../../theme/googleMapStyle';
 import { mapStyles as ms } from '../../theme/mapStyles';
 import Pressable from '../../ui/Pressable';
+import { MapSurfaceSlot, useMapSurface } from '../../ui/MapHost';
 import BottomSheet, { type BottomSheetHandle } from '../../ui/BottomSheet';
 import { SkeletonTripCard } from '../../ui/Skeleton';
 import { useSettings } from '../settings/SettingsProvider';
@@ -36,8 +36,10 @@ import { useInitialRegion } from '../../hooks/useInitialRegion';
 import { isOfflineDataDownloaded, getCachedStops, getStamps } from '../../services/storage';
 import { getLocation, subscribe as subscribeLocation } from '../../services/location';
 import { getArrivalColor } from '../map/mapUtils';
+import { useScreenFocused } from '../map/components/mapHooks';
 import { getWalkingRoute } from '../../services/api';
 import { haversineM } from '../../utils/geo';
+import { mapPerf } from '../../utils/mapPerf';
 import { METRO_POLYLINES } from '../../data/metroPolylines';
 import {
   planTrips,
@@ -220,9 +222,19 @@ const CONF_STYLE: Record<TripOption['confidence'], { label: string; color: strin
 /* ── Planner Screen ──────────────────────────────────────────── */
 
 export default function PlannerScreen() {
+  /* The clock for "how long after this screen appeared was its map usable?".
+     This screen never had the mark; it borrows the same one map as the other two
+     now, so it belongs in the same log. */
+  useEffect(() => { mapPerf('planner map screen mounted'); }, []);
   const router = useRouter();
   const { primaryColor } = useSettings();
   const { linesMap } = useLinesMap();
+
+  /* expo-router's native stack keeps pushed-behind screens mounted, so the one
+     shared map has to be handed to exactly one screen at a time — and focus is
+     the rule that decides which. Nothing on this screen needed a focus state
+     before; the borrowed map is what makes it necessary. */
+  const focused = useScreenFocused();
 
   const offlineReady = isOfflineDataDownloaded();
 
@@ -263,7 +275,6 @@ export default function PlannerScreen() {
   const computeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const planAbort = useRef<AbortController | null>(null);
   const highlightAbort = useRef<AbortController | null>(null);
-  const mapRef = useRef<MapView>(null);
   const sheetRef = useRef<BottomSheetHandle>(null);
 
   const loading = phase !== null;
@@ -471,15 +482,99 @@ export default function PlannerScreen() {
     [],
   );
 
+  /* ── The shared map surface ─────────────────────────────────── */
+
+  /* Everything that used to be a JSX child of this screen's own `<MapView>`.
+     There is no `<MapView>` here any more — one lives behind the navigator for
+     the life of the process (src/ui/MapHost.tsx) and this screen borrows it while
+     it is focused, handing over exactly this element tree. The elements are still
+     created here, by this render, closing over this screen's state — the pins are
+     still draggable and still call back into this screen's setters; only the
+     place they are mounted has moved. */
+  const mapChildren = (
+    <>
+      {metroData.map((line, i) => (
+        <Polyline key={`mp-${i}`} coordinates={line.coords}
+          strokeColor={line.color + '99'} strokeWidth={2.5} lineCap="round" />
+      ))}
+
+      {stamps.map((st) => (
+        <Marker key={`stamp-${st.id}`}
+          coordinate={{ latitude: st.lat, longitude: st.lng }}
+          anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}
+        >
+          <View style={ms.stampMarker}>
+            <Text style={ms.stampEmoji}>{st.emoji}</Text>
+            <Text style={ms.stampLabel}>{st.name}</Text>
+          </View>
+        </Marker>
+      ))}
+
+      {origin && (
+        <Marker
+          coordinate={{ latitude: origin.lat, longitude: origin.lng }}
+          draggable
+          onDragEnd={onOriginDragEnd}
+          anchor={{ x: 0.5, y: 1 }}
+          pinColor="#22C55E"
+        />
+      )}
+
+      {destination && (
+        <Marker
+          coordinate={{ latitude: destination.lat, longitude: destination.lng }}
+          draggable
+          onDragEnd={onDestDragEnd}
+          anchor={{ x: 0.5, y: 1 }}
+          pinColor="#F44336"
+        />
+      )}
+
+      {highlightPolylines.map((poly, i) => (
+        <Polyline
+          key={`poly-${i}`}
+          coordinates={poly.coords}
+          strokeColor={poly.color}
+          strokeWidth={poly.dashed ? 4 : 3}
+          lineDashPattern={poly.dashed ? [8, 6] : undefined}
+          lineCap="round"
+          lineJoin="round"
+        />
+      ))}
+
+      {highlightMarkers.map((pin, i) => (
+        <HighlightMarkerView key={`hm-${pin.type}-${pin.lat}-${pin.lng}-${i}`} pin={pin} />
+      ))}
+    </>
+  );
+
+  const { revealed, getMap, onFrame } = useMapSurface({
+    label: 'planner map',
+    /* The offline gate below early-returns a screen with no map on it at all, and
+       a screen that renders no map must not hold the map — otherwise the planner
+       would take the surface away from whatever is behind it and draw nothing on
+       it. */
+    focused: offlineReady && focused,
+    initialRegion,
+    children: mapChildren,
+    mapPadding,
+    onPress: onMapPress,
+    onLongPress: onMapLongPress,
+  });
+
   const recenter = useCallback(() => {
     const loc = getLocation();
-    if (loc && mapRef.current) {
-      mapRef.current.animateToRegion({
+    /* Null unless this screen currently holds the shared surface, which is what
+       stops a blurred planner from moving the camera under whichever screen is
+       on top of it. */
+    const map = getMap();
+    if (loc && map) {
+      map.animateToRegion({
         latitude: loc.lat, longitude: loc.lng,
         latitudeDelta: 0.015, longitudeDelta: 0.015,
       }, 500);
     }
-  }, []);
+  }, [getMap]);
 
   /* ── Route highlight on card tap ────────────────────────────── */
 
@@ -630,6 +725,7 @@ export default function PlannerScreen() {
         <Stack.Screen
           options={{
             headerStyle: { backgroundColor: colors.bg },
+            contentStyle: { backgroundColor: 'transparent' },
             headerTitle: 'Get Me There',
             headerTitleStyle: { color: colors.text, fontWeight: '700' },
           }}
@@ -930,98 +1026,37 @@ export default function PlannerScreen() {
   const placingLabel = placing === 'origin' ? 'start' : 'destination';
 
   return (
-    <View style={ms.container}>
+    /* Opaque until the shared map is revealed through this screen, transparent
+       after. Both halves matter. Opaque is what makes the push animation look
+       exactly as it did — a dark panel sliding in with the sheet on it — and it is
+       also what hides the camera being handed over. Transparent is the reveal:
+       the map is already drawn and already loaded, so there is nothing to wait
+       for and no `loadingBackgroundColor` to see. */
+    <View style={[ms.container, revealed && ms.containerClear]}>
       <Stack.Screen
         options={{
           headerStyle: { backgroundColor: colors.bg },
+          /* The screen's *content* has to be transparent or the shared map —
+             which lives behind the navigator — is hidden by the navigator's own
+             background before this screen's root view even gets a say. The root
+             view above is what keeps the screen opaque until the push animation
+             has finished. */
+          contentStyle: { backgroundColor: 'transparent' },
           headerTitle: 'Get Me There',
           headerTitleStyle: { color: colors.text, fontWeight: '700' },
         }}
       />
 
-      <View style={s.mapFill}>
-        <MapView
-          ref={mapRef}
-          provider={PROVIDER_GOOGLE}
-          style={ms.map}
-          initialRegion={initialRegion}
-          customMapStyle={GOOGLE_DARK_STYLE}
-          // Without the Map ID this screen was the one map still rendering on
-          // the default light basemap: the new Google renderer ignores
-          // `customMapStyle` outright and honours only the cloud style attached
-          // to the Map ID. The pair covers both renderers — see googleMapStyle.
-          googleMapId={GOOGLE_MAP_ID}
-          // The native map surface is a child view covering the full bounds, so
-          // it paints over the black RN background with its own loading colour —
-          // white by default, a flashbang in a pure-black UI. `loadingEnabled`
-          // is not redundant here: on Android the loading layout that carries
-          // `loadingBackgroundColor` only exists once loading is enabled, so
-          // dropping this prop silently restores the white flash.
-          loadingEnabled
-          loadingBackgroundColor={colors.bg}
-          loadingIndicatorColor={colors.primaryLight}
-          mapPadding={mapPadding}
-          showsUserLocation={false}
-          showsMyLocationButton={false}
-          showsCompass={false}
-          toolbarEnabled={false}
-          onPress={onMapPress}
-          onLongPress={onMapLongPress}
-          moveOnMarkerPress={false}
-        >
-          {metroData.map((line, i) => (
-            <Polyline key={`mp-${i}`} coordinates={line.coords}
-              strokeColor={line.color + '99'} strokeWidth={2.5} lineCap="round" />
-          ))}
-
-          {stamps.map((st) => (
-            <Marker key={`stamp-${st.id}`}
-              coordinate={{ latitude: st.lat, longitude: st.lng }}
-              anchor={{ x: 0.5, y: 0.5 }} tracksViewChanges={false}
-            >
-              <View style={ms.stampMarker}>
-                <Text style={ms.stampEmoji}>{st.emoji}</Text>
-                <Text style={ms.stampLabel}>{st.name}</Text>
-              </View>
-            </Marker>
-          ))}
-
-          {origin && (
-            <Marker
-              coordinate={{ latitude: origin.lat, longitude: origin.lng }}
-              draggable
-              onDragEnd={onOriginDragEnd}
-              anchor={{ x: 0.5, y: 1 }}
-              pinColor="#22C55E"
-            />
-          )}
-
-          {destination && (
-            <Marker
-              coordinate={{ latitude: destination.lat, longitude: destination.lng }}
-              draggable
-              onDragEnd={onDestDragEnd}
-              anchor={{ x: 0.5, y: 1 }}
-              pinColor="#F44336"
-            />
-          )}
-
-          {highlightPolylines.map((poly, i) => (
-            <Polyline
-              key={`poly-${i}`}
-              coordinates={poly.coords}
-              strokeColor={poly.color}
-              strokeWidth={poly.dashed ? 4 : 3}
-              lineDashPattern={poly.dashed ? [8, 6] : undefined}
-              lineCap="round"
-              lineJoin="round"
-            />
-          ))}
-
-          {highlightMarkers.map((pin, i) => (
-            <HighlightMarkerView key={`hm-${pin.type}-${pin.lat}-${pin.lng}-${i}`} pin={pin} />
-          ))}
-        </MapView>
+      {/* `mapFill` carries its own `colors.bg` — it is the view that used to show
+          through in the moment before the native surface painted — and unlike the
+          line map this screen has that wrapper between its root and the hole. An
+          opaque wrapper over a transparent root is a black rectangle where the map
+          should be, so the reveal has to reach this view too. */}
+      <View style={[s.mapFill, revealed && ms.containerClear]}>
+        {/* The hole the map shows through, laid out exactly where this screen's
+            own `<MapView>` used to be. It reports its rectangle to the host; it
+            draws nothing itself, so everything below still draws over the map. */}
+        <MapSurfaceSlot style={ms.mapSlot} onFrame={onFrame} />
 
         {/* Map furniture lives at the top: the sheet owns the bottom of the
             screen at every snap point, and a control that spends most of its
