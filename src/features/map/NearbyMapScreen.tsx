@@ -369,7 +369,18 @@ export default function NearbyMapScreen() {
        over. Transparent is the reveal: the map behind it is already drawn and
        already loaded, so there is nothing to wait for and no
        `loadingBackgroundColor` to see. */
-    <View style={[ms.container, revealed && ms.containerClear]}>
+    <View
+      style={[ms.container, revealed && ms.containerClear]}
+      /* `box-none` while the map shows through: this container has no visual of
+          its own once transparent, but ReactViewGroup.onTouchEvent returns true
+          for `auto` — "the root view always assumes any view that was tapped
+          wants the touch" — so it consumed every gesture its controls did not
+          take, and nothing ever reached the map hosted behind the navigator.
+          `box-none` keeps the children (controls, sheets, status) receiving
+          touches while the container itself declines them, letting Android fall
+          through to the host. */
+      pointerEvents={revealed ? 'box-none' : 'auto'}
+    >
       <Stack.Screen options={headerOptions} />
 
       {/* The hole the map shows through, exactly where this screen's own
