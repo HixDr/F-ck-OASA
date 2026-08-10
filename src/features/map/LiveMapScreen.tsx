@@ -39,6 +39,7 @@ import StampModal from '../../components/StampModal';
 import ScheduleGrid from '../../components/ScheduleGrid';
 import UserLocationMarker from '../../components/UserLocationMarker';
 import Pressable from '../../ui/Pressable';
+import { useDeferredMapMount } from '../../ui/MapWarmup';
 import MapControls, { type MapToggle } from '../../ui/MapControls';
 import StopSheet, { useStopSheetInset, type StopSheetLine } from '../../ui/StopSheet';
 import RefreshTimer from './components/RefreshTimer';
@@ -224,6 +225,11 @@ export default function LiveMapScreen() {
   const isOnline = useNetworkStatus();
   const mapRef = useRef<MapView>(null);
   const [mapReady, setMapReady] = useState(false);
+  /* The native map view is built *after* the push animation finishes — creating
+     it mid-transition is UI-thread work competing with a UI-thread animation, and
+     the animation loses visibly. Only the view is held back; every query above
+     and below is JS and network and starts at mount as before. */
+  const mapMounted = useDeferredMapMount('line map');
 
   // 1 Hz GPS only while this screen is actually on top of the stack.
   const { userLocationRef, userLoc, userHeading } = useUserLocation({ highAccuracy: focused });
@@ -656,92 +662,103 @@ export default function LiveMapScreen() {
     if (!stops) return 'Loading stops…';
     if (shapeLoading) return 'Drawing the route…';
     if (!buses && focused && isOnline) return 'Locating buses…';
+    // Last, because it is the shortest wait and everything above is a better
+    // description of it. It only surfaces when the whole load came from cache
+    // and the map is the only thing left — without it that case is a bare black
+    // screen for the tail of the transition.
+    if (!mapMounted) return 'Opening the map…';
     return null;
-  }, [allRoutes, stops, shapeLoading, buses, focused, isOnline]);
+  }, [allRoutes, stops, shapeLoading, buses, focused, isOnline, mapMounted]);
 
   return (
     <View style={ms.container}>
       <Stack.Screen options={headerOptions} />
 
-      <MapView
-        ref={mapRef}
-        provider={PROVIDER_GOOGLE}
-        style={ms.map}
-        initialRegion={initialRegion}
-        customMapStyle={GOOGLE_DARK_STYLE}
-        googleMapId={GOOGLE_MAP_ID}
-        // The native map surface is a child view covering the full bounds, so it
-        // paints over the black RN background with its own loading colour —
-        // white by default, a flashbang in a pure-black UI. `loadingEnabled` is
-        // not redundant here: on Android the loading layout that carries
-        // `loadingBackgroundColor` only exists once loading is enabled, so
-        // dropping this prop silently restores the white flash.
-        loadingEnabled
-        loadingBackgroundColor={colors.bg}
-        loadingIndicatorColor={colors.primaryLight}
-        showsUserLocation={false}
-        showsMyLocationButton={false}
-        showsCompass={false}
-        toolbarEnabled={false}
-        pitchEnabled={false}
-        onMapReady={onMapReady}
-        onMapLoaded={onMapLoaded}
-        onLongPress={onMapLongPress}
-        onRegionChangeStart={onRegionChangeStart}
-        onRegionChangeComplete={onRegionChangeComplete}
-        moveOnMarkerPress={false}
-      >
-        {/* Route polyline */}
-        {routePolyline.length > 1 && (
-          <Polyline coordinates={routePolyline} strokeColor={primaryColor + 'AA'}
-            strokeWidth={3.5} lineCap="round" lineJoin="round" zIndex={0} />
-        )}
+      {/* Until `mapMounted`, the screen is `ms.container` — the same
+          `colors.bg` the map's own `loadingBackgroundColor` would be showing at
+          this point anyway — plus MapStatus below. Nothing the user could see
+          disappears; only the native view creation moves. */}
+      {mapMounted && (
+        <MapView
+          ref={mapRef}
+          provider={PROVIDER_GOOGLE}
+          style={ms.map}
+          initialRegion={initialRegion}
+          customMapStyle={GOOGLE_DARK_STYLE}
+          googleMapId={GOOGLE_MAP_ID}
+          // The native map surface is a child view covering the full bounds, so
+          // it paints over the black RN background with its own loading colour —
+          // white by default, a flashbang in a pure-black UI. `loadingEnabled` is
+          // not redundant here: on Android the loading layout that carries
+          // `loadingBackgroundColor` only exists once loading is enabled, so
+          // dropping this prop silently restores the white flash.
+          loadingEnabled
+          loadingBackgroundColor={colors.bg}
+          loadingIndicatorColor={colors.primaryLight}
+          showsUserLocation={false}
+          showsMyLocationButton={false}
+          showsCompass={false}
+          toolbarEnabled={false}
+          pitchEnabled={false}
+          onMapReady={onMapReady}
+          onMapLoaded={onMapLoaded}
+          onLongPress={onMapLongPress}
+          onRegionChangeStart={onRegionChangeStart}
+          onRegionChangeComplete={onRegionChangeComplete}
+          moveOnMarkerPress={false}
+        >
+          {/* Route polyline */}
+          {routePolyline.length > 1 && (
+            <Polyline coordinates={routePolyline} strokeColor={primaryColor + 'AA'}
+              strokeWidth={3.5} lineCap="round" lineJoin="round" zIndex={0} />
+          )}
 
-        {/* Walking route */}
-        {walk.coords.length > 1 && (
-          <Polyline coordinates={walk.coords} strokeColor="#4285F4"
-            strokeWidth={4} lineDashPattern={[8, 6]} lineCap="round" lineJoin="round" />
-        )}
+          {/* Walking route */}
+          {walk.coords.length > 1 && (
+            <Polyline coordinates={walk.coords} strokeColor="#4285F4"
+              strokeWidth={4} lineDashPattern={[8, 6]} lineCap="round" lineJoin="round" />
+          )}
 
-        {/* Metro polylines */}
-        {showMetro && metroLines}
+          {/* Metro polylines */}
+          {showMetro && metroLines}
 
-        {/* Stop markers — bus icon with directional arrow */}
-        {visibleStops.map((stop) => (
-          <RouteStopMarker
-            key={`st-${stop.code}`}
-            code={stop.code}
-            lat={stop.lat}
-            lng={stop.lng}
-            bearing={stop.bearing}
-            selected={selectedStopCode === stop.code}
+          {/* Stop markers — bus icon with directional arrow */}
+          {visibleStops.map((stop) => (
+            <RouteStopMarker
+              key={`st-${stop.code}`}
+              code={stop.code}
+              lat={stop.lat}
+              lng={stop.lng}
+              bearing={stop.bearing}
+              selected={selectedStopCode === stop.code}
+              color={primaryColor}
+              onPress={onStopPress}
+            />
+          ))}
+
+          {/* Buses — animated natively, no React state per frame */}
+          <BusLayer
+            buses={busMarkers}
+            route={routeGeometry}
+            imageUri={busMarkerUri}
             color={primaryColor}
-            onPress={onStopPress}
+            durationMs={BUS_POLL_MS}
+            stale={busStale}
+            active={focused}
           />
-        ))}
 
-        {/* Buses — animated natively, no React state per frame */}
-        <BusLayer
-          buses={busMarkers}
-          route={routeGeometry}
-          imageUri={busMarkerUri}
-          color={primaryColor}
-          durationMs={BUS_POLL_MS}
-          stale={busStale}
-          active={focused}
-        />
+          {/* Stamps */}
+          {showStamps && <StampLayer stamps={stamps} onRemove={onRemoveStamp} />}
 
-        {/* Stamps */}
-        {showStamps && <StampLayer stamps={stamps} onRemove={onRemoveStamp} />}
-
-        {/* User location */}
-        {userLoc && (
-          <UserLocationMarker
-            lat={userLoc.lat} lng={userLoc.lng}
-            heading={userHeading} iconStyle={iconStyle}
-          />
-        )}
-      </MapView>
+          {/* User location */}
+          {userLoc && (
+            <UserLocationMarker
+              lat={userLoc.lat} lng={userLoc.lng}
+              heading={userHeading} iconStyle={iconStyle}
+            />
+          )}
+        </MapView>
+      )}
 
       {/* Route direction dropdown */}
       {showRouteMenu && allRoutes && allRoutes.length > 1 && (

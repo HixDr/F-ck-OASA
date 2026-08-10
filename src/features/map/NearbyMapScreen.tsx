@@ -27,12 +27,14 @@ import { useSettings } from '../settings/SettingsProvider';
 import StampModal from '../../components/StampModal';
 import UserLocationMarker from '../../components/UserLocationMarker';
 import MapControls, { type MapToggle } from '../../ui/MapControls';
+import { useDeferredMapMount } from '../../ui/MapWarmup';
 import StopSheet, { useStopSheetInset, type StopSheetLine } from '../../ui/StopSheet';
 import MapStatus from './components/MapStatus';
 import StampLayer from './components/StampLayer';
 import { NearbyStopMarker } from './components/StopMarkers';
 import { StopMarkerCaptureHost } from './components/StopMarkerImages';
 import { useScreenFocused, useWalkingRoute } from './components/mapHooks';
+import { mapPerf } from '../../utils/mapPerf';
 import type { MapStamp } from '../../types';
 
 /* ── Helpers ─────────────────────────────────────────────────── */
@@ -58,6 +60,7 @@ interface ParsedStop { lat: number; lng: number; name: string; code: string }
 /* ── Nearby Map Component ────────────────────────────────────── */
 
 export default function NearbyMapScreen() {
+  useEffect(() => { mapPerf('nearby map screen mounted'); }, []);
   const router = useRouter();
   const { linesMap } = useLinesMap();
   const { primaryColor, iconStyle } = useSettings();
@@ -75,6 +78,10 @@ export default function NearbyMapScreen() {
 
   const mapRef = useRef<MapView>(null);
   const [mapReady, setMapReady] = useState(false);
+  /* Same reasoning as LiveMapScreen: the native map view is built after the push
+     animation finishes, so its setup cannot compete with the animation on the UI
+     thread. Only the view waits — the nearby-stops query does not. */
+  const mapMounted = useDeferredMapMount('nearby map');
   /** True during a pan/zoom gesture; a refetch mid-gesture stutters the map. */
   const panningRef = useRef(false);
   const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -253,7 +260,14 @@ export default function NearbyMapScreen() {
     setStampModal({ lat: e.nativeEvent.coordinate.latitude, lng: e.nativeEvent.coordinate.longitude });
   }, []);
 
-  const onMapReady = useCallback(() => setMapReady(true), []);
+  const onMapReady = useCallback(() => {
+    mapPerf('nearby map onMapReady');
+    setMapReady(true);
+  }, []);
+  /* Tiles actually on screen. The gap from `nearby map screen mounted` to here
+     is the whole cost of an open, and the gap from `mount released` to here is
+     the part the deferred mount cannot help with. */
+  const onMapLoaded = useCallback(() => mapPerf('nearby map onMapLoaded'), []);
   const onRemoveStamp = useCallback((id: string) => setStamps(removeStamp(id)), []);
 
   const recenter = useCallback(() => {
@@ -302,64 +316,70 @@ export default function NearbyMapScreen() {
     <View style={ms.container}>
       <Stack.Screen options={headerOptions} />
 
-      <MapView
-        ref={mapRef}
-        provider={PROVIDER_GOOGLE}
-        style={ms.map}
-        initialRegion={initialRegion}
-        customMapStyle={GOOGLE_DARK_STYLE}
-        googleMapId={GOOGLE_MAP_ID}
-        // The native map surface is a child view covering the full bounds, so it
-        // paints over the black RN background with its own loading colour —
-        // white by default, a flashbang in a pure-black UI. `loadingEnabled` is
-        // not redundant here: on Android the loading layout that carries
-        // `loadingBackgroundColor` only exists once loading is enabled, so
-        // dropping this prop silently restores the white flash.
-        loadingEnabled
-        loadingBackgroundColor={colors.bg}
-        loadingIndicatorColor={colors.primaryLight}
-        showsUserLocation={false}
-        showsMyLocationButton={false}
-        showsCompass={false}
-        toolbarEnabled={false}
-        onMapReady={onMapReady}
-        onLongPress={onMapLongPress}
-        onRegionChangeStart={onRegionChangeStart}
-        onRegionChangeComplete={onRegionChangeComplete}
-        moveOnMarkerPress={false}
-      >
-        {/* Walking route */}
-        {walk.coords.length > 1 && (
-          <Polyline coordinates={walk.coords} strokeColor="#4285F4"
-            strokeWidth={4} lineDashPattern={[8, 6]} lineCap="round" lineJoin="round" />
-        )}
+      {/* Until `mapMounted`, this is `ms.container` — the same `colors.bg` the
+          map's own `loadingBackgroundColor` would be showing anyway — plus the
+          MapStatus feedback below. */}
+      {mapMounted && (
+        <MapView
+          ref={mapRef}
+          provider={PROVIDER_GOOGLE}
+          style={ms.map}
+          initialRegion={initialRegion}
+          customMapStyle={GOOGLE_DARK_STYLE}
+          googleMapId={GOOGLE_MAP_ID}
+          // The native map surface is a child view covering the full bounds, so
+          // it paints over the black RN background with its own loading colour —
+          // white by default, a flashbang in a pure-black UI. `loadingEnabled` is
+          // not redundant here: on Android the loading layout that carries
+          // `loadingBackgroundColor` only exists once loading is enabled, so
+          // dropping this prop silently restores the white flash.
+          loadingEnabled
+          loadingBackgroundColor={colors.bg}
+          loadingIndicatorColor={colors.primaryLight}
+          showsUserLocation={false}
+          showsMyLocationButton={false}
+          showsCompass={false}
+          toolbarEnabled={false}
+          onMapReady={onMapReady}
+          onMapLoaded={onMapLoaded}
+          onLongPress={onMapLongPress}
+          onRegionChangeStart={onRegionChangeStart}
+          onRegionChangeComplete={onRegionChangeComplete}
+          moveOnMarkerPress={false}
+        >
+          {/* Walking route */}
+          {walk.coords.length > 1 && (
+            <Polyline coordinates={walk.coords} strokeColor="#4285F4"
+              strokeWidth={4} lineDashPattern={[8, 6]} lineCap="round" lineJoin="round" />
+          )}
 
-        {/* Metro polylines */}
-        {showMetro && metroLines}
+          {/* Metro polylines */}
+          {showMetro && metroLines}
 
-        {/* Nearby stop markers */}
-        {parsedStops.map((stop) => (
-          <NearbyStopMarker
-            key={`stop-${stop.code}`}
-            code={stop.code}
-            lat={stop.lat}
-            lng={stop.lng}
-            color={primaryColor}
-            onPress={onStopPress}
-          />
-        ))}
+          {/* Nearby stop markers */}
+          {parsedStops.map((stop) => (
+            <NearbyStopMarker
+              key={`stop-${stop.code}`}
+              code={stop.code}
+              lat={stop.lat}
+              lng={stop.lng}
+              color={primaryColor}
+              onPress={onStopPress}
+            />
+          ))}
 
-        {/* Stamps */}
-        {showStamps && <StampLayer stamps={stamps} onRemove={onRemoveStamp} />}
+          {/* Stamps */}
+          {showStamps && <StampLayer stamps={stamps} onRemove={onRemoveStamp} />}
 
-        {/* User location */}
-        {userLoc && (
-          <UserLocationMarker
-            lat={userLoc.lat} lng={userLoc.lng}
-            heading={userHeading} iconStyle={iconStyle}
-          />
-        )}
-      </MapView>
+          {/* User location */}
+          {userLoc && (
+            <UserLocationMarker
+              lat={userLoc.lat} lng={userLoc.lng}
+              heading={userHeading} iconStyle={iconStyle}
+            />
+          )}
+        </MapView>
+      )}
 
       <MapControls
         toggles={toggles}
@@ -385,7 +405,14 @@ export default function NearbyMapScreen() {
 
       <MapStatus
         blocking={firstLoad}
-        loadingLabel={firstLoad ? 'Finding stops near you…' : fetchingStops ? 'Updating…' : null}
+        loadingLabel={
+          firstLoad ? 'Finding stops near you…'
+            : fetchingStops ? 'Updating…'
+            // Last: the shortest of the three waits, and it only surfaces when
+            // the stops came from cache and the map is all that is left.
+            : !mapMounted ? 'Opening the map…'
+            : null
+        }
         error={visibleError}
         onRetry={() => { setDismissedError(null); refetchStops(); }}
         onDismissError={() => setDismissedError(errorMessage)}
