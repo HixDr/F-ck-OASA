@@ -21,8 +21,16 @@ import type {
   OasaBulkStop,
 } from '../types';
 
-const HTTPS_BASE = 'https://telematics.oasa.gr/api/';
-const HTTP_BASE = 'http://telematics.oasa.gr/api/';
+/**
+ * The only host this app talks to.
+ *
+ * There is deliberately no plaintext alternative. As of 2026-08
+ * `http://telematics.oasa.gr` does not complete a connection at all — it hangs
+ * until the timeout — while HTTPS serves every endpoint normally. A fallback to
+ * it could therefore never succeed, and the one that used to live here did real
+ * damage: see `getApiBase` below.
+ */
+const API_BASE = 'https://telematics.oasa.gr/api/';
 
 /** Shared User-Agent. The API returns 403 without one. */
 export const USER_AGENT = 'OASALive/1.0 (personal telematics client)';
@@ -38,18 +46,21 @@ export interface RequestOpts {
 }
 
 /**
- * HTTPS is the only base we start from. As of 2026-08 the plaintext host
- * does not respond at all (connect hangs until timeout), so probing it at
- * boot cost up to 12s of startup for nothing. Instead we fail over lazily:
- * only if an HTTPS request dies with a transport error do we try HTTP once,
- * and only then do we latch onto it.
+ * Return the API base URL.
+ *
+ * A constant, and it must stay one. This used to be a module-level `let` that a
+ * failed request could rewrite: one transport error moved it from HTTPS to the
+ * plaintext host and nothing could move it back, so a single bad moment — a
+ * tunnel, a lift, a cell handover — pointed every later request at a host that
+ * does not answer, for the rest of the process's life. It presented as every
+ * saved stop losing its bus times at once while names and lines kept rendering
+ * from the offline cache, and it cleared only on a force-quit.
+ *
+ * Where the next request goes must not be something a previous request can
+ * write. `tests/api-transport.test.mjs` holds that line.
  */
-let _resolvedBase = HTTPS_BASE;
-let _httpFailoverTried = false;
-
-/** Return the currently resolved API base URL. */
 export function getApiBase(): string {
-  return _resolvedBase;
+  return API_BASE;
 }
 
 /* ── Errors ──────────────────────────────────────────────────── */
@@ -132,31 +143,20 @@ async function api<T>(
 ): Promise<T> {
   const qs = new URLSearchParams({ act: action, ...params }).toString();
 
-  const attempt = async (base: string): Promise<Response> =>
-    fetchWithTimeout(
-      `${base}?${qs}`,
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(
+      `${API_BASE}?${qs}`,
       { method: 'GET', headers: { 'User-Agent': USER_AGENT } },
       opts.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       opts.signal,
     );
-
-  let res: Response;
-  try {
-    res = await attempt(_resolvedBase);
-  } catch (err) {
-    if (opts.signal?.aborted) throw new ApiTimeoutError(action);
-    // Transport failure. Try the plaintext host once, then latch if it works.
-    if (_resolvedBase === HTTPS_BASE && !_httpFailoverTried) {
-      _httpFailoverTried = true;
-      try {
-        res = await attempt(HTTP_BASE);
-        _resolvedBase = HTTP_BASE;
-      } catch {
-        throw new ApiTimeoutError(action);
-      }
-    } else {
-      throw new ApiTimeoutError(action);
-    }
+  } catch {
+    /* Timeout, caller abort and outright transport failure all land here, and
+       all three produced this same error before — nothing downstream tells them
+       apart, because the response to each is identical: serve the stop's last
+       known arrivals off disk rather than blanking the card. */
+    throw new ApiTimeoutError(action);
   }
 
   if (!res.ok) {
