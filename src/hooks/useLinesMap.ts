@@ -16,5 +16,28 @@ export function useLinesMap() {
     if (!allLines) return new Map<string, OasaLine>();
     return new Map(allLines.map((l) => [l.LineCode, l]));
   }, [allLines]);
-  return { allLines, linesMap, linesLoading: isLoading, linesError: isError, refetchLines: refetch };
+  /**
+   * Is the catalogue usable yet?
+   *
+   * `buildLineGroups` resolves a badge as `linesMap.get(LineCode)?.LineID ??
+   * LineCode`, and that fallback is the right last resort only when the
+   * catalogue is genuinely unavailable — an internal code beats a blank badge.
+   * While it is merely still in flight the fallback is a wrong answer, and the
+   * routes query can easily win the race: it serves from its own cache. Cards
+   * that keyed "ready" on routes alone painted 937 where 140 belongs for the
+   * length of that gap.
+   *
+   * A hard failure counts as ready on purpose. Without that, a lines request
+   * that cannot succeed — offline, no cache — would hold every badge behind a
+   * skeleton for good instead of showing the fallback and a Retry.
+   */
+  const linesReady = linesMap.size > 0 || isError;
+  return {
+    allLines,
+    linesMap,
+    linesReady,
+    linesLoading: isLoading,
+    linesError: isError,
+    refetchLines: refetch,
+  };
 }

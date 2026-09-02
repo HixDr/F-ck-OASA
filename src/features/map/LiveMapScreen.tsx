@@ -90,7 +90,7 @@ export default function LiveMapScreen() {
   const minuteTick = useMinuteTick();
 
   const { data: allRoutes, error: routesError, refetch: refetchRoutes } = useRoutes(lineCode);
-  const { linesMap } = useLinesMap();
+  const { linesMap, linesReady } = useLinesMap();
   const [activeRouteCode, setActiveRouteCode] = useState<string | undefined>(undefined);
   const [fav, setFav] = useState(() => isFavorite(lineCode));
   const [showRouteMenu, setShowRouteMenu] = useState(false);
@@ -463,8 +463,11 @@ export default function LiveMapScreen() {
   );
   const stopLines = useMemo<LineGroup[] | null>(() => {
     if (!showAllLines || !stopRoutes) return null;
+    /* Not until the line catalogue is usable: a badge built without it reads
+       out the internal LineCode instead of the line number. */
+    if (!linesReady) return null;
     return buildLineGroups(stopRoutes, rawArrivals ?? [], linesMap).lines;
-  }, [showAllLines, stopRoutes, rawArrivals, linesMap]);
+  }, [showAllLines, stopRoutes, rawArrivals, linesMap, linesReady]);
 
   /* ── Map interactions ──────────────────────────────────────── */
 

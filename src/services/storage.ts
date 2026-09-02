@@ -401,13 +401,28 @@ export async function getCachedLines(): Promise<OasaLine[] | null> {
     const ttl = _offlineDownloaded ? OFFLINE_CACHE_TTL : CACHE_TTL;
     if (Date.now() - ts > ttl) return null;
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as OasaLine[]) : null;
+    /* An empty catalogue is a miss, not a hit. Callers test the result for
+       truth — `if (cached) return cached` — and `[]` is truthy, so returning
+       one parks every LineCode → LineID lookup on a map with nothing in it
+       and stops the network from ever being asked again until the TTL runs
+       out. That does not blank the badges: it renders the internal LineCode
+       where the rider expects the number on the front of the bus, 937 for
+       140. `setCachedLines` will not write one, and this will not serve one. */
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    return parsed as OasaLine[];
   } catch {
     return null;
   }
 }
 
 export async function setCachedLines(lines: OasaLine[]): Promise<void> {
+  /* Never persist an empty catalogue. `api()` maps an empty, `""` or `null`
+     body to `[]` for array endpoints — the right answer for "no arrivals right
+     now", a total loss for the line catalogue — so one blank response used to
+     land `[]` on disk with a fresh timestamp and poison every badge in the app
+     for a day, or a week with the offline bundle downloaded. Keeping the older
+     good copy is strictly better than replacing it with nothing. */
+  if (!Array.isArray(lines) || lines.length === 0) return;
   try {
     await AsyncStorage.multiSet([
       [LINES_CACHE_KEY, JSON.stringify(lines)],
