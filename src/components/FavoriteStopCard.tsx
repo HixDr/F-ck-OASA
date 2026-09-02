@@ -545,7 +545,7 @@ function FavoriteStopCard({
   canMoveDown,
 }: Props) {
   const router = useRouter();
-  const { linesMap, linesLoading, linesError, refetchLines } = useLinesMap();
+  const { linesMap, linesReady, linesLoading, linesError, refetchLines } = useLinesMap();
   const isOnline = useNetworkStatus();
 
   const routesQuery = useRoutesForStop(stop.stopCode);
@@ -555,8 +555,11 @@ function FavoriteStopCard({
      arrival minute the moment both queries resolve. Nothing else may delay it. */
   const built = useMemo(() => {
     if (!routesQuery.data) return null;
+    /* Not until the line catalogue is usable: a badge built without it reads
+       out the internal LineCode instead of the line number. */
+    if (!linesReady) return null;
     return buildLineGroups(routesQuery.data, arrivalsQuery.data ?? [], linesMap);
-  }, [routesQuery.data, arrivalsQuery.data, linesMap]);
+  }, [routesQuery.data, arrivalsQuery.data, linesMap, linesReady]);
   const allLineGroups = built?.lines ?? null;
 
   /* A *stable* identity for "which lines this stop serves". The arrival poll

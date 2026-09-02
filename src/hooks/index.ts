@@ -30,7 +30,11 @@ export function useLines() {
       const cached = await getCachedLines();
       if (cached) return cached;
       const fresh = await api.getLines();
-      await setCachedLines(fresh);
+      /* Guarded exactly as `useRoutesForStop` guards its own write. An empty
+         array is a legitimate `api()` result for any array endpoint, and for
+         this one it is worthless: every bus badge is a LineID looked up in
+         this catalogue by LineCode, and a miss falls back to the LineCode. */
+      if (fresh.length > 0) await setCachedLines(fresh);
       return fresh;
     },
     staleTime: 24 * 60 * 60 * 1000,

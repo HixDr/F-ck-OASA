@@ -61,7 +61,7 @@ interface ParsedStop { lat: number; lng: number; name: string; code: string }
 export default function NearbyMapScreen() {
   useEffect(() => { mapPerf('nearby map screen mounted'); }, []);
   const router = useRouter();
-  const { linesMap } = useLinesMap();
+  const { linesMap, linesReady } = useLinesMap();
   const { primaryColor, iconStyle } = useSettings();
   const focused = useScreenFocused();
 
@@ -174,8 +174,11 @@ export default function NearbyMapScreen() {
 
   const lines = useMemo(() => {
     if (!stopRoutes) return null;
+    /* Not until the line catalogue is usable: a badge built without it reads
+       out the internal LineCode instead of the line number. */
+    if (!linesReady) return null;
     return buildLineGroups(stopRoutes, arrivals ?? [], linesMap).lines;
-  }, [stopRoutes, arrivals, linesMap]);
+  }, [stopRoutes, arrivals, linesMap, linesReady]);
 
   /**
    * Every route calling here. Unlike Live, this screen is not scoped to a line,
