@@ -9,6 +9,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lineBadge, spokenLine } from '../../utils/lineLabels';
 import { View, Text, ActivityIndicator, Alert } from 'react-native';
 import { Stack, useLocalSearchParams, useRouter } from 'expo-router';
 import { Polyline } from 'react-native-maps';
@@ -17,7 +18,7 @@ import { colors, font } from '../../theme';
 import {
   useBusLocations, useStops, useRoutes, useSchedule, useArrivals, useRoutesForStop, BUS_POLL_MS,
 } from '../../hooks';
-import { useLinesMap } from '../../hooks/useLinesMap';
+import { useLinesMap, useCatalogueHeal } from '../../hooks/useLinesMap';
 import { useInitialRegion } from '../../hooks/useInitialRegion';
 import { useUserLocation } from '../../hooks/useUserLocation';
 import { getRouteDetails } from '../../services/api';
@@ -461,13 +462,15 @@ export default function LiveMapScreen() {
   const { data: stopRoutes, isLoading: loadingStopLines } = useRoutesForStop(
     showAllLines && selectedStopCode ? selectedStopCode : undefined,
   );
-  const stopLines = useMemo<LineGroup[] | null>(() => {
+  const stopBuilt = useMemo(() => {
     if (!showAllLines || !stopRoutes) return null;
     /* Not until the line catalogue is usable: a badge built without it reads
        out the internal LineCode instead of the line number. */
     if (!linesReady) return null;
-    return buildLineGroups(stopRoutes, rawArrivals ?? [], linesMap).lines;
+    return buildLineGroups(stopRoutes, rawArrivals ?? [], linesMap);
   }, [showAllLines, stopRoutes, rawArrivals, linesMap, linesReady]);
+  const stopLines: LineGroup[] | null = stopBuilt?.lines ?? null;
+  useCatalogueHeal(stopBuilt?.unresolved);
 
   /* ── Map interactions ──────────────────────────────────────── */
 
@@ -609,7 +612,7 @@ export default function LiveMapScreen() {
   const openLine = useCallback((line: StopSheetLine) => {
     const info = linesMap.get(line.lineCode);
     router.push({ pathname: '/map/[lineCode]', params: {
-      lineCode: line.lineCode, lineId: line.lineId,
+      lineCode: line.lineCode, lineId: line.lineId ?? '',
       lineDescr: info?.LineDescrEng ?? info?.LineDescr ?? line.lineDescrEng,
     }});
   }, [linesMap, router]);
@@ -678,11 +681,11 @@ export default function LiveMapScreen() {
         accessibilityRole={hasMultipleRoutes ? 'button' : 'header'}
         accessibilityState={hasMultipleRoutes ? { expanded: showRouteMenu } : undefined}
         accessibilityLabel={hasMultipleRoutes
-          ? `Line ${lineId ?? ''}, ${activeRouteLabel}. Change direction`
-          : `Line ${lineId ?? ''}, ${activeRouteLabel}`}
+          ? `${spokenLine(lineId)}, ${activeRouteLabel}. Change direction`
+          : `${spokenLine(lineId)}, ${activeRouteLabel}`}
       >
         <View style={s.headerTitleRow}>
-          <Text style={s.headerLineId}>{lineId ?? ''}</Text>
+          <Text style={s.headerLineId}>{lineBadge(lineId)}</Text>
           {hasMultipleRoutes && (
             <Ionicons name={showRouteMenu ? 'chevron-up' : 'chevron-down'}
               size={16} color={colors.textMuted} style={s.headerChevron} />

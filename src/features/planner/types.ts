@@ -37,7 +37,8 @@ export interface StopRef {
 /** A single leg of a trip (one bus ride). */
 export interface TripLeg {
   lineCode: string;
-  lineId: string;
+  /** null when the catalogue cannot name the line — never an internal code. */
+  lineId: string | null;
   lineDescr: string;
   routeCode: string;
   boardStop: StopRef;

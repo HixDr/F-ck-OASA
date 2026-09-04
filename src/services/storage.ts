@@ -433,6 +433,22 @@ export async function setCachedLines(lines: OasaLine[]): Promise<void> {
   }
 }
 
+/**
+ * Drop the cached line catalogue so the next read goes to the network.
+ *
+ * For when the catalogue on disk turns out not to name the LineCodes the route
+ * lists actually reference. That is not a miss the TTL can fix — the copy is
+ * inside its window and simply wrong about the network — so the only way back
+ * is to throw it away. `useCatalogueHeal` is the caller, once per session.
+ */
+export async function clearCachedLines(): Promise<void> {
+  try {
+    await AsyncStorage.multiRemove([LINES_CACHE_KEY, LINES_CACHE_TS_KEY]);
+  } catch {
+    // Best-effort — a failure here just means the stale copy lives out its TTL.
+  }
+}
+
 /* ── Map Stamps (sync reads from mirror, async writes) ───────── */
 
 export function getStamps(): MapStamp[] {
@@ -667,8 +683,16 @@ export function getCachedRoutesForStop(stopCode: string): Promise<OasaRoute[] | 
 }
 
 export function setCachedRoutesForStop(stopCode: string, data: OasaRoute[]): Promise<void> {
-  // Skip runtime writes when bulk offline data exists (avoids re-serializing large file)
-  if (_offlineDownloaded) return Promise.resolve();
+  /* This used to drop every write while the offline bundle flag was set, to
+     avoid re-serializing a large dict. `createDictCache` has no TTL, so the
+     effect was an entry frozen on disk for the life of the install: a stop's
+     route list captured at download time, still being served months later,
+     still naming LineCodes the catalogue has since dropped. Nothing could
+     correct it — not a refetch, not a restart, only clearing app storage.
+
+     Writes are debounced (`persistDebounced`), so letting fresh data through
+     costs one coalesced serialization rather than one per stop viewed. That is
+     the price of a cache that can be wrong and then stop being wrong. */
   return _routesForStopCache.set(stopCode, data);
 }
 
@@ -683,8 +707,8 @@ export function getCachedStops(routeCode: string): Promise<OasaStop[] | null> {
 }
 
 export function setCachedStops(routeCode: string, data: OasaStop[]): Promise<void> {
-  // Skip runtime writes when bulk offline data exists (avoids re-serializing large file)
-  if (_offlineDownloaded) return Promise.resolve();
+  // Same reasoning as setCachedRoutesForStop above: an untouchable entry is
+  // worse than a re-serialization, because there is no way out of a wrong one.
   return _stopsCache.set(routeCode, data);
 }
 

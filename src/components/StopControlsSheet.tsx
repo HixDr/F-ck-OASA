@@ -23,6 +23,7 @@
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
+import { lineBadge, spokenLine } from '../utils/lineLabels';
 import {
   View,
   Text,
@@ -50,7 +51,8 @@ export type StopSheetMode = 'schedule' | 'alarm' | 'lines';
 
 export interface SheetLine {
   lineCode: string;
-  lineId: string;
+  /** null when the catalogue cannot name the line. */
+  lineId: string | null;
   /** Destination label, already resolved by the card. */
   label: string;
 }
@@ -198,7 +200,7 @@ export default function StopControlsSheet({
                             onPress={() => setSelectedLine(l.lineCode)}
                             accessibilityRole="radio"
                             accessibilityState={{ selected }}
-                            accessibilityLabel={`Line ${l.lineId}, ${l.label}`}
+                            accessibilityLabel={`${spokenLine(l.lineId)}, ${l.label}`}
                           >
                             <Text
                               style={[s.chipText, { color: selected ? onAccent(accentColor) : colors.text }]}
@@ -209,7 +211,7 @@ export default function StopControlsSheet({
                                  than on the card that opened it. */
                               maxFontSizeMultiplier={fontScaleCap.badge}
                             >
-                              {l.lineId}
+                              {lineBadge(l.lineId)}
                             </Text>
                           </Pressable>
                         );
@@ -263,7 +265,7 @@ export default function StopControlsSheet({
                           onPress={() => onToggleLine(l.lineCode)}
                           accessibilityRole="checkbox"
                           accessibilityState={{ checked: visible }}
-                          accessibilityLabel={`Show line ${l.lineId}, ${l.label}`}
+                          accessibilityLabel={`Show ${spokenLine(l.lineId).toLowerCase()}, ${l.label}`}
                         >
                           <Ionicons
                             name={visible ? 'checkbox' : 'square-outline'}
@@ -272,7 +274,7 @@ export default function StopControlsSheet({
                           />
                           <View style={[s.lineBadge, { backgroundColor: visible ? accentColor : colors.border }]}>
                             <Text style={[s.lineBadgeText, { color: visible ? onAccent(accentColor) : colors.text }]}>
-                              {l.lineId}
+                              {lineBadge(l.lineId)}
                             </Text>
                           </View>
                           <Text
@@ -304,12 +306,12 @@ export default function StopControlsSheet({
                           onPress={() => onPickAlarm(l.lineCode)}
                           accessibilityRole="button"
                           accessibilityLabel={armed
-                            ? `Stop the arrival alert for line ${l.lineId}`
-                            : `Set an arrival alert for line ${l.lineId}`}
+                            ? `Stop the arrival alert for ${spokenLine(l.lineId).toLowerCase()}`
+                            : `Set an arrival alert for ${spokenLine(l.lineId).toLowerCase()}`}
                         >
                           <View style={[s.lineBadge, { backgroundColor: accentColor }]}>
                             <Text style={[s.lineBadgeText, { color: onAccent(accentColor) }]}>
-                              {l.lineId}
+                              {lineBadge(l.lineId)}
                             </Text>
                           </View>
                           <Text

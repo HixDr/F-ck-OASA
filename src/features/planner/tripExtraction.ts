@@ -129,7 +129,7 @@ function buildTripOption(
 
     tripLegs.push({
       lineCode,
-      lineId: lineInfo?.LineID ?? lineCode,
+      lineId: lineInfo?.LineID ?? null,
       lineDescr: lineInfo?.LineDescrEng ?? lineInfo?.LineDescr ?? meta?.RouteDescrEng ?? '',
       routeCode: leg.routeCode,
       boardStop: {

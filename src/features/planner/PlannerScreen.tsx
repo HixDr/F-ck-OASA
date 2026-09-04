@@ -13,6 +13,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lineBadge } from '../../utils/lineLabels';
 import {
   View,
   Text,
@@ -711,7 +712,8 @@ export default function PlannerScreen() {
       pathname: '/map/[lineCode]',
       params: {
         lineCode: leg.lineCode,
-        lineId: leg.lineId,
+        // Route params are strings; an unnamed line crosses as ''.
+        lineId: leg.lineId ?? '',
         lineDescr: info?.LineDescrEng ?? info?.LineDescr ?? leg.lineDescr,
       },
     });
@@ -937,7 +939,7 @@ export default function PlannerScreen() {
                 {/* The accent is user-picked across the whole hue circle, so
                     white is not a safe assumption on top of it. */}
                 <Text style={[s.lineBadgeText, num, { color: onAccent(primaryColor) }]}>
-                  {leg.lineId}
+                  {lineBadge(leg.lineId)}
                 </Text>
               </View>
               {renderWait(leg)}

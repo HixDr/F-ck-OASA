@@ -141,7 +141,9 @@ export function coarseGrid(lat: number, lng: number, cellM = 500): { lat: number
 
 export interface LineGroup {
   lineCode: string;
-  lineId: string;
+  /** The number on the front of the bus, or null when the catalogue does not
+   *  name this LineCode. Never the LineCode itself — see `lineLabels.ts`. */
+  lineId: string | null;
   lineDescrEng: string;
   nextMin: number | null;
   color: string;
@@ -150,13 +152,18 @@ export interface LineGroup {
 
 /**
  * Group routes by line, attach next arrival time and color.
- * Returns sorted line groups and a routeCode → lineCode map.
+ *
+ * Returns the sorted line groups, a routeCode → lineCode map, and the
+ * LineCodes the catalogue could not name. `unresolved` is reported rather than
+ * acted on: this is a pure function, and the one thing it must never do is
+ * invent a name by falling back to the code. `useCatalogueHeal` is what reacts
+ * to it.
  */
 export function buildLineGroups(
   routes: OasaRoute[],
   arrivals: Array<{ route_code: string; btime2: string }>,
   linesMap: Map<string, OasaLine>,
-): { lines: LineGroup[]; routeToLine: Map<string, string> } {
+): { lines: LineGroup[]; routeToLine: Map<string, string>; unresolved: string[] } {
   const routeToLine = new Map<string, string>();
   routes.forEach((r) => routeToLine.set(r.RouteCode, r.LineCode));
 
@@ -172,6 +179,7 @@ export function buildLineGroups(
 
   const seenLines = new Set<string>();
   const lines: LineGroup[] = [];
+  const unresolved: string[] = [];
 
   routes.forEach((r) => {
     if (seenLines.has(r.LineCode)) return;
@@ -182,9 +190,10 @@ export function buildLineGroups(
     // Prefer route description (direction-specific) over line description (generic)
     const rawDescr = r.RouteDescrEng || r.RouteDescr || lineInfo?.LineDescrEng || lineInfo?.LineDescr || '';
     const descr = rawDescr.replace(/ - /g, ' ► ');
+    if (!lineInfo) unresolved.push(r.LineCode);
     lines.push({
       lineCode: r.LineCode,
-      lineId: lineInfo?.LineID ?? r.LineCode,
+      lineId: lineInfo?.LineID ?? null,
       lineDescrEng: descr,
       nextMin,
       color,
@@ -199,7 +208,7 @@ export function buildLineGroups(
     return 0;
   });
 
-  return { lines, routeToLine };
+  return { lines, routeToLine, unresolved };
 }
 
 /**

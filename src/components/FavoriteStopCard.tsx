@@ -74,6 +74,7 @@ import {
   Alert as RNAlert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
+import { lineBadge, spokenLine } from '../utils/lineLabels';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, fontScaleCap, onAccent, radius } from '../theme';
 import Pressable from '../ui/Pressable';
@@ -87,7 +88,7 @@ import {
   setCachedRoutes,
 } from '../services/storage';
 import { useArrivals, useRoutesForStop, arrivalsOrigin, ARRIVALS_POLL_MS } from '../hooks';
-import { useLinesMap } from '../hooks/useLinesMap';
+import { useLinesMap, useCatalogueHeal } from '../hooks/useLinesMap';
 import { useNetworkStatus } from '../services/network';
 import {
   buildLineGroups,
@@ -317,7 +318,8 @@ const LoadingRows = React.memo(function LoadingRows({
 /* ── One arrival row ─────────────────────────────────────────── */
 
 interface RowProps {
-  lineId: string;
+  /** null when the catalogue cannot name the line — never an internal code. */
+  lineId: string | null;
   lineCode: string;
   label: string;
   /** Minutes to arrival, already decayed by the age of the data. */
@@ -361,11 +363,11 @@ const LineRow = React.memo(function LineRow({
         style={s.lineRow}
         onPress={() => onPress(lineCode)}
         accessibilityRole="button"
-        accessibilityLabel={`Line ${lineId}, ${label}, ${spoken}${stale ? ', data may be out of date' : ''}`}
+        accessibilityLabel={`${spokenLine(lineId)}, ${label}, ${spoken}${stale ? ', data may be out of date' : ''}`}
         accessibilityHint="Opens the live map for this line"
       >
         <View style={[s.lineBadge, { backgroundColor: primaryColor }]}>
-          <Text style={[s.lineBadgeText, { color: onAccent(primaryColor) }]} maxFontSizeMultiplier={fontScaleCap.badge}>{lineId}</Text>
+          <Text style={[s.lineBadgeText, { color: onAccent(primaryColor) }]} maxFontSizeMultiplier={fontScaleCap.badge}>{lineBadge(lineId)}</Text>
         </View>
 
         <View style={s.lineMain}>
@@ -422,7 +424,7 @@ const LineRow = React.memo(function LineRow({
           onPress={() => onToggleAlert(lineCode)}
           accessibilityRole="switch"
           accessibilityState={{ checked: alertActive }}
-          accessibilityLabel={`Arrival alert for line ${lineId}`}
+          accessibilityLabel={`Arrival alert for ${spokenLine(lineId).toLowerCase()}`}
           accessibilityHint={alertActive ? 'Turns the alert off' : 'Choose how early to be warned'}
         >
           <Ionicons
@@ -457,7 +459,8 @@ const LineRow = React.memo(function LineRow({
  * place in the app where the arrival is not a way in.
  */
 interface CompactProps {
-  lineId: string;
+  /** null when the catalogue cannot name the line. */
+  lineId: string | null;
   lineCode: string;
   /** Not rendered — there is no room. Spoken, because a screen reader has all
    *  the room in the world and the destination is how the user tells two
@@ -496,11 +499,11 @@ const CompactArrival = React.memo(function CompactArrival({
       style={half ? s.busTileHalf : s.busTile}
       onPress={() => onPress(lineCode)}
       accessibilityRole="button"
-      accessibilityLabel={`Line ${lineId}, ${label}, ${spoken}${stale ? ', data may be out of date' : ''}`}
+      accessibilityLabel={`${spokenLine(lineId)}, ${label}, ${spoken}${stale ? ', data may be out of date' : ''}`}
       accessibilityHint="Opens the live map for this line"
     >
       <View style={[s.lineBadge, s.compactBadge, { backgroundColor: primaryColor }]}>
-        <Text style={[s.lineBadgeText, { color: onAccent(primaryColor) }]} maxFontSizeMultiplier={fontScaleCap.badge}>{lineId}</Text>
+        <Text style={[s.lineBadgeText, { color: onAccent(primaryColor) }]} maxFontSizeMultiplier={fontScaleCap.badge}>{lineBadge(lineId)}</Text>
       </View>
 
       {/* The caps are the row's, for the row's reasons: the figure sits in a
@@ -561,6 +564,10 @@ function FavoriteStopCard({
     return buildLineGroups(routesQuery.data, arrivalsQuery.data ?? [], linesMap);
   }, [routesQuery.data, arrivalsQuery.data, linesMap, linesReady]);
   const allLineGroups = built?.lines ?? null;
+  /* A catalogue that cannot name what the routes reference is wrong, not just
+     old — its TTL will not save it. One refetch per session, then the badges
+     say so rather than inventing a number. */
+  useCatalogueHeal(built?.unresolved);
 
   /* A *stable* identity for "which lines this stop serves". The arrival poll
      rebuilds `allLineGroups` every 15s with fresh object identities; effects
@@ -839,7 +846,9 @@ function FavoriteStopCard({
       pathname: '/map/[lineCode]',
       params: {
         lineCode,
-        lineId: line.lineId,
+        // Route params are strings; an unnamed line crosses as '' and
+        // `lineBadge` reads that back as "no name".
+        lineId: line.lineId ?? '',
         lineDescr: info?.LineDescrEng ?? info?.LineDescr ?? line.lineDescrEng,
       },
     });
@@ -950,7 +959,7 @@ function FavoriteStopCard({
       // Only one watch exists app-wide, so this just cancelled someone else's.
       RNAlert.alert(
         'Alert switched',
-        `The alert for line ${result.replaced.lineId} at ${result.replaced.stopName} was cancelled — only one alert can run at a time.`,
+        `The alert for ${spokenLine(result.replaced.lineId).toLowerCase()} at ${result.replaced.stopName} was cancelled — only one alert can run at a time.`,
       );
     }
   }, [alertThreshold, pickerLine, built, stop.stopCode, stop.stopName, primaryColor]);
@@ -1215,7 +1224,7 @@ function FavoriteStopCard({
         accessibilityRole="switch"
         accessibilityState={{ checked: !!alertHere, disabled: !hasLines && !alertHere }}
         accessibilityLabel={
-          alertHere ? `Arrival alert on for line ${alertHere.lineId}` : 'Arrival alert'
+          alertHere ? `Arrival alert on for ${spokenLine(alertHere.lineId).toLowerCase()}` : 'Arrival alert'
         }
         accessibilityHint={alertHere ? 'Turns the alert off' : 'Choose a line and how early to be warned'}
       >
@@ -1343,13 +1352,13 @@ function FavoriteStopCard({
           {/* Spelled out rather than "≤5′": the prime is announced as "feet",
               and the app has never agreed with itself on which glyph to use. */}
           <Text style={s.alertBannerText} numberOfLines={1}>
-            Alerting {orphanAlert.lineId} at {orphanAlert.thresholdMin} min
+            Alerting {lineBadge(orphanAlert.lineId)} at {orphanAlert.thresholdMin} min
           </Text>
           <Pressable
             style={s.alertBannerBtn}
             onPress={() => stopAlertWatch()}
             accessibilityRole="button"
-            accessibilityLabel={`Stop the arrival alert for line ${orphanAlert.lineId}`}
+            accessibilityLabel={`Stop the arrival alert for ${spokenLine(orphanAlert.lineId).toLowerCase()}`}
           >
             <Text style={s.alertBannerBtnText}>Stop</Text>
           </Pressable>
@@ -1421,7 +1430,7 @@ function FavoriteStopCard({
 
       <AlertPickerModal
         visible={!!pickerLine}
-        subtitle={`${groupsRef.current.find((l) => l.lineCode === pickerLine)?.lineId ?? ''} at ${stop.stopName}`}
+        subtitle={`${lineBadge(groupsRef.current.find((l) => l.lineCode === pickerLine)?.lineId)} at ${stop.stopName}`}
         threshold={alertThreshold}
         onChangeThreshold={setAlertThreshold}
         accentColor={primaryColor}
