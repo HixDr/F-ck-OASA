@@ -15,6 +15,7 @@
  */
 
 import { Alert as RNAlert, Platform, Vibration } from 'react-native';
+import { notifiedLine } from '../utils/lineLabels';
 import { Audio } from 'expo-av';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
 import * as Notifications from 'expo-notifications';
@@ -79,7 +80,9 @@ export interface AlertConfig {
   stopCode: string;
   stopName: string;
   thresholdMin: number;
-  lineId: string;
+  /** The number on the front of the bus, or null when the catalogue could
+   *  not name it. See `lineLabels.ts` — never an internal code. */
+  lineId: string | null;
   routeCodes: string[];
   /** Accent color for the notification (defaults to primary). */
   color?: string;
@@ -330,7 +333,7 @@ async function pollingTask(): Promise<void> {
 
       if (Date.now() >= _watchDeadline) {
         await postNotification(
-          `Alert for ${config.lineId} expired`,
+          `Alert for ${notifiedLine(config.lineId)} expired`,
           `No bus within ${config.thresholdMin} min at ${config.stopName} for `
           + `${Math.round(MAX_WATCH_MS / 60_000)} minutes.`,
           config.color,
@@ -377,13 +380,13 @@ async function pollingTask(): Promise<void> {
 async function fireAlert(config: AlertConfig, match: ArrivalMatch): Promise<void> {
   await playArrivalSound();
   await postNotification(
-    `🚌 ${config.lineId} arriving!`,
+    `🚌 ${notifiedLine(config.lineId)} arriving!`,
     `${match.min} min away at ${config.stopName}`,
     config.color,
   );
   // In-app alert — only visible if the app happens to be in the foreground.
   try {
-    RNAlert.alert(`🚌 ${config.lineId} arriving!`, `${match.min} min away at ${config.stopName}`);
+    RNAlert.alert(`🚌 ${notifiedLine(config.lineId)} arriving!`, `${match.min} min away at ${config.stopName}`);
   } catch { /* no window attached */ }
 
   const cb = _onAlertFired;
@@ -449,7 +452,7 @@ export async function startAlertWatch(
     _wake?.(); // pick the new stop up now, not after the current delay
     try {
       await BackgroundService.updateNotification({
-        taskTitle: `🔔 Monitoring ${config.lineId}`,
+        taskTitle: `🔔 Monitoring ${notifiedLine(config.lineId)}`,
         taskDesc: `Alert when ≤${config.thresholdMin}min at ${config.stopName}`,
       });
     } catch (err) {
@@ -471,7 +474,7 @@ export async function startAlertWatch(
   try {
     await BackgroundService.start(pollingTask, {
       taskName: 'ArrivalAlert',
-      taskTitle: `🔔 Monitoring ${config.lineId}`,
+      taskTitle: `🔔 Monitoring ${notifiedLine(config.lineId)}`,
       taskDesc: `Alert when ≤${config.thresholdMin}min at ${config.stopName}`,
       taskIcon: { name: 'notification_icon', type: 'drawable' },
       color: config.color ?? '#6366F1',

@@ -1,5 +1,7 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { useLines } from './index';
+import { clearCachedLines } from '../services/storage';
 import type { OasaLine } from '../types';
 
 /**
@@ -19,17 +21,14 @@ export function useLinesMap() {
   /**
    * Is the catalogue usable yet?
    *
-   * `buildLineGroups` resolves a badge as `linesMap.get(LineCode)?.LineID ??
-   * LineCode`, and that fallback is the right last resort only when the
-   * catalogue is genuinely unavailable — an internal code beats a blank badge.
-   * While it is merely still in flight the fallback is a wrong answer, and the
-   * routes query can easily win the race: it serves from its own cache. Cards
-   * that keyed "ready" on routes alone painted 937 where 140 belongs for the
-   * length of that gap.
+   * `buildLineGroups` needs it to turn a route's LineCode into the number on
+   * the front of the bus, and a card that renders before it lands shows every
+   * line as unnamed. The routes query can easily win that race — it serves
+   * from its own cache — so readiness is a question worth asking.
    *
    * A hard failure counts as ready on purpose. Without that, a lines request
-   * that cannot succeed — offline, no cache — would hold every badge behind a
-   * skeleton for good instead of showing the fallback and a Retry.
+   * that cannot succeed — offline, no cache — would hold every card behind a
+   * skeleton for good instead of showing what it does know, and the Retry.
    */
   const linesReady = linesMap.size > 0 || isError;
   return {
@@ -40,4 +39,37 @@ export function useLinesMap() {
     linesError: isError,
     refetchLines: refetch,
   };
+}
+
+/**
+ * One attempt, per app session, to replace a catalogue that cannot name the
+ * LineCodes the route lists reference.
+ *
+ * A cached catalogue inside its TTL is not necessarily a correct one. When the
+ * copy on disk predates a reorganisation at OASA it is simply wrong about the
+ * network, and no amount of waiting fixes it — the entry is valid until it
+ * expires, days later. Throwing it away and asking again is the only route
+ * back, and it is cheap: ~150 KB, once.
+ *
+ * Strictly one-shot, and that is not a nicety. OASA publishes route lists and
+ * the line catalogue separately and they do not always agree: on 2026-09-04
+ * stop 240001 referenced LineCodes 1298, 1299 and 1300, none of which
+ * `webGetLines` contained. Those misses are permanent and no refetch resolves
+ * them, so a heal that retried on every miss would refetch the catalogue for
+ * as long as the app stayed open. One try, then the app trusts what it has and
+ * the badges say "unnamed" rather than inventing a number.
+ */
+let _healed = false;
+
+export function useCatalogueHeal(unresolved: readonly string[] | null | undefined): void {
+  const client = useQueryClient();
+  const count = unresolved?.length ?? 0;
+  useEffect(() => {
+    if (count === 0 || _healed) return;
+    _healed = true;
+    void (async () => {
+      await clearCachedLines();
+      await client.invalidateQueries({ queryKey: ['lines'] });
+    })();
+  }, [count, client]);
 }

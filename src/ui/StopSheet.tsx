@@ -13,6 +13,7 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { lineBadge, spokenLine } from '../utils/lineLabels';
 import {
   ActivityIndicator,
   Alert,
@@ -65,7 +66,8 @@ export function useStopSheetInset(open: boolean): number {
  */
 export interface StopSheetLine {
   lineCode: string;
-  lineId: string;
+  /** null when the catalogue cannot name the line. */
+  lineId: string | null;
   lineDescrEng: string;
   /** Minutes to the next bus on this line, null when nothing is reported. */
   nextMin: number | null;
@@ -117,7 +119,7 @@ interface Props {
    * What an arrival alert at this stop would watch. `lineId` is spoken in the
    * notification ("🚌 550 arriving!"). Omit to hide the bell.
    */
-  alert?: { lineId: string; routeCodes: string[] } | null;
+  alert?: { lineId: string | null; routeCodes: string[] } | null;
 }
 
 export default function StopSheet({
@@ -197,7 +199,7 @@ export default function StopSheet({
     if (res.replaced) {
       Alert.alert(
         'Alert moved',
-        `Your alert for ${res.replaced.lineId} at ${res.replaced.stopName} was cancelled.`,
+        `Your alert for ${lineBadge(res.replaced.lineId)} at ${res.replaced.stopName} was cancelled.`,
       );
     }
   }, [alert, threshold, stop.code, stop.name, accentColor]);
@@ -222,7 +224,7 @@ export default function StopSheet({
         onPress={() => onPressLine(line)}
         accessibilityRole="button"
         accessibilityLabel={
-          `Line ${line.lineId}, ${line.lineDescrEng}, `
+          `${spokenLine(line.lineId)}, ${line.lineDescrEng}, `
           + (line.nextMin == null
             ? 'no arrival information'
             : line.nextMin <= 0
@@ -232,7 +234,7 @@ export default function StopSheet({
         accessibilityHint="Opens the live map for this line"
       >
         <View style={[s.lineBadge, { backgroundColor: accentColor }]}>
-          <Text style={[s.lineBadgeText, { color: onAccentColor }]} maxFontSizeMultiplier={fontScaleCap.badge}>{line.lineId}</Text>
+          <Text style={[s.lineBadgeText, { color: onAccentColor }]} maxFontSizeMultiplier={fontScaleCap.badge}>{lineBadge(line.lineId)}</Text>
         </View>
         <Text style={s.lineDescr} numberOfLines={1}>{line.lineDescrEng}</Text>
         {line.nextMin != null ? (
@@ -310,7 +312,7 @@ export default function StopSheet({
       {alert && (
         <AlertPickerModal
           visible={showPicker}
-          subtitle={`${alert.lineId} at ${stop.name}`}
+          subtitle={`${lineBadge(alert.lineId)} at ${stop.name}`}
           threshold={threshold}
           onChangeThreshold={setThreshold}
           accentColor={accentColor}

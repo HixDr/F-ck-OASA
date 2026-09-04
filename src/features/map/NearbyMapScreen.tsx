@@ -10,7 +10,7 @@ import { Stack, useRouter } from 'expo-router';
 import { Polyline } from 'react-native-maps';
 import { colors } from '../../theme';
 import { useArrivals, useClosestStops, useRoutesForStop } from '../../hooks';
-import { useLinesMap } from '../../hooks/useLinesMap';
+import { useLinesMap, useCatalogueHeal } from '../../hooks/useLinesMap';
 import { useInitialRegion } from '../../hooks/useInitialRegion';
 import { useUserLocation } from '../../hooks/useUserLocation';
 import { getLocation } from '../../services/location';
@@ -172,13 +172,15 @@ export default function NearbyMapScreen() {
   // merging it here would put stop A's times on stop B's line list.
   const arrivals = arrivalsQuery.isPlaceholderData ? undefined : arrivalsQuery.data;
 
-  const lines = useMemo(() => {
+  const built = useMemo(() => {
     if (!stopRoutes) return null;
     /* Not until the line catalogue is usable: a badge built without it reads
        out the internal LineCode instead of the line number. */
     if (!linesReady) return null;
-    return buildLineGroups(stopRoutes, arrivals ?? [], linesMap).lines;
+    return buildLineGroups(stopRoutes, arrivals ?? [], linesMap);
   }, [stopRoutes, arrivals, linesMap, linesReady]);
+  const lines = built?.lines ?? null;
+  useCatalogueHeal(built?.unresolved);
 
   /**
    * Every route calling here. Unlike Live, this screen is not scoped to a line,
@@ -196,7 +198,7 @@ export default function NearbyMapScreen() {
   const openLine = useCallback((line: StopSheetLine) => {
     const info = linesMap.get(line.lineCode);
     router.push({ pathname: '/map/[lineCode]', params: {
-      lineCode: line.lineCode, lineId: line.lineId,
+      lineCode: line.lineCode, lineId: line.lineId ?? '',
       lineDescr: info?.LineDescrEng ?? info?.LineDescr ?? line.lineDescrEng,
     }});
   }, [linesMap, router]);
