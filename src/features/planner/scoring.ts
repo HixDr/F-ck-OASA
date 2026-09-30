@@ -11,7 +11,7 @@
  */
 
 import { parseSchedule, hhmmToMin, type LineSchedule } from '../../utils/scheduleUtils';
-import { getCachedSchedule, getCachedRoutes } from '../../services/storage';
+import { getCachedScheduleAnyDay, getCachedRoutes } from '../../services/storage';
 import { getStopArrivals, rideTimeFromArrivals } from '../../services/api';
 import type { OasaArrival, OasaDailySchedule, OasaRoute } from '../../types';
 import type { TripLeg, TripOption, WaitSource } from './types';
@@ -124,7 +124,7 @@ export async function buildPlanContext(
   const routes = new Map<string, OasaRoute[] | null>();
   await Promise.all(
     [...lines].map(async (lc) => {
-      const [sched, rts] = await Promise.all([getCachedSchedule(lc), getCachedRoutes(lc)]);
+      const [sched, rts] = await Promise.all([getCachedScheduleAnyDay(lc), getCachedRoutes(lc)]);
       schedules.set(lc, sched);
       routes.set(lc, rts);
     }),

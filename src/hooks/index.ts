@@ -12,9 +12,10 @@ import {
   type QueryClient,
 } from '@tanstack/react-query';
 import * as api from '../services/api';
-import { getCachedLines, setCachedLines, getCachedSchedule, setCachedSchedule, getCachedStops, setCachedStops, getCachedRoutes, setCachedRoutes, getCachedRoutesForStop, setCachedRoutesForStop, getCachedArrivals, setCachedArrivals, getAllCachedStops, isOfflineDataDownloaded } from '../services/storage';
+import { getCachedLines, setCachedLines, getCachedSchedule, getCachedScheduleAnyDay, setCachedSchedule, getCachedStops, setCachedStops, getCachedRoutes, setCachedRoutes, getCachedRoutesForStop, setCachedRoutesForStop, getCachedArrivals, setCachedArrivals, getAllCachedStops, isOfflineDataDownloaded } from '../services/storage';
 import { isOnlineConfirmed } from '../services/network';
 import { haversineM } from '../utils/geo';
+import { athensServiceDay } from '../utils/scheduleUtils';
 import type { OasaArrival, OasaLine, OasaMLInfo, OasaDailySchedule, OasaNearbyStop, OasaRoute } from '../types';
 
 /** How often live arrival data is refreshed, everywhere in the app. */
@@ -578,7 +579,9 @@ export function useMLInfo() {
  */
 export function useSchedule(lineCode: string | undefined, enabled = true) {
   return useQuery<OasaDailySchedule>({
-    queryKey: ['schedule', lineCode],
+    // The service day is in the key: this stays in memory for 24h, which
+    // otherwise carried one day's timetable into the next.
+    queryKey: ['schedule', lineCode, athensServiceDay()],
     queryFn: async () => {
       // When offline data has been pre-downloaded, prefer cache unconditionally
       if (isOfflineDataDownloaded()) {
@@ -599,8 +602,9 @@ export function useSchedule(lineCode: string | undefined, enabled = true) {
         if (api.isUsableSchedule(fresh)) setCachedSchedule(lineCode!, fresh);
         return fresh;
       } catch (err) {
-        // Offline fallback
-        const cached = await getCachedSchedule(lineCode!);
+        // Offline fallback — possibly another day's timetable, still better
+        // than none.
+        const cached = await getCachedScheduleAnyDay(lineCode!);
         if (api.isUsableSchedule(cached)) return cached!;
         throw err;
       }
