@@ -100,6 +100,13 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        # The action's default is 'tools platform-tools'. The legacy 'tools'
+        # package is gone from the SDK repository ("Failed to find package
+        # 'tools'" with cmdline-tools 16.0), which fails the step before
+        # anything is built. Gradle installs platforms, build-tools and the NDK
+        # it needs on its own.
+        with:
+          packages: platform-tools
 
       - name: Install ccache
         run: |
