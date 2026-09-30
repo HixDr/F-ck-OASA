@@ -15,6 +15,7 @@ import { onAppActiveChange } from './appState';
    reaches the screen. The module is deliberately free of React and of
    react-native, so this costs nothing at load. */
 import { migrateLayout } from '../features/home/layout';
+import { athensServiceDay } from '../utils/scheduleUtils';
 
 /* ── Keys ────────────────────────────────────────────────────── */
 
@@ -637,7 +638,29 @@ export function warmPlannerCaches(): Promise<void> {
 
 /* ── Schedule Cache ──────────────────────────────────────────── */
 
-export function getCachedSchedule(lineCode: string): Promise<OasaDailySchedule | null> {
+/** True when the cached schedule for `lineCode` was fetched in today's
+ *  service day. Nothing else says which day a cached timetable is for. */
+function isScheduleFromToday(lineCode: string): boolean {
+  const at = _schedFetchedAt[lineCode];
+  return at != null && athensServiceDay(at) === athensServiceDay();
+}
+
+/**
+ * Today's cached schedule, or null.
+ *
+ * A copy from another day is not returned: the cache is keyed by line alone,
+ * and it used to hand Sunday's timetable to every reader all week, because a
+ * reader that found any usable copy never asked the network again.
+ */
+export async function getCachedSchedule(lineCode: string): Promise<OasaDailySchedule | null> {
+  if (!isScheduleFromToday(lineCode)) return null;
+  return _schedCache.get(lineCode);
+}
+
+/** The cached schedule whatever day it was fetched on. Only for when the
+ *  network has already failed — a timetable that may be another day's beats
+ *  no timetable while offline. */
+export function getCachedScheduleAnyDay(lineCode: string): Promise<OasaDailySchedule | null> {
   return _schedCache.get(lineCode);
 }
 
@@ -880,7 +903,9 @@ const SCHED_PREFETCH_TTL = 6 * 60 * 60 * 1000;
 export async function prefetchFavoriteSchedules(opts: { signal?: AbortSignal } = {}): Promise<void> {
   try {
     const cutoff = Date.now() - SCHED_PREFETCH_TTL;
-    const stale = getFavorites().filter((f) => (_schedFetchedAt[f.lineCode] ?? 0) < cutoff);
+    const stale = getFavorites().filter(
+      (f) => (_schedFetchedAt[f.lineCode] ?? 0) < cutoff || !isScheduleFromToday(f.lineCode),
+    );
     if (stale.length === 0) return;
 
     await Promise.allSettled(

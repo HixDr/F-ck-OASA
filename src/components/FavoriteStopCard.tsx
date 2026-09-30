@@ -83,6 +83,7 @@ import { getRoutes, getDailySchedule, isUsableSchedule } from '../services/api';
 import {
   updateFavoriteStop,
   getCachedSchedule,
+  getCachedScheduleAnyDay,
   setCachedSchedule,
   getCachedRoutes,
   setCachedRoutes,
@@ -103,7 +104,7 @@ import {
   type AlertConfig,
 } from '../services/notifications';
 import { hapticSuccess, hapticError } from '../services/haptics';
-import { parseSchedule, athensNowMin, type LineSchedule } from '../utils/scheduleUtils';
+import { parseSchedule, athensNowMin, athensServiceDay, type LineSchedule } from '../utils/scheduleUtils';
 import StopControlsSheet, { type StopSheetMode } from './StopControlsSheet';
 import AlertPickerModal from './AlertPickerModal';
 import { s } from './FavoriteStopCard.styles';
@@ -639,7 +640,10 @@ function FavoriteStopCard({
     return () => { cancelled = true; };
   }, [linesKey, stop.stopCode]);
 
-  /* Timetables — fetched once per set of lines, cache first. */
+  /* Timetables — fetched once per set of lines and service day, cache first.
+     The day is a dependency so a card left open past the rollover picks up
+     the new day's timetable instead of keeping yesterday's. */
+  const serviceDay = athensServiceDay(nowMs);
   useEffect(() => {
     if (!linesKey) return;
     let cancelled = false;
@@ -674,7 +678,9 @@ function FavoriteStopCard({
                 setCachedSchedule(line.lineCode, fresh);
               }
             } catch {
-              // No timetable for this line right now — the row just omits it.
+              // Offline: another day's copy beats nothing. No copy at all and
+              // the row just omits the timetable.
+              data = await getCachedScheduleAnyDay(line.lineCode).catch(() => null);
             }
           }
           if (isUsableSchedule(data)) next.set(line.lineCode, { data: data!, direction });
@@ -683,7 +689,7 @@ function FavoriteStopCard({
       if (!cancelled) setRawSchedules(next);
     })();
     return () => { cancelled = true; ctrl.abort(); };
-  }, [linesKey]);
+  }, [linesKey, serviceDay]);
 
   /* Next departure is a function of the clock, so it is derived here rather
      than frozen into state when the timetable was fetched. */

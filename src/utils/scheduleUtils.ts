@@ -38,6 +38,37 @@ export function athensNowMin(now: Date = new Date()): number {
   return now.getHours() * 60 + now.getMinutes();
 }
 
+/** Service runs past midnight ("24:30" departures), so a day's timetable stays
+ *  current until this hour of the next calendar day. */
+const SERVICE_DAY_ROLLOVER_H = 3;
+
+/**
+ * The Athens service day `ms` falls in, as "YYYY-MM-DD".
+ *
+ * `getDailySchedule` answers for the day it is asked on — weekday, Saturday and
+ * Sunday are different timetables (line 201: 29, 26 and 14 departures). A copy
+ * saved on Sunday is not Wednesday's timetable, so every cached schedule is
+ * only as good as the service day it was fetched in.
+ */
+export function athensServiceDay(ms: number = Date.now()): string {
+  const shifted = new Date(ms - SERVICE_DAY_ROLLOVER_H * 60 * 60 * 1000);
+  try {
+    // en-CA formats as YYYY-MM-DD.
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Europe/Athens',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(shifted);
+  } catch {
+    // Hermes without full ICU — device local date.
+    const y = shifted.getFullYear();
+    const m = String(shifted.getMonth() + 1).padStart(2, '0');
+    const d = String(shifted.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+}
+
 /** Parse "HH:MM" into minutes since midnight, or null. */
 export function hhmmToMin(t: string): number | null {
   const m = t.match(/^(\d{1,2}):(\d{2})$/);
