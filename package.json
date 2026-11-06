@@ -1,6 +1,6 @@
 {
   "name": "fck-oasa",
-  "version": "1.2.15",
+  "version": "1.2.16",
   "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
