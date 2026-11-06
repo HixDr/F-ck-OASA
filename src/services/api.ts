@@ -20,6 +20,7 @@ import type {
   OasaDailySchedule,
   OasaBulkStop,
 } from '../types';
+import { codesAsText } from './oasaCodes';
 
 /**
  * The only host this app talks to.
@@ -187,7 +188,8 @@ async function api<T>(
   if (expect === 'array' && !Array.isArray(parsed)) throw new ApiShapeError(action);
   if (expect === 'object' && typeof parsed !== 'object') throw new ApiShapeError(action);
 
-  return parsed as T;
+  // OASA now sends some codes as numbers; the app compares them as text.
+  return codesAsText(parsed) as T;
 }
 
 /* ── Static / Reference Endpoints ────────────────────────────── */
