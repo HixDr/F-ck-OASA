@@ -16,6 +16,7 @@ import { onAppActiveChange } from './appState';
    react-native, so this costs nothing at load. */
 import { migrateLayout } from '../features/home/layout';
 import { athensServiceDay } from '../utils/scheduleUtils';
+import { codeAsText, codesAsText } from './oasaCodes';
 
 /* ── Keys ────────────────────────────────────────────────────── */
 
@@ -98,6 +99,29 @@ function migrateStopLayouts(stops: FavoriteStop[]): FavoriteStop[] {
   );
 }
 
+/**
+ * Codes saved while OASA sent numbers are numbers on disk — see `oasaCodes.ts`.
+ * A saved line keyed by `1173` is not found by `isFavorite("1173")`, and a stop
+ * whose filter says `[1173]` hides the `"1173"` its routes now name.
+ */
+function favoriteCodesAsText(favs: FavoriteLine[]): FavoriteLine[] {
+  if (!Array.isArray(favs)) return [];
+  return favs.map((f) =>
+    f ? { ...f, lineCode: codeAsText(f.lineCode) ?? f.lineCode, lineId: codeAsText(f.lineId) ?? f.lineId } : f,
+  );
+}
+
+function stopCodesAsText(stops: FavoriteStop[]): FavoriteStop[] {
+  if (!Array.isArray(stops)) return [];
+  return stops.map((st) => {
+    if (!st) return st;
+    const visibleLines = Array.isArray(st.visibleLines)
+      ? st.visibleLines.map(codeAsText).filter((c): c is string => c != null)
+      : st.visibleLines;
+    return { ...st, stopCode: codeAsText(st.stopCode) ?? st.stopCode, visibleLines };
+  });
+}
+
 /** Must be called once at app start (e.g. in _layout). */
 export async function initStorage(): Promise<void> {
   if (_initialized) return;
@@ -114,9 +138,9 @@ export async function initStorage(): Promise<void> {
       OFFLINE_FLAG_KEY,
     ]);
     const blob = new Map(pairs);
-    _favorites = parseJson(blob.get(FAVORITES_KEY), [] as FavoriteLine[]);
+    _favorites = favoriteCodesAsText(parseJson(blob.get(FAVORITES_KEY), [] as FavoriteLine[]));
     _favoriteStops = migrateStopLayouts(
-      parseJson(blob.get(FAVORITE_STOPS_KEY), [] as FavoriteStop[]),
+      stopCodesAsText(parseJson(blob.get(FAVORITE_STOPS_KEY), [] as FavoriteStop[])),
     );
     _stamps = parseJson(blob.get(STAMPS_KEY), [] as MapStamp[]);
     _toggles = parseJson(blob.get(TOGGLES_KEY), {} as Record<string, boolean>);
@@ -410,7 +434,7 @@ export async function getCachedLines(): Promise<OasaLine[] | null> {
        where the rider expects the number on the front of the bus, 937 for
        140. `setCachedLines` will not write one, and this will not serve one. */
     if (!Array.isArray(parsed) || parsed.length === 0) return null;
-    return parsed as OasaLine[];
+    return codesAsText(parsed) as OasaLine[];
   } catch {
     return null;
   }
@@ -515,7 +539,7 @@ const DICT_PERSIST_DEBOUNCE_MS = 1000;
  * - Runtime writes are debounced (1 s) to avoid blocking the JS thread on large files.
  * - Bulk writes (used by the download orchestrator) are immediate and atomic.
  */
-function createDictCache<T>(fileName: string) {
+function createDictCache<T>(fileName: string, normalize: (v: T) => T = (v) => v) {
   const file = new File(Paths.document, fileName);
   let _dict: Record<string, T> | null = null;
   let _loading: Promise<Record<string, T>> | null = null;
@@ -536,7 +560,10 @@ function createDictCache<T>(fileName: string) {
         recoverTempFile(file);
         if (file.exists) {
           const raw = JSON.parse(await file.text());
-          if (raw && typeof raw === 'object' && !Array.isArray(raw)) parsed = raw as Record<string, T>;
+          if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+            parsed = {};
+            for (const [k, v] of Object.entries(raw)) parsed[k] = normalize(v as T);
+          }
         }
       } catch (err) {
         // Corrupt file. initStorage's integrity check has already cleared the
@@ -614,10 +641,12 @@ function createDictCache<T>(fileName: string) {
   return cache;
 }
 
-const _schedCache = createDictCache<OasaDailySchedule>(SCHEDULES_FILE);
-const _routesCache = createDictCache<OasaRoute[]>(ROUTES_FILE);
-const _routesForStopCache = createDictCache<OasaRoute[]>(ROUTES_FOR_STOP_FILE);
-const _stopsCache = createDictCache<OasaStop[]>(ROUTE_STOPS_FILE);
+/* The four OASA caches may hold responses saved while the API sent numbers.
+   Not the shape cache: its points are this app's own numbers. */
+const _schedCache = createDictCache<OasaDailySchedule>(SCHEDULES_FILE, codesAsText);
+const _routesCache = createDictCache<OasaRoute[]>(ROUTES_FILE, codesAsText);
+const _routesForStopCache = createDictCache<OasaRoute[]>(ROUTES_FOR_STOP_FILE, codesAsText);
+const _stopsCache = createDictCache<OasaStop[]>(ROUTE_STOPS_FILE, codesAsText);
 /** One entry per route direction — see the Route Shape Cache section below. */
 export interface ShapePoint { lat: number; lng: number }
 const _shapeCache = createDictCache<ShapePoint[]>(ROUTE_SHAPE_FILE);
@@ -831,7 +860,7 @@ export async function getCachedArrivals(stopCode: string): Promise<CachedArrival
     const data = JSON.parse(raw) as CachedArrivals;
     if (!data || !Number.isFinite(data.ts) || !Array.isArray(data.arrivals)) return null;
     if (Date.now() - data.ts > ARRIVALS_MAX_AGE_MS) return null;
-    return data;
+    return { ts: data.ts, arrivals: codesAsText(data.arrivals) };
   } catch {
     return null;
   }
@@ -973,7 +1002,7 @@ export function getAllCachedStops(): Promise<OasaBulkStop[] | null> {
       if (!Array.isArray(parsed)) return null;
       // Superseded by a write or a clear while we were reading.
       if (gen !== _allStopsGen) return _allStopsMemo;
-      _allStopsMemo = parsed as OasaBulkStop[];
+      _allStopsMemo = codesAsText(parsed) as OasaBulkStop[];
       return _allStopsMemo;
     } catch (err) {
       console.warn('[offline] Failed to read cached stops:', err);
@@ -1086,10 +1115,11 @@ const asArray = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 function validFavorite(v: unknown): FavoriteLine | null {
   if (!v || typeof v !== 'object') return null;
   const o = v as Record<string, unknown>;
-  if (!isStr(o.lineCode)) return null;
+  const lineCode = codeAsText(o.lineCode);
+  if (!lineCode) return null;
   return {
-    lineCode: o.lineCode,
-    lineId: isStr(o.lineId) ? o.lineId : o.lineCode,
+    lineCode,
+    lineId: codeAsText(o.lineId) ?? lineCode,
     lineDescr: isStr(o.lineDescr) ? o.lineDescr : '',
     lineDescrEng: isStr(o.lineDescrEng) ? o.lineDescrEng : '',
   };
@@ -1113,11 +1143,15 @@ function validStopLayout(v: unknown): StopLayout | null {
 function validFavoriteStop(v: unknown): FavoriteStop | null {
   if (!v || typeof v !== 'object') return null;
   const o = v as Record<string, unknown>;
-  if (!isStr(o.stopCode) || !isNum(o.lat) || !isNum(o.lng)) return null;
-  const lines = Array.isArray(o.visibleLines) ? o.visibleLines.filter(isStr) : null;
+  const stopCode = codeAsText(o.stopCode);
+  if (!stopCode || !isNum(o.lat) || !isNum(o.lng)) return null;
+  // A backup made while OASA sent numbers holds numeric codes — see `oasaCodes.ts`.
+  const lines = Array.isArray(o.visibleLines)
+    ? o.visibleLines.map(codeAsText).filter((c): c is string => c != null)
+    : null;
   return {
-    stopCode: o.stopCode,
-    stopName: isStr(o.stopName) ? o.stopName : o.stopCode,
+    stopCode,
+    stopName: isStr(o.stopName) ? o.stopName : stopCode,
     lat: o.lat,
     lng: o.lng,
     visibleLines: lines,
